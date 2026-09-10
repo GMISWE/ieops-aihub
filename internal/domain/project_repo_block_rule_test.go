@@ -1,33 +1,39 @@
 package domain
 
-// aihub#543 probe wave 2 — the `docs/mcp-cards/pf_create_project.md` claims about
-// the repos structured block.
+// aihub#543 probe wave 2, retriggered by aihub#588 — the
+// `docs/mcp-cards/pf_create_project.md` claims about the repos structured block.
 //
-//	"The `repos` description carries an **all-or-nothing** rule: if any structured
-//	 field (`positioning`, `tech_stack`, `main_modules`, `change_scenarios`,
-//	 `generated_at`, `generated_commit`) is set, all four content fields are
-//	 required, in English."
+//	"if any of the four content fields (`positioning`, `tech_stack`,
+//	 `main_modules`, `change_scenarios`) is set, all four content fields are
+//	 required, in English"
+//	"a repo entry carrying only `generated_at` or only `generated_commit` is
+//	 accepted with no content field at all"
 //	"The all-or-nothing `repos` rule is unenforced by the schema and enforced by
 //	 the server…"
-//	"The all-or-nothing rule fires on a NARROWER trigger than the description's
-//	 wording…"
 //
-// 🔴 THE MEASUREMENT THAT PUT THE THIRD SENTENCE ON THE CARD. The published
-// `repos` description enumerates SIX fields as the structured block and then says
+// 🔴 THE MEASUREMENT, in two acts. Act one (aihub#582, 2026-09-10): the published
+// `repos` description enumerated SIX fields as the structured block and then said
 // "If any structured field is set, all four content fields are required
-// (English)". The enforcement reads four: hasDescriptionBlock is
+// (English)" — while the enforcement reads four: hasDescriptionBlock is
 // `Positioning != "" || len(TechStack) > 0 || len(MainModules) > 0 ||
 // len(ChangeScenarios) > 0`, and neither generation-metadata field appears in it.
-// So a caller sending only `generated_commit` is told by hop 1 that four content
-// fields have just become required, and the server accepts the repo with none of
-// them. Measured 2026-09-10 by the subtests below, both directions.
+// A caller sending only `generated_commit` was told by hop 1 that four content
+// fields had just become required, and the server accepted the repo with none of
+// them. Act two (aihub#588, same day, owner ruling ①): re-measured on the current
+// tree by these same subtests — the trigger is unchanged — and the DESCRIPTION
+// moved to the measured rule while the enforcement deliberately stayed put
+// (today's enforcement is LOOSER than the old wording, so no caller was hurt;
+// widening it would newly refuse metadata-only entries existing callers may
+// send). The published half of that ruling is held next door by
+// TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema
+// (internal/mcp/project_publication_contract_test.go), which also refuses the
+// old sentence outright.
 //
-// The card now states the measured trigger next to the published one rather than
-// paraphrasing the published one as if it were the behaviour, and this arm holds
-// BOTH: the four that trigger and the two that do not. Writing only the first
-// half would have been the more comfortable arm and it is the one that lets the
-// gap close silently, because "generated_at alone is accepted" is exactly the
-// case an all-or-nothing arm never sends.
+// This arm holds the ENFORCEMENT against the card's partition, in BOTH
+// directions: the four that trigger and the two that do not. Writing only the
+// first half would have been the more comfortable arm and it is the one that
+// lets the partition drift silently, because "generated_at alone is accepted"
+// is exactly the case an all-or-nothing arm never sends.
 //
 // ⚠️ WHAT THIS ARM DOES NOT HOLD: "in English". The published text says it, the
 // card repeats it, and nothing in this package inspects the language of a string
@@ -50,8 +56,11 @@ import (
 // repoCardPath is the card this arm reads its field partition out of.
 var repoCardPath = filepath.Join("..", "..", "docs", "mcp-cards", "pf_create_project.md")
 
-// repoBlockTriggerListRe captures the card's enumeration of the structured block.
-var repoBlockTriggerListRe = regexp.MustCompile(`if any structured field \(([^)]*)\)`)
+// repoBlockTriggerListRe captures the card's enumeration of the four content
+// fields inside the corrected rule clause. Anchored on the aihub#588 wording; the
+// pre-588 clause ("if any structured field (…)") no longer exists in the card and
+// its return here would mean the false sentence is back.
+var repoBlockTriggerListRe = regexp.MustCompile(`if any of the four content fields \(([^)]*)\)`)
 
 // repoBlockNonTriggerRe captures the two fields the card's measured bullet says
 // are accepted alone.
@@ -79,29 +88,42 @@ func repoBlockFieldPartition(t *testing.T) (all, nonTriggers, triggers []string)
 
 	m := repoBlockTriggerListRe.FindStringSubmatch(flat)
 	if m == nil {
-		t.Fatal("the card no longer states \"if any structured field (…)\". That clause is the " +
-			"population this arm walks; without it the loops below run zero times and report " +
-			"green about a rule they never sent a payload for.")
+		t.Fatal("the card no longer states \"if any of the four content fields (…)\" — the " +
+			"aihub#588 rule clause. That clause is the trigger population this arm walks; " +
+			"without it the loops below run zero times and report green about a rule they " +
+			"never sent a payload for. If the clause was reworded, move this regex with it; " +
+			"if it reverted to the pre-588 \"any structured field\" form, that sentence was " +
+			"measured false and the publication arm next door refuses it too.")
 	}
 	for _, f := range repoBlockBackticked.FindAllStringSubmatch(m[1], -1) {
-		all = append(all, f[1])
+		triggers = append(triggers, f[1])
 	}
 
 	n := repoBlockNonTriggerRe.FindStringSubmatch(flat)
 	if n == nil {
-		t.Fatal("the card's hop-4 bullet no longer names the two fields accepted alone, in the " +
+		t.Fatal("the card no longer names the two fields accepted alone, in the " +
 			"form \"only `x` or only `y`\". That pair is the measured half of this arm — the " +
 			"half a comfortable version would omit — so an extraction that cannot find it must " +
 			"fail rather than fall back to checking only the easy direction.")
 	}
 	nonTriggers = []string{n[1], n[2]}
 
-	skip := map[string]bool{n[1]: true, n[2]: true}
-	for _, f := range all {
-		if !skip[f] {
-			triggers = append(triggers, f)
+	seen := map[string]bool{}
+	for _, f := range triggers {
+		if seen[f] {
+			t.Fatalf("the card's trigger clause names %q twice (%v)", f, triggers)
 		}
+		seen[f] = true
 	}
+	for _, f := range nonTriggers {
+		if seen[f] {
+			t.Fatalf("the card puts %q on BOTH sides of the partition (triggers=%v, "+
+				"accepted-alone=%v) — the two clauses are describing different rules", f,
+				triggers, nonTriggers)
+		}
+		seen[f] = true
+	}
+	all = append(append(all, triggers...), nonTriggers...)
 	if len(all) != 6 || len(nonTriggers) != 2 || len(triggers) != 4 {
 		t.Fatalf("the card partitions the block into %d field(s) = %d trigger(s) + %d "+
 			"non-trigger(s) (%v / %v). The rule is named \"all-or-nothing\" over FOUR content "+
@@ -168,29 +190,41 @@ func repoBlockCompletePayload(t *testing.T, triggers []string) json.RawMessage {
 // the card names, one at a time, and asserts the verdict the card's partition
 // predicts.
 //
-// MUTANTS (applied to this tree; the verdict is what RAN):
+// MUTANTS (re-run for aihub#588, 2026-09-10 — each applied to this tree, shown
+// RED, and reverted; `git diff --stat` checked non-empty before each run):
 //
 //	M1 enforcement: delete the `len(r.ChangeScenarios) > 0` disjunct from
 //	   hasDescriptionBlock                       RED  a_content_field_alone_is_refused/change_scenarios
 //	M2 enforcement: add `r.GeneratedCommit != ""` to hasDescriptionBlock — the
-//	   change that would make the PUBLISHED wording true
+//	   change that would have made the PRE-588 published wording true, and the
+//	   option the aihub#588 ruling rejected
 //	                                             RED  generation_metadata_alone_is_accepted/generated_commit
 //	                                                  🔴 which is the point of that
-//	                                                  subtest: it pins the measured
-//	                                                  gap, so closing the gap is a
-//	                                                  change somebody signs on the
-//	                                                  card as well as in the code
+//	                                                  subtest: the description now
+//	                                                  PROMISES the acceptance, so
+//	                                                  widening the trigger breaks a
+//	                                                  stated contract and must move
+//	                                                  the descriptions, the card and
+//	                                                  this arm in one signed diff
 //	M3 enforcement: make validateDescriptionBlock return nil unconditionally
 //	                                             RED  all four cases of
 //	                                                  a_content_field_alone_is_refused
 //	M4 enforcement: require a fifth field in validateDescriptionBlock
 //	                                             RED  the_complete_block_is_accepted
-//	M5 publication: drop `generated_at` from the card's six-field list
+//	M5 publication: drop `tech_stack` from the card's trigger clause
 //	                                             RED  the partition floor in
-//	                                                  repoBlockFieldPartition
-//	M6 publication: reword the card's measured bullet to name `positioning` as one
-//	   of the two accepted alone                 RED  a_content_field_alone_is_refused/positioning
-//	                                                  AND generation_metadata_alone_is_accepted
+//	                                                  repoBlockFieldPartition (3+2 ≠ 6)
+//	M6 publication: reword the card's accepted-alone pair to name `positioning`
+//	                                             RED  the both-sides fatal in
+//	                                                  repoBlockFieldPartition —
+//	                                                  `positioning` cannot be both a
+//	                                                  trigger and accepted alone
+//	M7 publication: restore the pre-588 clause ("if any structured field (…)")
+//	   in place of the corrected one             RED  the trigger-clause fatal in
+//	                                                  repoBlockFieldPartition, and
+//	                                                  the publication arm next door
+//	                                                  refuses the same sentence on
+//	                                                  the live schema side
 //	G1 control:     reword the card's "Policy" section
 //	                                           GREEN  both extractions are anchored on
 //	                                                  their own clauses, not on a
@@ -224,12 +258,15 @@ func TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly(t *testing.T) {
 		for _, field := range nonTriggers {
 			t.Run(field, func(t *testing.T) {
 				if aerr := validateRepos(repoBlockPayload(t, field)); aerr != nil {
-					t.Errorf("a repo carrying only %s was refused with %s (%q). The card records "+
-						"this as MEASURED behaviour that the published wording overstates: hop 1 "+
-						"says \"any structured field\" and hasDescriptionBlock reads four. If that "+
-						"has been fixed, this is the good news — but it is a contract change, and "+
-						"the card's bullet and the published description have to move with it "+
-						"rather than after it.", field, aerr.Code, aerr.Message)
+					t.Errorf("a repo carrying only %s was refused with %s (%q). Since aihub#588 "+
+						"the published description PROMISES this acceptance outright — \"the two "+
+						"generation-metadata fields do not trigger that rule\" — so a refusal "+
+						"here is no longer just a wording gap, it breaks the stated contract. "+
+						"Widening the trigger was the option the owner ruled OUT (it newly "+
+						"refuses metadata-only entries existing callers may send); if it is "+
+						"being taken up anyway, the descriptions on both tools, the card and "+
+						"this arm all have to move in the same change.",
+						field, aerr.Code, aerr.Message)
 				}
 			})
 		}

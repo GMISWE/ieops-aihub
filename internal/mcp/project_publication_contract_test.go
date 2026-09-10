@@ -281,18 +281,29 @@ func readFileForArm(t *testing.T, path, what string) string {
 	return string(raw)
 }
 
-// repoBlockRuleFieldsRe reads the card's enumeration of the structured block.
-var repoBlockRuleFieldsRe = regexp.MustCompile(`if any structured field \(([^)]*)\)`)
+// repoBlockRuleFieldsRe and repoBlockAcceptedAloneRe read the card's partition of
+// the structured block: the four content fields out of the aihub#588 rule clause,
+// and the two generation-metadata fields out of the accepted-alone sentence. Their
+// union is the six-field block. Anchored on the corrected wording — the pre-588
+// clause ("if any structured field (…)") was measured false and its return would
+// mean the false sentence is back.
+var (
+	repoBlockRuleFieldsRe    = regexp.MustCompile(`if any of the four content fields \(([^)]*)\)`)
+	repoBlockAcceptedAloneRe = regexp.MustCompile("only `([a-z_]+)` or only `([a-z_]+)`")
+)
 
 // TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema is the three sentences
 // about the all-or-nothing rule's PUBLICATION.
 //
 // The enforcement half is next door in `internal/domain/project_repo_block_rule_test.go`
-// (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`), which also
-// records the measured gap between the two: hop 1 says "any structured field" and
-// the server reads four of the six. This arm holds the publication side — that the
-// rule is stated in prose, on every tool that takes `repos`, and that the schema
-// expresses none of it.
+// (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`). Until aihub#588
+// the two sides disagreed — hop 1 said "any structured field" while the server
+// reads four of the six — and the owner's 2026-09-10 ruling moved the DESCRIPTION
+// to the measured rule, leaving enforcement alone. This arm holds the publication
+// side of that ruling: the rule is stated in prose on every tool that takes
+// `repos`, the stated trigger is the measured one (four content fields, with the
+// two generation-metadata fields explicitly non-triggering), the pre-588 sentence
+// stays gone, and the schema expresses none of it.
 //
 // ⚠️ SCOPE. The card's "the same limitation that produced `pf_ship` and
 // `pf_batch_create_work_items` as separate tools" is a claim about why two tools
@@ -300,19 +311,30 @@ var repoBlockRuleFieldsRe = regexp.MustCompile(`if any structured field \(([^)]*
 // is the limitation itself: the conditional requirement is absent from the flat
 // `required` array and present in prose.
 //
-// MUTANTS (applied to this tree; the verdict is what RAN):
+// MUTANTS (re-run for aihub#588, 2026-09-10 — each applied to this tree, shown
+// RED, and reverted; `git diff --stat` checked non-empty before each run):
 //
 //	M7 enforcement: add `positioning` to pf_create_project's `required` list
 //	                                             RED  the_required_array_names_only_the_name
 //	M8 enforcement: give the `repos` prop an `items` sub-schema
 //	                                             RED  the_repos_schema_expresses_no_conditional
-//	M9 enforcement: delete the all-or-nothing sentence from pf_update_project's
-//	   `repos` description only                  RED  every_tool_that_takes_repos_states_the_rule
-//	M10 publication: drop `main_modules` from the card's six-field list
+//	M9 publication: restore the pre-588 sentence ("If any structured field is
+//	   set, …") on pf_update_project's `repos` description only
 //	                                             RED  every_tool_that_takes_repos_states_the_rule
-//	                                                  — the field names come from the
-//	                                                  card, so the card and the
-//	                                                  descriptions are compared
+//	                                                  /pf_update_project, three times —
+//	                                                  the corrected trigger clause is
+//	                                                  gone, the metadata non-trigger
+//	                                                  half is gone, AND the false
+//	                                                  sentence is named outright
+//	M10 publication: drop the "do not trigger" half from pf_create_project's
+//	   `repos` description only                  RED  every_tool_that_takes_repos_states_the_rule
+//	                                                  /pf_create_project
+//	M11 publication: drop `main_modules` from the card's trigger clause
+//	                                             RED  the four-field floor on the
+//	                                                  clause extraction — the field
+//	                                                  names come from the card, so
+//	                                                  the card and the descriptions
+//	                                                  are compared
 //	G2 control:     reword the card's hop 2-3 paragraph
 //	                                           GREEN  the extraction is anchored on the
 //	                                                  rule's own clause
@@ -320,17 +342,30 @@ func TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema(t *testing.T) {
 	card := strings.Join(strings.Fields(readFileForArm(t, projectCardPath, "the create-project card")), " ")
 	m := repoBlockRuleFieldsRe.FindStringSubmatch(card)
 	if m == nil {
-		t.Fatal("the card no longer states \"if any structured field (…)\". The field names " +
-			"below come from that clause, so without it this arm checks the descriptions " +
-			"against an empty list and reports green.")
+		t.Fatal("the card no longer states \"if any of the four content fields (…)\" — the " +
+			"aihub#588 rule clause. The field names below come from that clause, so without it " +
+			"this arm checks the descriptions against an empty list and reports green.")
 	}
-	var fields []string
+	var contentFields []string
 	for _, f := range regexp.MustCompile("`([a-z_]+)`").FindAllStringSubmatch(m[1], -1) {
-		fields = append(fields, f[1])
+		contentFields = append(contentFields, f[1])
 	}
+	if len(contentFields) != 4 {
+		t.Fatalf("the card's rule clause names %d content field(s) (%v); the rule is over four. "+
+			"A different count means the card and this arm are describing different rules.",
+			len(contentFields), contentFields)
+	}
+	a := repoBlockAcceptedAloneRe.FindStringSubmatch(card)
+	if a == nil {
+		t.Fatal("the card no longer names the two generation-metadata fields accepted alone, " +
+			"in the form \"only `x` or only `y`\" — the aihub#588 description promises that " +
+			"acceptance, so this arm cannot check the promise against a card that stopped " +
+			"stating it.")
+	}
+	metadataFields := []string{a[1], a[2]}
+	fields := append(append([]string{}, contentFields...), metadataFields...)
 	if len(fields) != 6 {
-		t.Fatalf("the card names %d structured field(s) (%v); the block has six. A different "+
-			"count means the card and this arm are describing different rules.",
+		t.Fatalf("the card partitions the block into %d field(s) (%v); the block has six.",
 			len(fields), fields)
 	}
 
@@ -354,7 +389,7 @@ func TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema(t *testing.T) {
 		for _, tool := range withRepos {
 			t.Run(tool, func(t *testing.T) {
 				desc := publishedParamDescriptions(t, tool)["repos"]
-				if !strings.Contains(desc, "all-or-nothing") {
+				if !strings.Contains(strings.ToLower(desc), "all-or-nothing") {
 					t.Errorf("%s's `repos` description does not use the words \"all-or-nothing\". "+
 						"That phrase is the card's name for the rule and the only warning a caller "+
 						"gets that a partial block is refused.\nPublished: %q", tool, desc)
@@ -363,6 +398,35 @@ func TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema(t *testing.T) {
 					t.Errorf("%s's `repos` description does not state that all four content fields "+
 						"are required.\nPublished: %q\nThe conditional cannot be expressed in the "+
 						"schema, so this sentence is the whole published contract for it.", tool, desc)
+				}
+				// The aihub#588 pins, one per direction of the ruling. The trigger
+				// clause must be the MEASURED one — the four content fields —
+				// spelled so a caller can tell which fields arm the rule…
+				if !strings.Contains(desc, "if any of the four content fields") {
+					t.Errorf("%s's `repos` description no longer states the measured trigger "+
+						"(\"if any of the four content fields …\").\nPublished: %q\nThat clause "+
+						"is what aihub#588 moved the description TO; losing it re-opens the gap "+
+						"where hop 1 and the enforcement describe different rules.", tool, desc)
+				}
+				if !strings.Contains(desc, "do not trigger") {
+					t.Errorf("%s's `repos` description no longer says the generation-metadata "+
+						"fields do not trigger the rule.\nPublished: %q\nThat half is the "+
+						"acceptance the server has always granted and the pre-aihub#588 wording "+
+						"denied; a caller holding back generated_commit because they cannot "+
+						"complete the content block is the cost of dropping it.", tool, desc)
+				}
+				// …and the pre-588 sentence may not come back: "any structured
+				// field" claims the six-field trigger that was measured false on
+				// 2026-09-10 (hasDescriptionBlock reads the four content fields
+				// and nothing else — internal/domain/project_repo_block_rule_test.go
+				// holds that, both directions).
+				if strings.Contains(strings.ToLower(desc), "any structured field") {
+					t.Errorf("%s's `repos` description says \"any structured field\" again.\n"+
+						"Published: %q\nThat is the exact sentence aihub#588 removed: the "+
+						"enforcement trigger is the four content fields, so this wording tells a "+
+						"caller that sending generated_at alone makes four fields required when "+
+						"the server accepts it with none. If enforcement was really widened, the "+
+						"owner ruling that rejected exactly that has to be revisited first.", tool, desc)
 				}
 				for _, field := range fields {
 					if !strings.Contains(desc, field) {

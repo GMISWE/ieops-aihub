@@ -34,7 +34,21 @@ func (s *Server) registerProjectTools() {
 			"description": prop("string", "Optional description"),
 			"visible":     prop("boolean", "Whether the project is publicly visible (default: true)"),
 			"scenario":    prop("string", "Scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
-			"repos":       prop("array", "Repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
+			// aihub#588 (2026-09-10, owner ruling): this description used to say
+			// "If any structured field is set, all four content fields are
+			// required" — measured false. hasDescriptionBlock (internal/domain/
+			// projects.go) reads the FOUR CONTENT fields and nothing else, so a
+			// repo entry carrying only generated_at or only generated_commit was
+			// always accepted while hop 1 claimed four fields had just become
+			// required. The ruling moved the DESCRIPTION to the measured rule and
+			// left the enforcement alone (widening it would newly refuse
+			// metadata-only entries existing callers may send). The corrected
+			// wording is pinned on every tool publishing `repos` by
+			// TestPublishedRepoBlockRuleLivesInProseAndNotInTheSchema
+			// (project_publication_contract_test.go), and the enforcement
+			// partition by TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly
+			// (internal/domain/project_repo_block_rule_test.go), both directions.
+			"repos": prop("array", "Repository list. Each: {name, url, github_owner_repo?, description?, and an optional structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), plus generation metadata: generated_at(RFC3339), generated_commit(string)}. All-or-nothing rule: if any of the four content fields (positioning, tech_stack, main_modules, change_scenarios) is set, all four content fields are required (English). The two generation-metadata fields do not trigger that rule: a repo entry carrying only generated_at or only generated_commit is accepted with no content field."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -60,8 +74,11 @@ func (s *Server) registerProjectTools() {
 			"description": prop("string", "Updated description"),
 			"visible":     prop("boolean", "Updated visibility"),
 			"scenario":    prop("string", "Updated scenario repo URL (e.g. git@github.com:GMISWE/polyforge-coding.git)"),
-			"repos":       prop("array", "Updated repository list. Each: {name, url, github_owner_repo?, description?, and an optional all-or-nothing structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), generated_at(RFC3339), generated_commit(string)}. If any structured field is set, all four content fields are required (English)."),
-			"members":     prop("array", "REPLACES the whole member list: [{user_id, role}] where role is viewer|writer|maintainer. Anyone missing from the list you send loses access, so to add one person you must read the current list (pf_list_projects) and send it back with the addition. A write that would drop somebody you did not name in expected_removals is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL, which lists them."),
+			// aihub#588 (2026-09-10): same corrected rule text as pf_create_project
+			// above — the description is shared, and the arm that pins it walks
+			// every tool that publishes the parameter.
+			"repos":   prop("array", "Updated repository list. Each: {name, url, github_owner_repo?, description?, and an optional structured block: positioning(string), tech_stack([string]), main_modules([{path,role}]), change_scenarios([string]), plus generation metadata: generated_at(RFC3339), generated_commit(string)}. All-or-nothing rule: if any of the four content fields (positioning, tech_stack, main_modules, change_scenarios) is set, all four content fields are required (English). The two generation-metadata fields do not trigger that rule: a repo entry carrying only generated_at or only generated_commit is accepted with no content field."),
+			"members": prop("array", "REPLACES the whole member list: [{user_id, role}] where role is viewer|writer|maintainer. Anyone missing from the list you send loses access, so to add one person you must read the current list (pf_list_projects) and send it back with the addition. A write that would drop somebody you did not name in expected_removals is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL, which lists them."),
 			// aihub#260. The counter lives on the project row and is bumped by
 			// Postgres on every members write, so it is a token for "the list I
 			// read", not a timestamp — see buildProjectUpdate in

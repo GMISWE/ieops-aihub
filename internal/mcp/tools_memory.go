@@ -28,6 +28,11 @@ func (s *Server) registerMemoryTools() {
 		if err := validatePfRememberArgs(args); err != nil {
 			return errResult(err)
 		}
+		// args is the caller's map projected to the published schema — addTool
+		// stripped every unpublished key before this handler ran (aihub#586),
+		// and the response disclosure names what it stripped. So "forwarded
+		// wholesale" below means "every published property, by construction",
+		// not "whatever arrived".
 		result, err := s.client.Remember(ctx, args)
 		if err != nil {
 			return errResult(err)
@@ -803,8 +808,13 @@ func rememberVisibilityParamDesc() string {
 // rememberSchema is pf_remember's published InputSchema.
 //
 // pf_remember has no forwarding block to drift from: its handler passes the
-// argument map to pkg/client verbatim, so every published property is on the
-// wire by construction. The guard states that identity rather than assuming it.
+// argument map to pkg/client, projected by addTool to THIS schema's own
+// property set (aihub#586, wire_strip.go), so every published property is on
+// the wire by construction and no unpublished name is. It used to be forwarded
+// verbatim, and that was the aihub#586 vulnerability: `rendered_html` is a name
+// domain.RememberRequest binds and this schema does not publish, so a caller
+// who guessed it stored anonymous-shareable HTML through a tool whose contract
+// never offered that. The guard states the identity rather than assuming it.
 //
 // aihub#433 / aihub#411 T1-3: base_strength used to be published as "(0-1)", a
 // range the memories.base_strength CHECK refuses outright, so the 13 corpus

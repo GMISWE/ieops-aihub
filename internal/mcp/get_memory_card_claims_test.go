@@ -30,8 +30,9 @@ package mcp_test
 // The contrast is gone. `jsonResult` marshals through marshalJSON, and 34df071
 // changed that function from json.MarshalIndent to json.Marshal for EVERY tool
 // in the server — so the two helpers produce byte-identical output today, and
-// jsonResultCompact's own doc comment still measures itself "vs the default
-// MarshalIndent path" that no longer exists. Nothing was wrong with the
+// jsonResultCompact's own doc comment measured itself "vs the default
+// MarshalIndent path" that no longer exists (corrected by aihub#592,
+// 2026-09-10). Nothing was wrong with the
 // behaviour: compact is what the card wants and compact is what every tool
 // gives. What was wrong was the sentence, which told a reader this tool differed
 // from its siblings in a way it does not, and pointed the next person who wants

@@ -4,7 +4,7 @@
 {
   "tool": "pf_predict_conflicts",
   "description_sha256": "21efef2052245dd6164941753069ea379387987353eaa9f0e94e4f2054ba4552",
-  "input_schema_sha256": "29195768b65df6b4e0d8ca6854d1f3b78c4932dca3b60bfaaf888447da2d61a3",
+  "input_schema_sha256": "29efdb34fe3e10d154b80b891f9799666320719ef59ee735eb86b6a69c0b02b1",
   "params": {
     "declared_resources": {
       "type": "array",
@@ -43,46 +43,49 @@ Four parameters, one required.
 | `project` | string | no | namespaces `file_scope` checks (`TestResourceToLock_FileScopeNamespacedByProject`); optional when `work_item_id` is set |
 | `dry_run` | boolean | no | "do not mutate state" |
 
-🔴 **This tool has been measured untrustworthy in both directions**, and that is the
-single most important thing a caller can know about it: it reports an attempt's OWN
-locks as conflicts after a claim, and it false-negatives on read intent. The
-`aihub#387` ruling that withdrew `pf_get_ready_queue`'s `non_conflicting` cites
-exactly that, on the grounds that building on this predicate would have produced a
-second untrustworthy one.
+🔴 **This tool was measured untrustworthy in both directions; the self-report
+direction is now fixed and the read-intent direction still stands.** It used to
+report an attempt's OWN locks and declarations back to it as conflicts after a
+claim — fixed in two halves, `aihub#510` (2026-09-09) for the declaration rules
+and `aihub#564` (2026-09-10) for the lock-table rules — and it still
+false-negatives on read intent. The `aihub#387` ruling that withdrew
+`pf_get_ready_queue`'s `non_conflicting` was made against the both-directions
+reading; the surviving direction alone still supports it, because building on
+this predicate would inherit the read-intent false negative.
 
-**`aihub#510` fixed one HALF of the first direction — the four declaration rules,
-rule by rule, in `TestDeLockingPredictReportsAdvisoryEntries` — and the half it did
-not fix is why the paragraph above still stands.** The four rules that read
-`declared_resources` — 2, 4, 5 and 6 — no longer report the caller back to itself,
-which `internal/domain/delocking_db_test.go`
+**The self-report fix landed in two halves because the two halves are different
+claims.** The four rules that read `declared_resources` — 2, 4, 5 and 6 — stopped
+reporting the caller back to itself with `aihub#510`, which
+`internal/domain/delocking_db_test.go`
 (`TestDeLockingPredictReportsAdvisoryEntries`) drives rule by rule against a second
 running work item declaring the same name.
-The two that read the **lock table** — 1 (`hard_block`) and 3 (`file_scope`) — still
-do, so a claimed work item re-predicting its own `path` declarations is still handed
-its own lock as somebody else's.
-<!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
-citation=aihub#543 attrs.owner_annotations_2026_09_10 Q3 ruling; fix carried by
-aihub#564 |
-reason=the same measured defect the Open section below carries, in summary. The
-owner ruled Q3 on 2026-09-10 that it is a ledger row and not a probe, because a
-probe pinning today's answer would arrive red on the day aihub#564 lands and the
-cheapest compliant path is then deleting the probe. Both sentences are classified
-so the ledger counts the claim wherever a reader meets it, rather than counting it
-once and leaving the other unclassified. -->
-Split that way because the two halves are different
-claims: a declaration overlap is advisory and self-overlap is meaningless, whereas
-rule 1 answers "would taking this lock collide", it `return`s on the first hit and
-suppresses every rule after it — pinned as a property of the whole ladder by
+The two that read the **lock table** — 1 (`hard_block`) and 3 (`file_scope`) —
+followed with `aihub#564`, which
+`internal/domain/predict_lock_self_exclusion_db_test.go`
+(`TestPredictLockRulesLeaveTheCallerOut`) drives in both directions: the caller's
+own lock stops being reported, and ANOTHER attempt's lock still answers
+`hard_block` (`soft_block` from rule 3 under `dry_run`).
+The lock half was deliberately the later, sharper half: rule 1 answers "would
+taking this lock collide", it `return`s on the first hit and suppresses every rule
+after it — pinned as a property of the whole ladder by
 `internal/domain/predict_rule_shape_test.go`
-(`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) — and changing that
-changes the value `pf-work`'s pre-claim gate branches on.
+(`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) — and it decides
+the value `pf-work`'s pre-claim gate branches on. Before the fix that meant a
+claimed work item re-predicting its own `path` declaration handed the gate a
+`hard_block` naming the caller itself, and a self-held row could suppress a REAL
+foreign conflict later in the same payload — the mixed-payload arm of
+`TestPredictLockRulesLeaveTheCallerOut` measured exactly that on the pre-fix
+build (2026-09-10) before the fix turned it green.
 
-⚠️ **The declaration half is opt-in, and it cannot be otherwise:** the exclusion
-needs `work_item_id`, so a predict that names nobody is unchanged, which the
-anonymous create-preview arm of `internal/domain/delocking_db_test.go`
-(`TestDeLockingPredictReportsAdvisoryEntries`) pins where it stands. That is correct
-for the create-preview path, which names nobody because the work item does not exist
-yet — but it means an agent that omits the parameter still gets itself back.
+⚠️ **The exclusion is opt-in, and it cannot be otherwise:** it needs
+`work_item_id`, so a predict that names nobody is unchanged, which the anonymous
+create-preview arms of `internal/domain/delocking_db_test.go`
+(`TestDeLockingPredictReportsAdvisoryEntries`) and
+`internal/domain/predict_lock_self_exclusion_db_test.go`
+(`TestPredictLockRulesLeaveTheCallerOut`) pin where it stands, one per rule
+family. That is correct for the create-preview path, which names nobody because
+the work item does not exist yet — but it means an agent that omits the parameter
+still gets itself back.
 
 The only reliable conflict signal in this system is **the return value of
 `pf_claim_work_item`**, which reports what it actually took.
@@ -188,12 +191,36 @@ the per-type URI scheme rules are stated — the sharing itself by
   `internal/domain/predict_self_exclusion_test.go`
   (`TestPredictSelfExclusionIsBoundInsideTheSharedContainmentFragments`) holds,
   since no behavioural arm can reach a rule that does not exist yet.
+- **The two lock-table rules exclude the caller too** (`aihub#564`, 2026-09-10 —
+  symmetric with the bullet above). Rules 1 and 3 read `resource_locks`, and a
+  claimed work item re-predicting its own declarations found the very locks its
+  own claim took: rule 1 answered `hard_block` naming the caller, and under
+  `dry_run` rule 3 answered `soft_block` the same way. The exclusion predicate is
+  the claim path's own answer to the same question
+  (`internal/domain/run_attempts.go` (`foreignLockHolderSQL`), `aihub#207`): a
+  resume re-takes locks its earlier attempt still holds — driven by
+  `internal/domain/run_attempts_resume_test.go`
+  (`TestResumeOwnLocks_NoSelfConflict`) — so predict answering `hard_block` there
+  predicted a collision the claim it fronts for would never raise. Driven in both directions by
+  `internal/domain/predict_lock_self_exclusion_db_test.go`
+  (`TestPredictLockRulesLeaveTheCallerOut`) — self-held lock no longer reported,
+  foreign holder still `hard_block`/`soft_block` — and bound inside a shared
+  fragment (`internal/domain/conflicts.go` (`notCallersOwnLockHolderSQL`)) so a
+  third lock-table rule inherits it, which
+  `internal/domain/predict_self_exclusion_test.go`
+  (`TestPredictLockRuleExclusionIsBoundInTheSharedFragment`) holds the same way
+  the declaration-family twin above is held.
 - ⚠️ **`work_item_id` may be an id OR a slug, and the exclusion depends on the
   `aihub#357` resolution of the two.** A slug matches no `work_items.id`, so a
   filter bound to the raw parameter would silently do nothing for the spelling
   `pf-work`'s own Mode B sends, which the by-slug arm of
   `internal/domain/delocking_db_test.go`
-  (`TestDeLockingPredictReportsAdvisoryEntries`) drives on its own.
+  (`TestDeLockingPredictReportsAdvisoryEntries`) drives on its own, and the
+  by-slug arm of `internal/domain/predict_lock_self_exclusion_db_test.go`
+  (`TestPredictLockRulesLeaveTheCallerOut`) drives for the lock family — where
+  the raw parameter is also a `*string`, so binding it un-resolved would
+  additionally cross `nil` as `NULL` and silence rule 1 for EVERY caller, the
+  `aihub#238` fake all-clear on the hard gate.
 - `file_scope` keys are namespaced by project
   (`internal/domain/conflicts_predict_test.go`
   (`TestPredictConflicts_FileScopeProjectScoped`)), and a `path` entry without `repo`
@@ -228,33 +255,30 @@ worth recording.
   NOT do is exclude a work item's own attempt from rules 2, 4 and 6; `aihub#510`
   (2026-09-09) did that, for those three plus rule 5.
   <!-- prose-only: because=history -->
-- **The LOCK half of the self-report is still open**, and it is the sharper half.
-  Measured 2026-09-09 on one claimed work item re-predicting its own `path`
-  declaration: with `dry_run=false` the answer is `severity: "hard_block"` and a
-  single rule-1 prediction reading `Resource lock is already held by another
-  attempt` whose `work_item_slug` **is the caller**; with `dry_run=true` rule 1 is
-  skipped and rule 3 answers `soft_block` / `File path overlaps with another running
-  attempt`, again naming the caller.
-  <!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
-  citation=aihub#543 attrs.owner_annotations_2026_09_10 Q3 ruling; fix carried by
-  aihub#564 |
-  reason=measured behaviour the repo does not want pinned. The owner ruled Q3 on
-  2026-09-10: a ledger row, no probe, on the clampdisclosure precedent. A probe
-  pinning today's answer would arrive red on the day of the fix, and the cheapest
-  compliant path is then deleting the probe. aihub#510 scoped itself to the
-  declaration rules and left lock-table rules 1 and 3 alone deliberately, because
-  rule 1 decides the value the pre-claim gate branches on; aihub#564 carries the
-  fix, and this row goes when it lands. -->
-  The two are never both visible, because rule 1 returns on its first hit —
-  `TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt` holds the
-  short-circuit.
-  `aihub#510` (2026-09-09) scoped itself to the declaration rules and left this
-  untouched deliberately — rule 1 decides the value `pf-work`'s pre-claim gate
-  branches on. It is adjudicated as of 2026-09-10: `aihub#543` ruled that this
-  paragraph is carried as a `known-defect` ledger row rather than pinned by a
-  probe, because a probe would arrive red on the day of the fix; `aihub#564`
-  (filed 2026-09-10) carries that fix, and the row goes when it lands.
-  <!-- prose-only: because=external-state -->
+- **The LOCK half of the self-report is CLOSED as of `aihub#564` (2026-09-10)**
+  (`TestPredictLockRulesLeaveTheCallerOut` holds the closure in both directions).
+  What stood here was the sharper half of the self-report, measured 2026-09-09: a
+  claimed work item re-predicting its own `path` declaration used to get, with
+  `dry_run=false`, `severity: "hard_block"` and a single rule-1 prediction
+  reading `Resource lock is already held by another attempt` whose
+  `work_item_slug` **was the caller**, and with `dry_run=true` — rule 1 skipped —
+  a rule-3 `soft_block` / `File path overlaps with another running attempt`,
+  again naming the caller; never both visible, because rule 1 returns on its
+  first hit. `aihub#510` (2026-09-09) left it alone deliberately, because
+  rule 1 decides the value `pf-work`'s pre-claim gate branches on — the
+  suppression property `internal/domain/predict_rule_shape_test.go`
+  (`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) pins; `aihub#543`
+  (2026-09-10) ruled it a `known-defect` ledger row rather than a probe, on the
+  grounds that a probe pinning that answer would arrive red on the day of the fix;
+  and `aihub#564` (2026-09-10) is that fix, so the rows went with it as
+  adjudicated. The gate readings were re-measured on the fix's own before/after
+  arms (2026-09-10): for `pf-work` Mode B's exact call shape
+  (`work_item_id=<slug>`, `dry_run=true`) the answer moved from `soft_block`
+  naming the caller to `info` with no predictions, and a `dry_run=false`
+  re-predict moved from `hard_block` to `info` — while a path held by ANOTHER
+  running attempt still answers `hard_block`, both held by
+  `internal/domain/predict_lock_self_exclusion_db_test.go`
+  (`TestPredictLockRulesLeaveTheCallerOut`).
 - **The read-intent false negative is still unfixed**, and no adjudicated row
-  commits to fixing it. `aihub#416` (landed 2026-09-09) and `aihub#510` (2026-09-09)
-  both left it alone.
+  commits to fixing it. `aihub#416` (landed 2026-09-09), `aihub#510` (2026-09-09)
+  and `aihub#564` (2026-09-10) all left it alone.

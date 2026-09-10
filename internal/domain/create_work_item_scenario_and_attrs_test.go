@@ -160,11 +160,12 @@ func TestCreateAcceptsOneOfTheScenariosTheCheckPermits(t *testing.T) {
 			}
 			// 🔴 Anchored on the CODE, and on the status that code maps to, never on
 			// a typed number. Measured 2026-09-10: NOT_IMPLEMENTED maps to 405, while
-			// the dbCheckPolicies entry for this very constraint says "The answer is
-			// 501" — so a `!= 501` written here would have shipped a red test on a
-			// correct tree, and a `!= 405` would freeze a number that is codeToHTTPStatus'
-			// to choose. Reading it back through the same map is what makes this
-			// assertion about the REFUSAL rather than about an integer.
+			// the dbCheckPolicies entry for this very constraint said "The answer is
+			// 501" (corrected to 405 by aihub#592) — so a `!= 501` written here would
+			// have shipped a red test on a correct tree, and a `!= 405` would freeze a
+			// number that is codeToHTTPStatus' to choose. Reading it back through the
+			// same map is what makes this assertion about the REFUSAL rather than
+			// about an integer.
 			if out.aerr.Code != ErrNotImplemented {
 				t.Errorf("scenario %q is refused as %s (%s), and the registry entry for %s records "+
 					"the refusal as NOT_IMPLEMENTED — a reserved-but-unbuilt scenario rather than a "+
@@ -236,7 +237,7 @@ func TestCreateAcceptsOneOfTheScenariosTheCheckPermits(t *testing.T) {
 //	M8 strip this sentence's citation, path and symbol both
 //	                                          RED  K12 ledger drift
 func TestCreateDefaultsAnOmittedAttrsAndLeavesALiteralNullAlone(t *testing.T) {
-	// "writing" short-circuits with 501 immediately AFTER the attrs default, so
+	// "writing" short-circuits with 405 NOT_IMPLEMENTED immediately AFTER the attrs default, so
 	// the request never reaches the pool and the field can be read back. It is
 	// taken from the arm above rather than assumed: the scenario gate is the
 	// nearest exit past the default.

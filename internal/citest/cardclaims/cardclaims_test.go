@@ -580,6 +580,85 @@ func TestEveryWaiverKindDescribesItself(t *testing.T) {
 	}
 }
 
+// TestEveryWaiverKindHasItsOwnCensusColumn is kindCell's calibration: since
+// aihub#565 the kind vocabulary meets the census columns in that ONE mapping
+// (Tally increments through it, Balanced sums through it, classifyDrift compares
+// through it), so the two drifts it could carry are checked here directly. A kind
+// with NO cell would classify every sentence it waives into nothing; two kinds
+// SHARING a cell would silently merge in the ledger the exact distinction the
+// per-kind columns exist to expose (a known-defect relabelled accepted-unprobed
+// reads as no movement at all).
+func TestEveryWaiverKindHasItsOwnCensusColumn(t *testing.T) {
+	var d Census
+	seen := map[*int]WaiverKind{}
+	for _, k := range WaiverKinds {
+		cell := d.kindCell(k)
+		if cell == nil {
+			t.Errorf("WaiverKind %q has no census column; every sentence it waives would be "+
+				"counted as a candidate and classified into nothing", k)
+			continue
+		}
+		if prev, dup := seen[cell]; dup {
+			t.Errorf("WaiverKinds %q and %q share one census column; a relabel between them "+
+				"would move no ledger number, which is the drift the per-kind columns exist "+
+				"to expose", prev, k)
+		}
+		seen[cell] = k
+	}
+	if d.kindCell("invented") != nil {
+		t.Errorf("kindCell answers for a kind outside the closed set; an unrecognised kind " +
+			"must classify into nothing so Balanced reports it, not into somebody's column")
+	}
+}
+
+// TestTallyCountsEachKindIntoItsOwnColumn drives the same mapping end-to-end
+// through Tally: one well-formed marker of every kind, each landing in its own
+// column and nowhere else. Before aihub#565 no fixture asserted WHICH column a
+// waived sentence landed in — TestKindsThatNameNobodyAreAcceptedWithoutAWorkItem
+// checks only that the sentence is not left unclassified — so a swap between two
+// kind columns was green everywhere except against the live card set.
+//
+// MUTANTS (each applied on 2026-09-10, tree change proven by sha256
+// before/after, restored byte-identical after the run):
+//
+//	C1 kindCell loses the known-defect case (kind counted into nothing)
+//	                            RED  TestEveryWaiverKindHasItsOwnCensusColumn
+//	                                 + this arm (census short one column, unbalanced)
+//	C2 kindCell miswires known-defect into the structurally-unreachable column
+//	                            RED  TestEveryWaiverKindHasItsOwnCensusColumn
+//	                                 + this arm (relabel reads as no movement)
+//	C3 classifyDrift compares WaiverKinds[1:] — one kind column dropped from the
+//	   drift report            RED  TestLedgerIsCheckedInBothDirections (a
+//	                                 relabelled row reported STALE_DEBT, not
+//	                                 RECLASSIFIED)
+func TestTallyCountsEachKindIntoItsOwnColumn(t *testing.T) {
+	marker := func(kind, citation string) string {
+		return "A `path` entry derives a `file_scope` lock. " +
+			"<!-- probe-waiver: kind=" + kind + " | decided=2026-09-10 | " +
+			"citation=" + citation + " | reason=fixture exercising the kind-to-column mapping. -->\n"
+	}
+	prose := marker("pending-implementation", "aihub#543") +
+		marker("known-defect", "aihub#564") +
+		marker("structurally-unreachable", "a harness this repo cannot create") +
+		marker("accepted-unprobed", "the owner ruling of 2026-09-10")
+
+	tally := Tally("fixture.md", prose, testIndex)
+	if len(tally.Problems) != 0 {
+		t.Fatalf("well-formed markers produced findings, so the census below measures the "+
+			"wrong thing: %v", tally.Problems)
+	}
+	want := Census{Candidates: 4, PendingImplementation: 1, KnownDefect: 1,
+		StructurallyUnreachable: 1, AcceptedUnprobed: 1}
+	if tally.Census != want {
+		t.Errorf("census = %+v, want %+v — one marker of every kind must land in its own "+
+			"column and nowhere else, or a ledger row cannot tell a relabel from a fix",
+			tally.Census, want)
+	}
+	if !tally.Census.Balanced() {
+		t.Errorf("census is unbalanced on four well-formed waivers: %+v", tally.Census)
+	}
+}
+
 func hasFinding(problems []string, want string) bool {
 	for _, p := range problems {
 		if strings.Contains(p, want) {

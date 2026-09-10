@@ -4,7 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "52355ed415a03b181b816da58b68327c4e4c5ca44cfab692bdbeb2d8bbc00b0a",
-  "input_schema_sha256": "441ec21f5467f1204d74e5415c84dce83cef1ce58479f6584fe4ac4d13ba46f8",
+  "input_schema_sha256": "e649e667644e71892c74bc35c230396c6a75033e6308fbd12177832aa9c6b11e",
   "params": {
     "cursor": {
       "type": "string",
@@ -73,7 +73,7 @@ defect.
 | `project` | string | yes | project name |
 | `query` | string | no | semantic search query |
 | `type` | array | no | ARRAY of type names; `.*` is a prefix wildcard and `\|` is NOT a separator — both held by `TestUnmatchedTypes` |
-| `work_item_id` | string | no | filter by work item |
+| `work_item_id` | string | no | filter by work item — canonical id or slug |
 | `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted (`TestWireQueryRecallTopKAcceptsAJSONNumber`) |
 | `similarity_threshold` | number | no | cosine 0-1, vector half only, **OFF by default** |
 | `cursor` | string | no | TEXT-path paging only |
@@ -343,18 +343,16 @@ passing nothing returned the same 20 items in the same order.
   matches nothing" — which was true until `aihub#363` and stale after it. False in
   the harmless direction, so nothing in the tree could redden on it: the advice
   merely cost a caller a `pf_get_work_item` they no longer need, and read as a
-  reason to skip a filter that works. Only HALF of that stale claim is still live:
-  `pf_get_step`'s card was corrected in this same wave and now records the
-  correction, while `pf_get_step`'s own published description
-  (`internal/mcp/tools_step.go`) still tells a caller to pass the canonical id
-  because `pf_recall` and `pf_read_events` "return nothing for a slug" — outside
-  this slice, and tracked by `aihub#590` (filed 2026-09-10).
-  <!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
-  citation=aihub#590 |
-  reason=the live half of this sentence is a wrong clause in pf_get_step's
-  published description, and a probe pinning today's wording would arrive RED on
-  the day aihub#590 corrects it — the same shape as the pf_get_step card's own
-  record of it, which is why the claim is carried rather than pinned -->
+  reason to skip a filter that works. The last live copy of that claim —
+  `pf_get_step`'s published description (`internal/mcp/tools_step.go`) telling a
+  caller to pass the canonical id because `pf_recall` and `pf_read_events` "return
+  nothing for a slug" — was corrected by `aihub#590` (2026-09-10), which also made
+  this tool's own `work_item_id` property say "canonical id or slug" instead of
+  "Filter by work item ID", the form `internal/mcp/slug_publication_test.go`
+  (`TestSlugAcceptanceIsPublishedByRecall`) requires off a live session.
+  `TestSlugDenialIsNowhereInThePublishedSurface` in the same file refuses the
+  stale clause, by its exact words, in every published description and schema, so
+  the sentence cannot migrate to a tool the per-tool arms do not read.
 - **`type` entries that match nothing come back in `unmatched_types`**, which is what
   distinguishes a wrong type name from a project that genuinely holds none — the
   diagnostic itself held by `internal/domain/memory_unmatched_test.go`

@@ -538,8 +538,9 @@ func NamesPublishedToken(s string) bool {
 // an anchor — the sentence is pinned to a measurement or a ruling — without a
 // published token, which is exactly the shape the two measured misses take: the
 // isolation-level sentence on pf_force_takeover (`aihub#430` … opens SERIALIZABLE
-// while this one opens READ COMMITTED) and pf_get_step's record of the live
-// tools_step.go falsehood, whose only backticks are `aihub#400` and `aihub#450`.
+// while this one opens READ COMMITTED) and pf_get_step's record of the
+// tools_step.go falsehood — live when this was measured, corrected by aihub#590
+// in the same batch — whose only backticks were `aihub#400` and `aihub#450`.
 //
 // ⚠️ A sentence with NO backticks at all is deliberately not this form. The
 // anchor is what separates a recorded claim from narration; dropping it admits
@@ -1532,11 +1533,39 @@ func (d Census) Line(card string) string {
 
 // Balanced reports whether the classes account for the whole population. They are
 // exhaustive by construction, so a false here means a sentence was counted as a
-// candidate and then classified into nothing — which today can only happen when a
-// waiver names a kind outside the closed set.
+// candidate and then classified into nothing — which today can happen only when a
+// waiver names a kind outside the closed set, or a kind kindCell does not map.
 func (d Census) Balanced() bool {
-	return d.Candidates == d.Cited+d.Unclassified+d.ProseOnly+d.PendingImplementation+
-		d.KnownDefect+d.StructurallyUnreachable+d.AcceptedUnprobed
+	classified := d.Cited + d.Unclassified + d.ProseOnly
+	for _, k := range WaiverKinds {
+		if cell := d.kindCell(k); cell != nil {
+			classified += *cell
+		}
+	}
+	return d.Candidates == classified
+}
+
+// kindCell maps a waiver kind to the census column that counts it — the ONE
+// place the kind vocabulary and the census columns meet (aihub#565; before it,
+// Tally, Balanced and classifyDrift each enumerated the four kinds in parallel,
+// and a kind added to one enumeration but not another would have been dropped
+// or double-booked silently). Tally increments through it, Balanced sums
+// through it, and classifyDrift compares through it, so a kind in WaiverKinds
+// with no column here cannot leak: kindCell answers nil, the waived sentence
+// classifies into nothing, and Balanced reports the census unbalanced —
+// TestEveryWaiverKindHasItsOwnCensusColumn refuses the drift outright.
+func (d *Census) kindCell(k WaiverKind) *int {
+	switch k {
+	case KindPendingImplementation:
+		return &d.PendingImplementation
+	case KindKnownDefect:
+		return &d.KnownDefect
+	case KindStructurallyUnreachable:
+		return &d.StructurallyUnreachable
+	case KindAcceptedUnprobed:
+		return &d.AcceptedUnprobed
+	}
+	return nil
 }
 
 // CardTally is what one card measured.
@@ -1598,15 +1627,8 @@ func Tally(card, prose string, idx ArmIndex) CardTally {
 				if m.Form != MarkerWaiver {
 					continue
 				}
-				switch m.Kind {
-				case KindPendingImplementation:
-					t.Census.PendingImplementation++
-				case KindKnownDefect:
-					t.Census.KnownDefect++
-				case KindStructurallyUnreachable:
-					t.Census.StructurallyUnreachable++
-				case KindAcceptedUnprobed:
-					t.Census.AcceptedUnprobed++
+				if cell := t.Census.kindCell(m.Kind); cell != nil {
+					*cell++
 				}
 			}
 		}
@@ -1692,8 +1714,13 @@ func LedgerProblems(tallies map[string]CardTally, ledger map[string]Census, card
 // which is false in both halves. Only a rise in UNCLASSIFIED is new unheld debt.
 func classifyDrift(measured, recorded Census) (finding, explain string) {
 	classified := func(c Census) []int {
-		return []int{c.PendingImplementation, c.KnownDefect, c.StructurallyUnreachable,
-			c.AcceptedUnprobed, c.ProseOnly}
+		cells := make([]int, 0, len(WaiverKinds)+1)
+		for _, k := range WaiverKinds {
+			if cell := c.kindCell(k); cell != nil {
+				cells = append(cells, *cell)
+			}
+		}
+		return append(cells, c.ProseOnly)
 	}
 	m, r := classified(measured), classified(recorded)
 	rose, fell := false, false

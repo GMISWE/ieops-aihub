@@ -2169,7 +2169,7 @@ func TestOpenCitationWaiverCheckIsWiredIntoTheArm(t *testing.T) {
 var k12Cards = []string{
 	// Phase 1 — spec §2.2, in that document's dispatch order. Wave 1 drew all ten
 	// to zero unclassified (aihub#566/#567/#568).
-	"pf_predict_conflicts", // measured untrustworthy in both directions
+	"pf_predict_conflicts", // picked when measured untrustworthy in both directions; aihub#510+#564 fixed the self-report one, read-intent still stands
 	"pf_claim_work_item",   // issues the credential every later call authenticates with
 	"pf_force_takeover",    // irreversible, silent to the party it evicts, branched on
 	"pf_get_ready_queue",   // the dispatch input; aihub#387 already withdrew one field

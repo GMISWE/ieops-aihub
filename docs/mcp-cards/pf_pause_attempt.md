@@ -26,12 +26,26 @@
 
 Two parameters. The description carries the lock semantics because they differ from
 every other terminal path: pausing **releases** `file_scope` locks acquired
-mid-attempt and **retains** every other lock type for resume.
+mid-attempt and **retains** every other lock type for resume — the published
+sentence is held against the live lock vocabulary by
+`internal/mcp/pause_cancel_wire_shape_test.go`
+(`TestPublishedPauseReleasesOneLockTypeFromTheLiveVocabulary`) and the release
+itself by `internal/domain/run_attempts_test.go`
+(`TestAcquireLocksReleasePausedSQL_FileScopeOnly`, with
+`TestAcquireLocksReleasePausedSQL_NotAllLocks` refusing an unfiltered delete).
 
 ⚠️ Since `aihub#416` that retained set is normally EMPTY — `file_scope` is the only
-lock the server derives — so the description says so rather than describing a
+lock the server derives, which `internal/domain/lock_derivation_retired_test.go`
+(`TestResourceToLock_RepoAndServiceDeriveNoLock` and
+`TestResourceToLock_PathStillDerivesFileScope`) holds per type and
+`internal/domain/read_intent_scope_test.go`
+(`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock`) holds over the whole
+declared-type vocabulary — so the description says so rather than describing a
 retention a caller will never observe. It is non-empty only for an attempt that
-supplied `requested_locks` explicitly.
+supplied `requested_locks` explicitly, the one remaining route to a
+non-`file_scope` row and the subject of
+`internal/domain/lock_derivation_retired_test.go`
+(`TestDeriveClaimLocks_RepoAndServiceContributeNoLock`).
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -48,23 +62,45 @@ via `internal/config/state.go` (`ResolveStateFile`) and calls
 Two details:
 
 - The request is addressed by `sf.WIID` — the **resolved canonical** id — not by the
-  string the caller passed, so a slug-addressed pause still hits the right row.
+  string the caller passed, so a slug-addressed pause still hits the right row,
+  driven with a slug by `internal/mcp/pause_cancel_wire_shape_test.go`
+  (`TestPauseAddressesTheCanonicalIDAndSendsAReasonOnlyWhenGiven`).
 - `pause_reason` is forwarded only when non-empty, the same guard
-  `pf_complete_attempt` applies for the same reason.
+  `pf_complete_attempt` applies for the same reason — both directions observed on
+  the request in `internal/mcp/pause_cancel_wire_shape_test.go`
+  (`TestPauseAddressesTheCanonicalIDAndSendsAReasonOnlyWhenGiven`).
 
 ## hop 4 — what it actually does
 
 - The attempt's status becomes `paused` and the local state file is **kept**, which
-  is the whole difference from a terminal completion: resume needs those credentials.
-- **From that moment the server hard-rejects every credential-checked `pf_*` call**
-  with its own distinct code, `ErrAttemptPaused` ("attempt is paused; resume it
-  before continuing"), deliberately different from a stale credential. So a step
-  loop that pauses cannot corrupt step state — it simply cannot advance — but it can
-  walk into a cascade of surprise credential errors if it retries.
+  is the whole difference from a terminal completion: resume needs those
+  credentials, and the contrast is driven both ways by
+  `internal/mcp/pause_cancel_wire_shape_test.go`
+  (`TestPauseKeepsTheStateFileAndATerminalCompletionDeletesIt`).
+- **From that moment the server hard-rejects every call that goes through
+  `verifyAttemptCredential`** with its own distinct code, `ErrAttemptPaused`
+  ("attempt is paused; resume it before continuing"), deliberately different from a
+  stale credential — the code, the 409 and that exact wire message are held by
+  `internal/domain/attempt_paused_terminal_dbgated_test.go`
+  (`TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing`).
+- ⚠️ **`pf_emit_event` is the one credential-checked call it does NOT refuse**, and
+  this bullet said "every credential-checked `pf_*` call" until `aihub#583` measured
+  it: that tool's lighter verifier `verifyAttemptCredentialSimple` in `internal/domain/memory.go`
+  checks the current attempt id, the epoch and the secret hash and stops, and a
+  pause moves none of the three — so a paused attempt can still write to the
+  timeline, which is why
+  `internal/domain/paused_refusal_scope_test.go`
+  (`TestOnlyOneCredentialVerifierRefusesAPausedAttempt`) enumerates the verifiers
+  and requires exactly one of them to answer `ATTEMPT_PAUSED`, so unifying the two
+  reddens this sentence rather than leaving it stale a second time.
+- So a step loop that pauses cannot corrupt step state — it simply cannot advance —
+  but it can walk into a cascade of surprise credential errors if it retries.
 - `internal/mcp/tools_step.go` (`classifyStepUpdateErr`) is the client-side half:
   `ATTEMPT_PAUSED` keeps the state file and points at resume, while a genuine stale
-  credential deletes it. Getting that classification wrong is destructive in one
-  direction only.
+  credential deletes it, which `internal/mcp/error_code_classification_test.go`
+  (`TestClassifyStepUpdateErr_ClassifiesByCodeNotByMessageText`) holds as a pair of
+  controls on the real classifier. Getting that classification wrong is destructive
+  in one direction only.
 
 ## hop 5 — what comes back
 
@@ -74,7 +110,11 @@ callers have been handed.
 ## Policy
 
 - **§6.2 T2-3 — LANDED (`aihub#441`).** One status code for "invalid attempt
-  credential" across all tools, and it is **403 `ATTEMPT_MISMATCH`**. The invalid
+  credential" across all tools, and it is **403 `ATTEMPT_MISMATCH`** — the two
+  verifiers are driven with one wrong secret and required to answer the same code,
+  status and message by
+  `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret`). The invalid
   `session_secret` refusal used to answer 401 `UNAUTHORIZED` from
   `verifyAttemptCredential` (this tool's path, plus `pf_complete_attempt`,
   `pf_wrap`, `pf_commit`, `pf_acquire_locks`, `pf_update_step`, `pf_save_artifact`)
@@ -82,11 +122,21 @@ callers have been handed.
   `ATTEMPT_PAUSED` being distinct from that class is the property this tool depends
   on, and it is the reason the ruling says *one* code for the credential class rather
   than one code for everything — it is unchanged, still 409, and still reached only
-  by a caller whose secret is VALID, so the unification cannot shadow it.
+  by a caller whose secret is VALID, so the unification cannot shadow it: the
+  branch's position below the constant-time comparison is held by
+  `internal/domain/paused_refusal_scope_test.go`
+  (`TestOnlyOneCredentialVerifierRefusesAPausedAttempt`) and the resulting answer —
+  a wrong secret on a paused attempt coming back `ATTEMPT_MISMATCH` — by
+  `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused`).
 - **§6.2 T2-15** — which lock types survive a pause is exactly the row the
-  de-locking ruling shrinks to `file_scope`. Landed by `aihub#416` (2026-09-09):
-  the pause SQL is byte-unchanged (it always named `file_scope` explicitly); what
-  changed is that nothing else is being derived for it to retain.
+  de-locking ruling shrinks to `file_scope`, which
+  `internal/domain/run_attempts_test.go`
+  (`TestAcquireLocksReleasePausedSQL_FileScopeOnly` and
+  `TestAcquireLocksReleasePausedSQL_NotAllLocks`) holds on the DELETE's predicate.
+  Landed by `aihub#416` (2026-09-09): the pause SQL is byte-unchanged (it always
+  named `file_scope` explicitly); what changed is that nothing else is being derived
+  for it to retain. <!-- prose-only: because=history -->
 
 ## Open
 

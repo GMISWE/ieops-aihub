@@ -23,8 +23,10 @@ package server
 // pf_recall and pf_read_events "return nothing for a slug, silently" — the
 // pre-aihub#343 / pre-aihub#363 behaviour. Both resolve a slug today, the
 // pf_get_step TOOL DESCRIPTION carried the same stale advice, and aihub#422's own
-// test header had already recorded it as stale without anything going red. The
-// arms below hold the resolution that makes the corrected sentence true.
+// test header had already recorded it as stale without anything going red —
+// until aihub#590 (2026-09-10) corrected the description and pinned the
+// published wording in internal/mcp/slug_publication_test.go. The arms below
+// hold the resolution that makes the corrected sentence true.
 //
 // All four read source or a migration rather than driving a database, per
 // aihub#543 spec §3.3: a query's text, a struct assignment and a CHECK

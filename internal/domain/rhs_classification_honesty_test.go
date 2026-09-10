@@ -97,6 +97,17 @@ func analyseEmission(src string) []string {
 	}
 
 	// Locate the emitting call: the one carrying the event-type string literal.
+	//
+	// ⚠️ Bare-substring match, and that is a measured blind spot (found by
+	// aihub#576, recorded by aihub#592, 2026-09-10): the emitting statement
+	// carries the event name TWICE — in the INSERT and in bestEffortExec's error
+	// message ("failed to emit wi_classification_resolved event") — so a mutant
+	// that renames only the event the row is filed under is still "located" here
+	// via the error text, and the `emit == nil` branch below cannot fire for it.
+	// The rename direction is not restated here: it is owned by
+	// analyseClassificationResolution (claim_rhs_resolution_test.go), whose
+	// locator requires the SQL-QUOTED form and whose calibration pins that
+	// mutant RED (its mutant table, M67).
 	var emit *ast.CallExpr
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)

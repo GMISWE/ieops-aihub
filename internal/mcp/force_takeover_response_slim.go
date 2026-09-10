@@ -35,8 +35,9 @@ package mcp
 // a slug". That is stale — pf_read_events resolves id-or-slug since aihub#343
 // (routes_memory.go's handleListEvents, `f.WorkItemID = &wi.ID`) and pf_recall
 // since aihub#363 (resolveRecallWorkItemRef, `WHERE id = $1 OR slug = $1`). The
-// sentence survives verbatim in pf_get_step's own tool description, which is
-// where it was copied from, and it is wrong there too. The case for forwarding
+// sentence survived verbatim in pf_get_step's own tool description — where it
+// was copied from — until aihub#590 (2026-09-10) corrected it there and
+// slug_publication_test.go pinned the corrected wording. The case for forwarding
 // does not rest on a downstream consumer at all, which is the point: under a
 // delete-list, exposure is the default and nobody has to prove a field is needed.
 //

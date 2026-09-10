@@ -110,12 +110,23 @@ declared in `docs/mcp-cards/live-response-keys.json`.
 - **§6.2 T2-7** — the "does anything read this?" question the ruling asks about
   adopt/close/ignore applies to the annotation flow too, and the ruling's own caveat
   names that flow explicitly as the thing that was not checked.
-- **§6.2 T2-5** — `memory_commit_resolved` is another free-text event type with no
-  published vocabulary: no published tool declares an enum containing it and
-  `pf_emit_event`'s `event_type` declares no enum at all, censused against a control
-  requiring the set to publish some real enum by
-  `internal/mcp/resolve_commit_contract_test.go`
-  (`TestResolveCommitEventTypeHasNoPublishedVocabulary`).
+- **§6.2 T2-5 — LANDED (`aihub#444`).** `memory_commit_resolved` is a free-text event
+  type in the sense that nothing enforces it — `agent_events.event_type` has no CHECK
+  and no published tool declares an `enum` containing this value, `pf_emit_event`'s
+  `event_type` declaring no `enum` at all because an MCP enum is advisory — while the
+  vocabulary IS published, in that parameter's DESCRIPTION, built from
+  `domain.EventVocabulary` rather than retyped and carrying this event type, all three
+  halves censused against a control requiring the published set to contain some real
+  enum somewhere by `internal/mcp/resolve_commit_contract_test.go`
+  (`TestResolveCommitEventTypeIsPublishedInProseAndNotAsAnEnum`), with the general
+  form of the same statement held by `internal/mcp/tools_events_vocab_test.go`
+  (`TestEmitEventTypeIsNotPublishedAsAClosedEnum` and
+  `TestEmitEventTypeDescriptionPublishesTheVocabulary`).
+  This bullet read "another free-text event type with no published vocabulary" until
+  2026-09-10 (`aihub#543`), which had been false in its second half since `aihub#444`
+  landed the publication — the same correction `pf_pr` and `pf_redact_memory` already
+  carry.
+  <!-- prose-only: because=history -->
 
 ## Open
 

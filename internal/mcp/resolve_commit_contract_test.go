@@ -452,20 +452,33 @@ func TestResolveCommitReplyIsRequiredAtEveryHopAndStored(t *testing.T) {
 	}
 }
 
-// TestResolveCommitEventTypeHasNoPublishedVocabulary is the Policy sentence:
-// `memory_commit_resolved` is "another free-text event type with no published
-// vocabulary".
+// TestResolveCommitEventTypeIsPublishedInProseAndNotAsAnEnum is the corrected
+// Policy sentence.
 //
-// The census is over every published tool's InputSchema: no `enum` anywhere in
-// the set may contain this event type, and `pf_emit_event`'s `event_type`
-// parameter — the one place a caller supplies an event type — may declare no
-// enum at all.
+// 🔴 The card used to say `memory_commit_resolved` was "another free-text event
+// type with NO PUBLISHED VOCABULARY", and this arm was named for that claim
+// while asserting only its enum half. Measured 2026-09-10: the second half is
+// false and has been since aihub#444. `memory_commit_resolved` is
+// domain.EventVocabulary's own entry (internal/domain/event_types.go), and
+// emitEventTypePropDescription() puts that whole list on the wire in
+// pf_emit_event's `event_type` DESCRIPTION. So the honest statement is the one
+// pf_pr.md and pf_redact_memory.md already carry: nothing ENFORCES the value —
+// no CHECK, and no `enum` key, because an MCP enum is advisory — and the
+// vocabulary IS published, in prose.
 //
-// ⚠️ The control matters more than the assertion here. "No enum" is trivially
+// The arm therefore holds three things, and the third is the one the rename is
+// about:
+//
+//	no `enum` anywhere in the published set contains this event type
+//	`pf_emit_event`'s `event_type` declares no `enum` at all
+//	`pf_emit_event`'s `event_type` DESCRIPTION names this event type
+//
+// ⚠️ The control matters more than the two negatives. "No enum" is trivially
 // true of a walk that reads no schemas, and it is trivially true of a server
 // that publishes no enums at all; so the arm also requires the set to contain a
-// REAL enum somewhere, which makes "free-text" a fact about this vocabulary
-// rather than about the walk or about the schema style.
+// REAL enum somewhere, which makes the negative a fact about this vocabulary
+// rather than about the walk or about the schema style. The positive half needs
+// no such control: it names a value that has to be present.
 //
 // Mutants (2026-09-10):
 //
@@ -473,7 +486,24 @@ func TestResolveCommitReplyIsRequiredAtEveryHopAndStored(t *testing.T) {
 //	    containing memory_commit_resolved                     RED
 //	M73 every propEnum in the tool set becomes a plain prop    RED  (control arm)
 //	M74 green control: reword event_type's description         GREEN
-func TestResolveCommitEventTypeHasNoPublishedVocabulary(t *testing.T) {
+//
+// Mutants (2026-09-10, the review-response round that renamed it):
+//
+//	M74b drop `memory_commit_resolved` from domain.EventVocabulary, so the
+//	     published description stops naming it
+//	                                          GREEN on the arm as it stood under
+//	                                                its old name — measured, by
+//	                                                running that version against
+//	                                                this mutant, and it is why a
+//	                                                false sentence could carry a
+//	                                                citation for a day
+//	                                          RED   here, on the positive half
+//	                                                (internal/domain's own
+//	                                                vocabulary arm reddens too,
+//	                                                which is the coverage this one
+//	                                                complements rather than
+//	                                                duplicates)
+func TestResolveCommitEventTypeIsPublishedInProseAndNotAsAnEnum(t *testing.T) {
 	desc := publishedTool(t, "pf_resolve_commit").Description
 	m := publishedEffectsRe.FindStringSubmatch(desc)
 	if m == nil {
@@ -515,9 +545,22 @@ func TestResolveCommitEventTypeHasNoPublishedVocabulary(t *testing.T) {
 		t.Fatalf("pf_emit_event publishes no event_type property:\n%s", emitSchema)
 	}
 	if strings.Contains(eventTypeProp, `"enum"`) {
-		t.Errorf("pf_emit_event's event_type now publishes an enum: %s. Either the vocabulary is "+
-			"published — and this card's Policy sentence, plus every other card recording a "+
-			"free-text event type, has to change — or the enum is wrong.", eventTypeProp)
+		t.Errorf("pf_emit_event's event_type now publishes an enum: %s. Either the closed set is "+
+			"real — and this card's Policy sentence, plus every other card recording an advisory "+
+			"enum as the reason the key is unused, has to change — or the enum is wrong.",
+			eventTypeProp)
+	}
+
+	// The POSITIVE half, and the reason this arm was renamed: "no published
+	// vocabulary" was false while every assertion above stayed green. The
+	// description is where aihub#444 put the vocabulary, so a value missing from
+	// it is a value a caller has to guess.
+	if !strings.Contains(eventTypeProp, eventType) {
+		t.Errorf("pf_emit_event's event_type description does not name %q:\n%s\nThe vocabulary is "+
+			"published in this description rather than under an `enum` key (aihub#444), built "+
+			"from domain.EventVocabulary — so an event type this repo emits and the description "+
+			"omits is one a caller of pf_read_events(types=[...]) can only guess at, which is the "+
+			"measured defect that publication exists to close.", eventType, eventTypeProp)
 	}
 }
 

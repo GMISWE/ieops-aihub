@@ -220,9 +220,16 @@ func TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys(t *testing.T) {
 //
 // That is not a contradiction, and the distinction matters enough to state
 // plainly. This test passes on both builds BY DESIGN. `attrs` is a whole-column
-// REPLACE and stays one, because it is the only way to delete a key and because
-// changing what an existing field means, without the caller changing anything,
-// is a worse defect than the one being fixed. What aihub#288 adds is an
+// REPLACE and stays one, because changing what an existing field means, without
+// the caller changing anything, is a worse defect than the one being fixed.
+//
+// ⚠️ It is NOT retained because it is "the only way to delete a key" — that was
+// this comment's stated reason and the card's, and aihub#543's review round
+// measured it false: attrs_unset (`attrs = attrs - $n::text[]`) deletes named
+// top-level keys and TestUpdateWorkItemAttrsUnset_DeletesNamedKeys below drives
+// it. The reason that survives is the compatibility one alone.
+//
+// What aihub#288 adds is an
 // alternative (attrs_patch) that the caller in the incident could have reached
 // for; what it does not do is silently reinterpret the call they actually made.
 //

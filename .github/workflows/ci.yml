@@ -1414,6 +1414,16 @@ jobs:
             grep -q -- "--- PASS: $want" wi_cas.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated CAS coverage is not actually executing"; exit 1; }
           done
+          # aihub#543's review round — PARENT-CITED SUBTESTS, pinned by name for the
+          # reason the "aihub#371 remember project/work_item_id consistency DB tests"
+          # step states of its own six: a contract card cites the
+          # PARENT function, so deleting the subtest leaves the citation resolving, K12
+          # green, and this step's function-level greps unmoved. Each name below was
+          # read off a real `--- PASS:` line rather than derived from the t.Run string.
+          for want in "TestUpdateWorkItemCASVersionAdvancesAcrossWrites/a_writer_that_omits_the_version_discards_the_previous_list_and_still_gets_a_200"; do
+            grep -q -- "--- PASS: $want" wi_cas.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_update_work_item card cites this function for what an omitted resources_version does to the stored list, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
+          done
           ! grep -q -- '--- SKIP' wi_cas.log \
             || { echo "::error::a TestUpdateWorkItemCAS case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
@@ -1660,6 +1670,17 @@ jobs:
             grep -q -- "--- PASS: $want" wi_attrs.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the DB-gated attrs merge coverage is not actually executing"; exit 1; }
           done
+          # aihub#543's review round — PARENT-CITED SUBTESTS, pinned by name for the
+          # reason the "aihub#371 remember project/work_item_id consistency DB tests"
+          # step states of its own six: a contract card cites the
+          # PARENT function, so deleting the subtest leaves the citation resolving, K12
+          # green, and this step's function-level greps unmoved. Each name below was
+          # read off a real `--- PASS:` line rather than derived from the t.Run string.
+          for want in "TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys/the_merge_is_shallow:_a_patched_key's_stored_value_is_replaced_outright" \
+                      "TestUpdateWorkItemAttrsPatch_WorksOnTerminalWorkItem/a_patch_mixing_attrs_patch_with_a_working-tier_field_is_refused_whole"; do
+            grep -q -- "--- PASS: $want" wi_attrs.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_update_work_item card cites these functions for the shallow merge and for the mixed-patch refusal, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
+          done
           ! grep -q -- '--- SKIP' wi_attrs.log \
             || { echo "::error::a TestUpdateWorkItemAttrs case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
@@ -1733,6 +1754,16 @@ jobs:
                       'TestBlockedByIsMachineReadable/recreating_an_existing_edge_emits_no_second_event'; do
             grep -q -- "--- PASS: $want" dep_events.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); an aihub#357 arm is unguarded and a dependency can be created with no machine-readable record of it"; exit 1; }
+          done
+          # aihub#543's review round — PARENT-CITED SUBTESTS, pinned by name for the
+          # reason the "aihub#371 remember project/work_item_id consistency DB tests"
+          # step states of its own six: a contract card cites the
+          # PARENT function, so deleting the subtest leaves the citation resolving, K12
+          # green, and this step's function-level greps unmoved. Each name below was
+          # read off a real `--- PASS:` line rather than derived from the t.Run string.
+          for want in "TestBlockedByIsMachineReadable/cross_project_needs_viewer_on_the_blocking_end"; do
+            grep -q -- "--- PASS: $want" dep_events.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_create_work_item and pf_create_dependency cards cite this function for the cross-project visibility rule on the blocking end, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
           done
           for want in 'TestDependencyEndpointsResolveSlugs/list_by_slug_returns_the_same_edges_as_by_id' \
                       'TestDependencyEndpointsResolveSlugs/list_by_slug_reports_the_blocking_end_too' \
@@ -4791,6 +4822,17 @@ jobs:
             grep -q -- "--- PASS: $want" event_types.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); an admin declaring an admin event can again be refused where one saying nothing succeeds, and a missing work_item_id can again answer 500 with the driver's constraint text (aihub#444)"; exit 1; }
           done
+          # aihub#543's review round — PARENT-CITED SUBTESTS, pinned by name for the
+          # reason the "aihub#371 remember project/work_item_id consistency DB tests"
+          # step states of its own six: a contract card cites the
+          # PARENT function, so deleting the subtest leaves the citation resolving, K12
+          # green, and this step's function-level greps unmoved. Each name below was
+          # read off a real `--- PASS:` line rather than derived from the t.Run string.
+          for want in "TestEmitEventNullWorkItem_IsA400NotA500/an_off-vocabulary_type_WITH_a_work_item_is_accepted" \
+                      "TestMigration0036_AdmitsAdminGcManualWithNoWorkItem/the_column_takes_any_type_when_a_work_item_is_present"; do
+            grep -q -- "--- PASS: $want" event_types.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_emit_event card cites these functions for the CHECK being about a MISSING work item rather than about the vocabulary, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
+          done
           ! grep -q -- '--- SKIP' event_types.log \
             || { echo "::error::an aihub#444 event_type test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
@@ -4865,6 +4907,17 @@ jobs:
                       TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret; do
             grep -q -- "--- PASS: $want" attempt_status_vocabulary.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#441 attempt-status vocabulary invariants are not actually executing"; exit 1; }
+          done
+          # aihub#543's review round — PARENT-CITED SUBTESTS, pinned by name for the
+          # reason the "aihub#371 remember project/work_item_id consistency DB tests"
+          # step states of its own six: a contract card cites the
+          # PARENT function, so deleting the subtest leaves the citation resolving, K12
+          # green, and this step's function-level greps unmoved. Each name below was
+          # read off a real `--- PASS:` line rather than derived from the t.Run string.
+          for want in "TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused/the_paused_branch_needs_a_valid_secret" \
+                      "TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused/a_cancelled_work_item_refuses_a_re-claim"; do
+            grep -q -- "--- PASS: $want" attempt_status_vocabulary.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the pf_pause_attempt and pf_cancel_work_item cards cite this function for the paused-branch secret check and for a cancelled work item refusing a re-claim, and a deleted subtest leaves the citation resolving to a function that no longer holds the claim"; exit 1; }
           done
           ! grep -q -- '--- SKIP' attempt_status_vocabulary.log \
             || { echo "::error::an aihub#441 attempt-status vocabulary test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }

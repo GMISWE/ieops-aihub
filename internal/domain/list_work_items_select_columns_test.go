@@ -78,11 +78,20 @@ const floorFullRecordSelects = 2
 //	                                             starts travelling, and every
 //	                                             projection arm stays green
 //	M25 drop wi.resources_version from the vector query's column list
-//	                                        RED  the compare-and-set token
-//	                                             disappears from one of the two
-//	                                             paths, which is the half the
-//	                                             lockstep comment claims and
-//	                                             nothing else reads
+//	                                        RED  ON THE FLOOR, and the attribution
+//	                                             is corrected here (2026-09-10,
+//	                                             aihub#543's review round): the
+//	                                             column is HALF THE MARKER, so
+//	                                             dropping it removes that site from
+//	                                             the population and the floor Fatal
+//	                                             names it. The per-site check that
+//	                                             used to be credited with this was
+//	                                             dead by construction — every site
+//	                                             in the population contains the
+//	                                             marker, hence the column — and it
+//	                                             is gone. The compare-and-set token
+//	                                             is still held, by the same
+//	                                             mechanism as M27 below
 //	M27 reorder the pair to `wi.resources_version, wi.declared_resources`
 //	                                        RED  on the FLOOR, which is the
 //	                                             correct answer: the marker no
@@ -158,17 +167,18 @@ func TestWorkItemListSelectsCarryTheCASTokenAndNotTheBody(t *testing.T) {
 				"becomes false. If the column is wanted, that is a decision about the response "+
 				"size, and the cards say otherwise today.\n    SELECT: %s", s.file, s.columns)
 		}
-		// The half the corrected pf_get_work_item sentence rests on: the CAS
-		// token is NOT what makes this tool the one to call, because the list
-		// serves it too.
-		if !strings.Contains(s.columns, "wi.resources_version") {
-			t.Errorf("%s: a work-item list SELECT no longer projects wi.resources_version.\n"+
-				"    internal/mcp/list_wi_slim_e2e_test.go keeps that key because it is the "+
-				"compare-and-set guard read from this same response, and the pf_get_work_item "+
-				"card now says so rather than claiming this tool is the only source of it. "+
-				"Dropping it here makes both statements false at once.\n    SELECT: %s",
-				s.file, s.columns)
-		}
+		// 🔴 There is deliberately NO second check for wi.resources_version here.
+		// One stood at this spot and was DEAD BY CONSTRUCTION: `sites` holds only
+		// blocks containing fullRecordSelectMarker, and that marker is
+		// "wi.declared_resources, wi.resources_version" — so every member of the
+		// population contains the column the check asked about, and it could not
+		// fail. Removed 2026-09-10 by aihub#543's review round.
+		//
+		// The claim it was written for is not lost: dropping wi.resources_version
+		// from a query drops the MARKER, that site leaves the population, and the
+		// floor Fatal above fires naming the file and telling the reader to fix
+		// fullRecordSelectMarker in the same diff. That is where mutant M25 really
+		// landed, not here.
 	}
 
 	// The two paths must both be in the population, named rather than counted:

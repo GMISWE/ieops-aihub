@@ -104,15 +104,20 @@ under the admin group.
   leg of `internal/server/user_admin_write_shape_test.go`
   (`TestCreateUserResponseIsTheHandlersOwnProjection`) refuses any key-, token- or
   secret-shaped name in the answer this handler builds.
-- `author_aliases` set here is **stored and read nowhere** — measured 2026-09-10 by
+- `author_aliases` set here is **stored, and no SQL statement this census can see
+  reads it back** — measured 2026-09-10 by
   `internal/mcp/user_admin_surface_test.go`
   (`TestAuthorAliasesIsWrittenAndNeverRead`), which censuses three writers and no
   reader of `users.author_aliases` across `internal/` and `pkg/`, uses `display_name`
-  as the positive control for its read-detector, and also refuses a published
-  description that claims attribution. So no code path in aihub maps a git commit
-  author to a user by it; commit records take their author from the authenticated
-  caller instead. 🔴 This bullet used to read "is how commits attribute to this
-  user", and `pf_update_user.md` said the same; neither was true of this tree.
+  as the positive control for its read-detector, holds two further controls for the
+  shapes that detector used to miss — a SELECT split across concatenated literals,
+  and a `RETURNING` clause — and also refuses a published description that claims
+  attribution. What it cannot see is a statement assembled through a slice of
+  fragments, so the honest form is "no readable statement", not "no read"; on that
+  evidence no code path in aihub maps a git commit author to a user by this column,
+  and commit records take their author from the authenticated caller instead.
+  🔴 This bullet used to read "is how commits attribute to this user", and
+  `pf_update_user.md` said the same; neither was true of this tree.
   The field is therefore the mirror of that card's §6.1 T1-9 case — a published field
   nothing reads — and it is recorded rather than fixed here, because wiring a reader
   is a behaviour change.

@@ -16,7 +16,8 @@ package mcp_test
 //	pf_create_user.md
 //	  "`email` is the interesting row: it is **not** in the `required` array…"
 //	      -> TestCreateUserPublishesEmailAsProseRatherThanRequired
-//	  "`author_aliases` is stored on the user row and read nowhere in this repo…"
+//	  "`author_aliases` is stored, and no SQL statement this census can see reads
+//	   it back…"
 //	      -> TestAuthorAliasesIsWrittenAndNeverRead
 //
 // All DB-free. Four read a real session; the last is a census over the tree.
@@ -450,6 +451,30 @@ func publishedRequiredAndProps(t *testing.T, tool string) ([]string, map[string]
 // (handleListUsers), so a broken read-detector fails there before this arm can
 // report a clean absence.
 //
+// 🔴 THAT CONTROL WAS NOT ENOUGH, measured 2026-09-10 by aihub#543's review
+// round. It proves the detector sees a SELECT written as ONE string literal, and
+// nothing proved it saw one written the way this repo writes long statements. Two
+// shapes walked straight through all four subtests (mutants A3-1 and A3-2 below,
+// both executed against HEAD's classifier and both GREEN there):
+//
+//	a SELECT split across two literals    the fragment holding the column carries
+//	                                      no `select` keyword, so it matched
+//	                                      neither pattern and landed in NEITHER
+//	                                      list — a clean absence reported for a
+//	                                      visible read
+//	UPDATE … RETURNING author_aliases     matched `\bupdate\b` and filed as a
+//	                                      WRITE, so a statement handing the column
+//	                                      back to the handler counted as evidence
+//	                                      for "no reader"
+//
+// The classifier now joins `+`-concatenation chains into one family and treats a
+// RETURNING clause as a read (a family can be both), and the two synthetic
+// controls below hold each shape. What it STILL cannot see is a statement
+// assembled through a slice of fragments, which is why the two cards now say "no
+// SELECT this census can see" rather than "read nowhere" — the wording and the
+// instrument were made to agree, in that order of preference: the instrument
+// first.
+//
 // The published half is asserted too: neither tool's description may claim the
 // field is used for attribution. That is the sentence that was false, and if the
 // gap ever closes both the description and the cards have to move in the same
@@ -474,6 +499,23 @@ func publishedRequiredAndProps(t *testing.T, tool string) ([]string, map[string]
 //	                                               (the_column_is_written)
 //	M30 floor: make the read-detector match nothing
 //	                                          RED  the display_name control
+//
+// MUTANTS (aihub#543's review round, 2026-09-10 — each applied to this tree, run,
+// and reverted; the router.go sha256 was compared before and after so a green
+// verdict cannot be a mutant that never landed):
+//
+//	A3-1 add author_aliases to handleListUsers' SELECT, written as a
+//	     CONCATENATION of two literals the way router.go's user UPDATE is
+//	                                          GREEN on HEAD's classifier — the
+//	                                               demonstration this hardening
+//	                                               answers
+//	                                          RED  on this one, no_select_reads_it
+//	                                               naming router.go:1233
+//	A3-2 append " RETURNING author_aliases" to the user UPDATE
+//	                                          GREEN on HEAD's classifier (filed as
+//	                                               a write)
+//	                                          RED  on this one, no_select_reads_it
+//	                                               naming router.go:1325
 func TestAuthorAliasesIsWrittenAndNeverRead(t *testing.T) {
 	const column = "author_aliases"
 	const readControl = "display_name"
@@ -488,6 +530,56 @@ func TestAuthorAliasesIsWrittenAndNeverRead(t *testing.T) {
 				"that sees no reads answers \"nothing reads it\" about every column, so the "+
 				"finding below would be an artefact. Writes seen for the control: %v",
 				readControl, controlWrites)
+		}
+	})
+
+	// 🔴 The two SHAPE controls, and they are the aihub#543 review-round addition.
+	// The subtest above proves the classifier sees a read written as one literal;
+	// neither it nor anything else proved it sees a read written the way this repo
+	// actually writes long statements. Both shapes are driven over a synthetic file
+	// rather than over the tree, because a control that needs the tree to contain
+	// the shape stops being a control the day somebody tidies it up.
+	t.Run("the_detector_sees_a_concatenated_read", func(t *testing.T) {
+		const src = `package p
+
+func q() string {
+	return "SELECT id, email, " +
+		"probe_column FROM users WHERE id=$1"
+}
+`
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, "synthetic.go", src, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parse the synthetic fixture: %v", perr)
+		}
+		w, r := columnSitesInFile(fset, f, "synthetic.go", "probe_column")
+		if len(r) != 1 {
+			t.Errorf("a SELECT split across two string literals produced %d read(s) (writes=%v). "+
+				"That is the shape internal/server/router.go already uses for its user UPDATE, "+
+				"and before aihub#543's review round it landed in NEITHER list — so the census "+
+				"answered \"nothing reads this column\" about a statement selecting it, with all "+
+				"four subtests green.", len(r), w)
+		}
+	})
+
+	t.Run("the_detector_sees_a_returning_read", func(t *testing.T) {
+		const src = `package p
+
+func q() string {
+	return "UPDATE users SET display_name=$1 WHERE id=$2 RETURNING probe_column"
+}
+`
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, "synthetic.go", src, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parse the synthetic fixture: %v", perr)
+		}
+		w, r := columnSitesInFile(fset, f, "synthetic.go", "probe_column")
+		if len(r) != 1 || len(w) != 1 {
+			t.Errorf("an UPDATE … RETURNING <column> produced %d read(s) and %d write(s), want 1 "+
+				"and 1. It is both, and the old classifier's exclusive switch filed it as a write "+
+				"only — which is a reader hidden behind the verb that governs the rest of the "+
+				"statement.", len(r), len(w))
 		}
 	})
 
@@ -535,7 +627,7 @@ func TestAuthorAliasesIsWrittenAndNeverRead(t *testing.T) {
 }
 
 var (
-	// sqlSelect / sqlWrite classify a string literal that mentions a column.
+	// sqlSelect / sqlWrite classify a SQL literal FAMILY that mentions a column.
 	// Deliberately about the STATEMENT and not about the column's position in it:
 	// a literal is a fragment as often as a whole statement, and `author_aliases=$`
 	// is the whole of one write site.
@@ -543,8 +635,150 @@ var (
 	sqlWrite  = regexp.MustCompile(`(?is)\binsert\s+into\b|\bupdate\b|\bset\b|=\s*\$\d*`)
 )
 
-// columnSQLSites censuses every string literal in non-test Go under internal/
-// and pkg/ that mentions the column, split into SQL reads and SQL writes.
+// sqlReturningRead reports whether text reads column back through a RETURNING
+// clause.
+//
+// 🔴 Added by aihub#543's review round, and it closes a hole with the same shape
+// as the concatenation one below: `UPDATE … SET x=$1 RETURNING author_aliases`
+// matches `\bupdate\b`, so the old classifier filed it as a WRITE and the
+// no-reader finding survived a statement that hands the column straight back to
+// the handler. A RETURNING clause is a read whatever else the statement does, so
+// this is checked alongside the write patterns rather than instead of them.
+func sqlReturningRead(text, column string) bool {
+	return regexp.MustCompile(`(?is)\breturning\b[^;]*` + regexp.QuoteMeta(column)).MatchString(text)
+}
+
+// sqlLiteralFamily is one SQL expression's joined text plus where it starts.
+type sqlLiteralFamily struct {
+	text string
+	line int
+}
+
+// sqlLiteralFamilies returns every string-literal expression in file, with
+// `+`-concatenated chains JOINED into a single family.
+//
+// 🔴 The join is aihub#543's review-round fix and the reason this helper exists
+// at all. The classifier used to read ONE literal at a time, so a statement
+// assembled across two of them —
+//
+//	"SELECT id, email, " +
+//		"author_aliases FROM users"
+//
+// left the column in a fragment carrying no `select` keyword, matched neither
+// pattern, and landed in NEITHER list: the census answered "no reader" about a
+// column it could see being read, and all four subtests of
+// TestAuthorAliasesIsWrittenAndNeverRead passed under exactly that shape when it
+// was applied to this tree. internal/server/router.go builds its user UPDATE
+// that way already, so the shape is this repo's own house style rather than a
+// hypothetical.
+//
+// ⚠️ What it still cannot see, stated rather than left for the next reader to
+// find: a statement assembled through a SLICE of fragments —
+// `sets = append(sets, "author_aliases=$"+itoa(idx))` joined later by
+// `joinComma(sets)` — is data flow, not a concatenation expression, so the
+// column's fragment and the verb that governs it are two different families.
+// That is why the fragment above is classified on its own `=$` shape, and why
+// the two user cards say "no SELECT this census can see" rather than "no read".
+func sqlLiteralFamilies(fset *token.FileSet, file *ast.File) []sqlLiteralFamily {
+	var out []sqlLiteralFamily
+	consumed := map[token.Pos]bool{}
+
+	// Pass one: concatenation chains. ast.Inspect visits a parent before its
+	// children, so the OUTERMOST chain claims its literals first and an inner
+	// BinaryExpr whose parts are all claimed is skipped — while a chain nested
+	// inside a CALL inside the outer chain is still reached, because the collector
+	// below descends only through `+` and string literals.
+	ast.Inspect(file, func(n ast.Node) bool {
+		be, ok := n.(*ast.BinaryExpr)
+		if !ok || be.Op != token.ADD {
+			return true
+		}
+		var parts []*ast.BasicLit
+		var collect func(ast.Expr)
+		collect = func(e ast.Expr) {
+			switch v := e.(type) {
+			case *ast.BinaryExpr:
+				if v.Op == token.ADD {
+					collect(v.X)
+					collect(v.Y)
+				}
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					parts = append(parts, v)
+				}
+			}
+		}
+		collect(be)
+
+		fresh := false
+		var sb strings.Builder
+		for _, p := range parts {
+			if consumed[p.Pos()] {
+				continue
+			}
+			s, uerr := strconv.Unquote(p.Value)
+			if uerr != nil {
+				continue
+			}
+			sb.WriteString(s)
+			consumed[p.Pos()] = true
+			fresh = true
+		}
+		if fresh {
+			out = append(out, sqlLiteralFamily{
+				text: sb.String(),
+				line: fset.Position(parts[0].Pos()).Line,
+			})
+		}
+		return true
+	})
+
+	// Pass two: every string literal no chain claimed, on its own.
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING || consumed[lit.Pos()] {
+			return true
+		}
+		s, uerr := strconv.Unquote(lit.Value)
+		if uerr != nil {
+			return true
+		}
+		out = append(out, sqlLiteralFamily{text: s, line: fset.Position(lit.Pos()).Line})
+		return true
+	})
+	return out
+}
+
+// columnSitesInFile classifies one parsed file's SQL literal families.
+//
+// Factored out of the walk so the two synthetic controls in
+// TestAuthorAliasesIsWrittenAndNeverRead can drive the classifier over a shape
+// this tree does not happen to contain today. A control that depended on the
+// tree containing the shape would be a control that disappears when the tree is
+// tidied.
+//
+// A family may be BOTH: an UPDATE with a RETURNING clause writes the column and
+// reads it back, and reporting only the write is how the old classifier hid a
+// reader.
+func columnSitesInFile(fset *token.FileSet, file *ast.File, path, column string) (writes, reads []string) {
+	for _, fam := range sqlLiteralFamilies(fset, file) {
+		if !strings.Contains(fam.text, column) {
+			continue
+		}
+		site := filepath.ToSlash(path) + ":" + strconv.Itoa(fam.line)
+		if sqlSelect.MatchString(fam.text) || sqlReturningRead(fam.text, column) {
+			reads = append(reads, site)
+		}
+		if sqlWrite.MatchString(fam.text) {
+			writes = append(writes, site)
+		}
+	}
+	return writes, reads
+}
+
+// columnSQLSites censuses every SQL literal family in non-test Go under
+// internal/ and pkg/ that mentions the column, split into SQL reads and SQL
+// writes.
 //
 // String literals rather than a text grep, and go/parser rather than a scanner,
 // for the reason BuildArmIndex states: a comment or a fixture can contain the
@@ -574,24 +808,9 @@ func columnSQLSites(t *testing.T, column string) (writes, reads []string) {
 			if perr != nil {
 				return perr
 			}
-			ast.Inspect(file, func(n ast.Node) bool {
-				lit, ok := n.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return true
-				}
-				s, uerr := strconv.Unquote(lit.Value)
-				if uerr != nil || !strings.Contains(s, column) {
-					return true
-				}
-				site := filepath.ToSlash(path) + ":" + strconv.Itoa(fset.Position(lit.Pos()).Line)
-				switch {
-				case sqlSelect.MatchString(s):
-					reads = append(reads, site)
-				case sqlWrite.MatchString(s):
-					writes = append(writes, site)
-				}
-				return true
-			})
+			w, r := columnSitesInFile(fset, file, path, column)
+			writes = append(writes, w...)
+			reads = append(reads, r...)
 			return nil
 		})
 		if err != nil {

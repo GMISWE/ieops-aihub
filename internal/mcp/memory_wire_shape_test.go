@@ -268,10 +268,16 @@ func TestReinforceAndUpdateSendCredentialsAndTheWorkItemAndNoMemoryId(t *testing
 //
 // It is also the positive control the aihub#325 credential arm cannot supply.
 // TestMemoryToolsSendCredentialsWithTheirWorkItem `continue`s on any tool whose
-// body has no attempt_id — so pf_redact_memory has always been SKIPPED by it,
-// and a day when this tool started injecting credentials without a work item
-// would move it from "skipped" to "skipped", silently. The card calls the
-// absence deliberate; this is what makes that a checked claim rather than a
+// body has no attempt_id, so pf_redact_memory has always been SKIPPED by it.
+//
+// ⚠️ Corrected 2026-09-10 (aihub#543): this comment, and the card, had the blind
+// spot INVERTED. Credentials with NO work_item_id is precisely the pair that
+// invariant refuses, so that day would move this tool from "skipped" to RED —
+// mutant M10 below is that day, and it reddens there too. The shape neither of
+// them can see is credentials arriving WITH a work_item_id: it satisfies the
+// invariant, and it is what would quietly turn a role-authorized path into one a
+// reader takes for attempt-gated. The card calls the absence deliberate; the
+// exact key set here is what makes that a checked claim rather than a
 // description of whatever the renderer happens to do.
 //
 //	M10  add attempt_id to buildRedactMemoryBody          RED

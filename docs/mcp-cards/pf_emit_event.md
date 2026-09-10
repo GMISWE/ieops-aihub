@@ -168,8 +168,12 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
   to be BUILT from the list rather than retyped beside it.
 - **The enum was not used, on purpose.** An MCP enum is advisory — the untyped
   `AddTool` path validates nothing, which `internal/mcp/create_user_vocab_test.go`
-  (`TestCreateUserVocabEnumDoesNotRefuseInProcess`) measures on the one tool that does
-  publish an enum, and the server accepts any string, which
+  (`TestCreateUserVocabEnumDoesNotRefuseInProcess`) measures on `pf_create_user`, one
+  of the SIX tools whose published schema carries an `enum` key at all — measured
+  2026-09-10 over the 45 cards' generated machine blocks, which K3 pins against the
+  live schema: `pf_create_user`, `pf_create_work_item`, `pf_list_work_items`,
+  `pf_recall`, `pf_update_user` and `pf_update_work_item` — and the server accepts any
+  string, which
   `internal/mcp/emit_event_wire_shape_test.go`
   (`TestEmitEventTypeIsNotRefusedInProcess`) measures here — so publishing
   45 names under `enum` would state a closed contract nothing keeps. `aihub#445`

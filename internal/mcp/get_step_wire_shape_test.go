@@ -31,6 +31,7 @@ package mcp_test
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 
@@ -251,9 +252,23 @@ func TestGetStepDoesNotNormaliseAnAbsentHistory(t *testing.T) {
 // too, so only an unknown one distinguishes a pass-through from a projection
 // that happens to be complete today.
 //
+// 🔴 AN UNKNOWN KEY IS ONLY HALF OF IT, measured 2026-09-10 by aihub#543's review
+// round: `delete(result, "scenario_ref")` after GetStep left this arm green and
+// TestGetStepCarriesTwoKeysTheDescriptionDoesNotPromise below green as well —
+// that one reads the STRUCT and the DESCRIPTION, neither of which a delete
+// touches. A keep-list and a delete-list are different projections and only the
+// keep-list was watched. So the second half asserts the WHOLE declared key set
+// survives: every json key server.StepState binds is served and required back,
+// which is the population any delete-list would have to take from.
+//
 // MUTANTS:
 //
 //	M56 enforcement: project the result to a four-key keep-list  RED
+//	M56b enforcement: delete(result, "scenario_ref") after GetStep
+//	                                        GREEN on HEAD's version of this arm —
+//	                                              the demonstration the key-set
+//	                                              half answers
+//	                                        RED  every_declared_key_survives
 //	P7  publication: rename this arm        RED  K12 ARM_CITATION_UNRESOLVED
 func TestGetStepForwardsEveryKeyTheServerSends(t *testing.T) {
 	got, _ := driveGetStep(t, "wi_passthrough", map[string]any{
@@ -272,6 +287,37 @@ func TestGetStepForwardsEveryKeyTheServerSends(t *testing.T) {
 		t.Error("repo_pins did not arrive either; it is a real StepState field (aihub#416), and its " +
 			"loss would make the assertion above about an unknown key alone")
 	}
+
+	// The delete-list half. Driven from the STRUCT rather than from a list typed
+	// here, so a field added to server.StepState is covered the day it lands
+	// instead of the day somebody remembers this arm.
+	t.Run("every_declared_key_survives", func(t *testing.T) {
+		bound := boundJSONKeys(t, server.StepState{})
+		if len(bound) < 5 {
+			t.Fatalf("server.StepState binds %d json key(s); the reflection walk is broken and this "+
+				"subtest would be asserting over almost nothing", len(bound))
+		}
+		payload := map[string]any{}
+		for key := range bound {
+			payload[key] = "sentinel-" + key
+		}
+		payload["work_item_id"] = "wi_keyset"
+		answer, _ := driveGetStep(t, "wi_keyset", payload)
+		var missing []string
+		for key := range bound {
+			if _, present := answer[key]; !present {
+				missing = append(missing, key)
+			}
+		}
+		sort.Strings(missing)
+		if len(missing) > 0 {
+			t.Errorf("pf_get_step served %d declared key(s) and dropped %v. The card says this tool "+
+				"has no slim function, and an unknown-key probe cannot see a DELETE-LIST: a handler "+
+				"that removed one named key would pass every other assertion in this file, because "+
+				"the struct still binds it and the description still does not promise it. Keys "+
+				"back: %v", len(bound), missing, sortedKeysOfAny(answer))
+		}
+	})
 }
 
 // TestGetStepCarriesTwoKeysTheDescriptionDoesNotPromise holds "`current_step_attempt`

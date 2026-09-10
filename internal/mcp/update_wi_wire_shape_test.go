@@ -234,7 +234,9 @@ func TestBriefDropsTheBodyWhereTheEqualityGateWouldKeepIt(t *testing.T) {
 		if _, present := got["content"]; present {
 			t.Errorf("brief=true left the body in the reply. The equality gate would keep it " +
 				"here — stored differs from sent — so this is the equality gate answering a " +
-				"call that set brief, i.e. the wider rule is no longer the one checked first.")
+				"call that set brief, i.e. brief has stopped being the WIDER rule and now " +
+				"applies only where the gate would have dropped the body anyway. (Branch ORDER " +
+				"is not the claim: M22a swapped the two and stayed green.)")
 		}
 		if got["content_len"] != float64(len(stored)) {
 			t.Errorf("content_len = %v, want %d. Under brief the reply must always carry a "+

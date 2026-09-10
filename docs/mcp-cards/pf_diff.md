@@ -85,10 +85,13 @@ that reason.
   uniqueness half is a measurement rather than a recollection.
 - A path that exists but is not a usable git worktree fails here rather than being
   repaired. Claim-time verification is where that condition is diagnosed and
-  reported, in `internal/mcp/tools_lifecycle.go` (`verifyClaimWorktree`) — held for both
-  half-built shapes by `internal/mcp/claim_worktree_adopt_test.go`
-  (`TestClaimDoesNotAdoptADirectoryWithADanglingGitPointer`), whose own comment names
-  this tool as what a wrongly adopted directory breaks.
+  reported, in `internal/mcp/tools_lifecycle.go` (`verifyClaimWorktree`) — one
+  half-built shape per arm in `internal/mcp/claim_worktree_adopt_test.go`:
+  (`TestClaimDoesNotAdoptADirectoryWithADanglingGitPointer`) for the `.git` file
+  pointing at an admin directory that was never created, and
+  (`TestClaimDoesNotAdoptAHalfCheckedOutDirectoryInsideAGitWorkspace`) for the
+  directory that is inside a git workspace without being a worktree of its own. The
+  first arm's own comment names this tool as what a wrongly adopted directory breaks.
 
 ## hop 5 — what comes back
 

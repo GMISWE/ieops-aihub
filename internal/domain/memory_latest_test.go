@@ -576,6 +576,86 @@ func TestUpdateMemory(t *testing.T) {
 		Content: strp("nope"), CallerUserID: u, CallerDisplay: u,
 	})
 	require.Error(t, err)
+
+	// ── aihub#543 wave 2, slice L6 ───────────────────────────────────────────
+	//
+	// Two pf_update_memory card sentences that nothing here reached. Both are
+	// subtests rather than new top-level functions on purpose: this function is
+	// already in internal/citest/dbtestcov/gated_tests.txt and already named by a
+	// ci.yml step, so they cost no manifest edit — the spec's §3.3 rule 2.
+
+	// "`tags` is a replacement, like every other field here: the value sent
+	// becomes the list."
+	//
+	// Every assertion above this point observes tags being INHERITED when the
+	// field is omitted, which is the other half of the convention and the easy
+	// one. Nothing observed a sent value REPLACING the stored list, so a handler
+	// that merged the two — the intuitive reading of "new tags", and what a
+	// caller adding one tag would expect — was green.
+	//
+	//	M1  make UpdateMemory append req.Tags to head.Tags     RED
+	//	M2  make UpdateMemory ignore req.Tags                  RED
+	t.Run("tags replace rather than merge", func(t *testing.T) {
+		replaced, rerr := UpdateMemory(context.Background(), pool, v1.ID, &UpdateMemoryRequest{
+			Tags:          []string{"fresh"},
+			CallerUserID:  u,
+			CallerDisplay: u,
+		})
+		require.NoError(t, rerr)
+		require.Equal(t, []string{"fresh"}, replaced.Tags,
+			"the stored list was [keep] and the caller sent [fresh]; the new head holds %v. "+
+				"The card calls tags a REPLACEMENT like every other field here — a merge would "+
+				"mean a caller can never remove a tag, and every arm above this one is "+
+				"satisfied by a merge because they only ever omit the field.", replaced.Tags)
+	})
+
+	// "Since aihub#459 the value must also be a WHOLE NUMBER, and it is inherited
+	// here rather than decided here … so `2.5` is a 400 on this tool without a
+	// line of this tool's own code changing."
+	//
+	// TestUpdateMemoryInheritsTheStrengthGuardRatherThanRestatingIt holds the
+	// structural half — one call to Remember, no strength check of its own — and
+	// it cannot show the 400. The nil-pool technique the range arms use does not
+	// transfer: UpdateMemory reads the lineage head before it builds anything, so
+	// a nil pool panics on the read rather than answering. A real database is the
+	// only place this sentence is observable.
+	//
+	//	M3  drop ValidateIntegralStrength from validateBaseStrength   RED
+	//	    (2.5 is then accepted, truncated to 2 by the int2 codec,
+	//	    and answered 200 — the aihub#475 shape, through the door
+	//	    aihub#459 closed)
+	//	M4  make validateBaseStrength refuse everything              RED
+	//	    (the accepted-value arm below is what catches it)
+	t.Run("a fractional base_strength is a 400 on this path too", func(t *testing.T) {
+		fractional := 2.5
+		_, ferr := UpdateMemory(context.Background(), pool, v1.ID, &UpdateMemoryRequest{
+			BaseStrength:  &fractional,
+			CallerUserID:  u,
+			CallerDisplay: u,
+		})
+		require.Error(t, ferr, "base_strength=2.5 was accepted; the column is SMALLINT, so pgx "+
+			"truncates it toward zero with no error and the call answers 200 having stored 2")
+		var ae *AihubError
+		require.ErrorAs(t, ferr, &ae)
+		require.Equal(t, ErrBadRequest, ae.Code,
+			"a value the server can see is wrong is the caller's error, not a 500 that sends "+
+				"the reader to a server log (aihub#411 T1-6); got %v", ae.Code)
+		require.Contains(t, ae.Message, "whole number",
+			"the message must say what is wrong with the value; got %q", ae.Message)
+
+		// The control. Without it a guard that refused every base_strength on this
+		// path would satisfy the arm above perfectly, and "inherited rather than
+		// decided here" would be true of a guard that had stopped working.
+		whole := MinBaseStrength
+		accepted, aerr := UpdateMemory(context.Background(), pool, v1.ID, &UpdateMemoryRequest{
+			BaseStrength:  &whole,
+			CallerUserID:  u,
+			CallerDisplay: u,
+		})
+		require.NoError(t, aerr, "base_strength=%g is a whole number inside the range and must "+
+			"be accepted here", whole)
+		require.Equal(t, whole, accepted.BaseStrength)
+	})
 }
 
 // TestConcurrentUpdateSingleHead is the S2/BUG1 regression test: N concurrent

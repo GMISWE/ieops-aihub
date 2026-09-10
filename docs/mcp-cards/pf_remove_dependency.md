@@ -47,23 +47,36 @@ removal needs no permission on the blocking item.
 `DELETE /v1/work_items/<blocked>/dependencies/<blocking>/<kind>`, bound by
 `internal/server/router.go` (`handleDeleteDependency`).
 
-Every parameter is a **path segment**; there is no body at all. That is what made
-this tool the sharper half of the credential defect: the old code built
-`attempt_id`, `claim_epoch` and `session_secret` into a body that `RemoveDependency`
-never put on the wire — it issued the DELETE with a nil body and the client only
-marshals a non-nil one — so the three fields were constructed and dropped inside the
-same function.
+Every parameter is a **path segment**; there is no body at all, which
+`internal/mcp/dependency_card_claims_test.go`
+(`TestDependencyToolsAddressEdgesByPathAndSendNoCredential`) reads off the request
+this tool really makes — the three ids in that order, and a nil body.
+That absence is what made this tool the sharper half of the credential defect: the
+old code built `attempt_id`, `claim_epoch` and `session_secret` into a body that
+`RemoveDependency` never put on the wire, so the three fields were constructed and
+dropped inside the same function.
+<!-- prose-only: because=history -->
 
 ## hop 4 — what it actually does
 
 - Deletes the named edge. **Removing the last unfinished blocker requeues the blocked
   work item**, which is the effect a caller is usually after and which the create
-  side's `blocked_by` description states.
+  side's `blocked_by` description states — held with its own remaining-blocker control
+  by `internal/domain/dependencies_requeue_test.go`
+  (`TestDeleteDependency_LastBlockerRemoved_Requeues` and
+  `TestDeleteDependency_OtherBlockerRemains_StaysBlocked`).
 - The requeue sweep is synchronous with the removal, not a background job, so the
   status change is visible on the next read.
-- Deleting an edge that does not exist is not an error the schema warns about; the
-  three-segment address means a typo in `kind` addresses a different edge rather than
-  failing to parse.
+- **Deleting an edge that matches no row answers `NOT_FOUND`.** The schema does not
+  warn about it, and the three-segment address means a typo in `kind` addresses an
+  edge that does not exist rather than failing to parse — so the answer is the same
+  404 either way, and the real edge is untouched — both subtests of
+  `internal/domain/dependencies_requeue_test.go`
+  (`TestDeleteDependency_OtherBlockerRemains_StaysBlocked`), and the reason a `kind`
+  is never refused on this side is that `DeleteDependency` validates nothing, unlike
+  the create side — a difference held by
+  `internal/domain/dependency_kind_refusal_test.go`
+  (`TestDependencyKindIsValidatedOnCreateAndNotOnDelete`).
 
 ## hop 5 — what comes back
 
@@ -79,4 +92,8 @@ real callers have been handed.
 ## Open
 
 - Whether a no-op delete should be distinguishable from a successful one is not
-  covered by any adjudicated row, and the response does not say.
+  covered by any adjudicated row. **This bullet used to add "and the response does not
+  say", which was measured false on 2026-09-10** (`aihub#584`): a delete matching no
+  row is `NOT_FOUND`, which this tool returns as an error result rather than as an
+  `ok`, so the two are already distinguishable — what is unadjudicated is whether that
+  is the right answer for a caller retrying a partially-failed cleanup.

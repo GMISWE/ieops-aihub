@@ -207,4 +207,78 @@ func TestBlockedByIsMachineReadable(t *testing.T) {
 			"a duplicate create added no row, so it must add no event either; got %+v", after)
 	})
 
+	// ── aihub#543 probe wave 2: the CROSS-PROJECT rule on the create side ────
+	//
+	// docs/mcp-cards/pf_create_dependency.md: "Cross-project edges are permitted
+	// with `viewer` on the blocking side". TestBlockedBySlugCannotProbeInvisibleProjects
+	// holds that policy for the blocked_by path at CREATION time and says in its
+	// own comment that it is "the policy CreateDependency already applies" — but
+	// it never calls CreateDependency, so the standalone endpoint's copy of the
+	// rule was held by nothing. Three roles, one edge.
+	//
+	// A subtest of this function because it is already in
+	// internal/citest/dbtestcov/gated_tests.txt and already named by ci.yml's
+	// "aihub#357 dependency machine-readability" step, which runs
+	// -run '^TestBlockedByIsMachineReadable$' (spec §3.3 rule 2).
+	//
+	// Mutants (2026-09-10):
+	//
+	//	M115 drop the cross-project role check in CreateDependency   RED
+	//	M116 require writer rather than viewer on the blocking end   RED
+	//	M117 drop the callerRole == "admin" bypass                   RED
+	//	M118 green control: reword the 403 message                   GREEN
+	t.Run("cross_project_needs_viewer_on_the_blocking_end", func(t *testing.T) {
+		far := "p_dep543_create_far"
+		mustExec(t, pool, `INSERT INTO projects(name,owner_user_id) VALUES('`+far+`','`+u+`') ON CONFLICT (name) DO NOTHING`)
+		resetTestProject(t, pool, far)
+		farWI, aerr := CreateWorkItem(ctx, pool, &CreateWorkItemRequest{
+			Project: far,
+			Goal:    "rotate the object-store credentials the exporter uses",
+			Source:  "human",
+		}, u, u, nil, "")
+		require.Nil(t, aerr, "seeding the far-project blocker must succeed; got %+v", aerr)
+
+		req := func() *CreateDependencyRequest {
+			return &CreateDependencyRequest{
+				BlockedWIID:  blocked.ID,
+				BlockingWIID: farWI.ID,
+				Kind:         "blocks",
+			}
+		}
+
+		// No role at all on the far project: refused, and refused as a
+		// permission failure rather than as a not-found.
+		aerr = CreateDependency(ctx, pool, req(), u, map[string]string{project: "writer"}, "writer")
+		require.NotNil(t, aerr,
+			"a writer on the blocked item's project with NO role on the blocking item's created a "+
+				"cross-project edge. The card publishes viewer+ on the blocking side as the rule, and "+
+				"an edge is a reference to a work item in a project the caller cannot see.")
+		assert.Equal(t, ErrForbidden, aerr.Code, "want FORBIDDEN; got %+v", aerr)
+
+		// viewer is enough — the published threshold, and the direction that
+		// matters most: a check that refused everybody would satisfy the
+		// assertion above while deleting a capability.
+		aerr = CreateDependency(ctx, pool, req(), u,
+			map[string]string{project: "writer", far: "viewer"}, "writer")
+		require.Nil(t, aerr, "viewer on the blocking project must be enough; got %+v", aerr)
+		assert.True(t, hasDependency(t, pool, blocked.ID, farWI.ID),
+			"CreateDependency reported success and wrote no row")
+
+		// And an admin, who holds no member row anywhere by design (aihub#227).
+		mustExec(t, pool, `DELETE FROM wi_dependencies WHERE blocked_wi_id='`+blocked.ID+`' AND blocking_wi_id='`+farWI.ID+`'`)
+		aerr = CreateDependency(ctx, pool, req(), u, map[string]string{}, "admin")
+		require.Nil(t, aerr, "an admin must not need a member row on the far project; got %+v", aerr)
+		assert.True(t, hasDependency(t, pool, blocked.ID, farWI.ID))
+	})
+
+}
+
+// hasDependency reports whether the blocks edge exists.
+func hasDependency(t *testing.T, pool *pgxpool.Pool, blockedWIID, blockingWIID string) bool {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM wi_dependencies WHERE blocked_wi_id=$1 AND blocking_wi_id=$2 AND kind='blocks'`,
+		blockedWIID, blockingWIID).Scan(&n))
+	return n > 0
 }

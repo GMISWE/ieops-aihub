@@ -110,10 +110,20 @@ func (s *Server) registerUserTools() {
 			//
 			// The consequence was narrow and total: pf_create_user publishes
 			// author_aliases, so aliases could be set at creation and then never
-			// changed from MCP again. Aliases are how a git commit author maps to
-			// a user, so the one case that could not be fixed was the one that
-			// matters — an alias that was wrong, or an author who acquired a new
-			// email.
+			// changed from MCP again — and the one case that could not be fixed
+			// was the one that matters: an alias that was wrong, or an author who
+			// acquired a new email.
+			//
+			// ⚠️ This block used to say "aliases are how a git commit author maps
+			// to a user". Measured 2026-09-10 by aihub#543: users.author_aliases
+			// has writers and NO reader anywhere in internal/ or pkg/, so nothing
+			// in aihub attributes a commit by it — commit records take their
+			// author from the authenticated caller. The census is
+			// TestAuthorAliasesIsWrittenAndNeverRead (user_admin_surface_test.go),
+			// which also refuses a description here that claims attribution, and
+			// the corrected sentence is in docs/mcp-cards/pf_create_user.md and
+			// pf_update_user.md. Publishing a bound field is still right; what was
+			// wrong was the reason given for it mattering.
 			//
 			// The empty-array spelling is published because the server
 			// distinguishes it and nothing else says so: the request struct binds

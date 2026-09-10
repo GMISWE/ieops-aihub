@@ -15,9 +15,19 @@ package mcp_test
 // What was broken is that the capability was reachable only by a caller who
 // guessed a name no schema mentions — and the consequence was narrow and total.
 // pf_create_user DOES publish author_aliases, so aliases could be set once at
-// creation and never changed from MCP again. Aliases are how a git commit
-// author maps to a user, so the only case that could not be fixed was the one
-// that matters: an alias entered wrongly, or an author who acquired a new email.
+// creation and never changed from MCP again — and the case that could not be
+// fixed was the one that matters: an alias entered wrongly, or an author who
+// acquired a new email.
+//
+// ⚠️ This comment used to say "aliases are how a git commit author maps to a
+// user". Measured 2026-09-10 by aihub#543: users.author_aliases has writers and
+// NO reader anywhere in internal/ or pkg/, so nothing in aihub attributes a
+// commit by it — commit records take their author from the authenticated caller.
+// TestAuthorAliasesIsWrittenAndNeverRead (user_admin_surface_test.go) is that
+// census, and docs/mcp-cards/pf_create_user.md and pf_update_user.md carry the
+// corrected sentence. The gap is real and is recorded rather than fixed; what
+// this file asserts is unaffected, since publishing a bound field is worth doing
+// whether or not a reader exists yet.
 //
 // No database needed:
 //

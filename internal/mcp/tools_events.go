@@ -253,10 +253,16 @@ func emitEventSchema() json.RawMessage {
 // same reason as emitEventSchema.
 func readEventsSchema() json.RawMessage {
 	return objectSchema(map[string]any{
-		"work_item_id": prop("string", "Work item ID (or use project)"),
-		"project":      prop("string", "Project name (or use work_item_id)"),
-		"user_id":      prop("string", readEventsUserIDPropDescription),
-		"types":        prop("array", readEventsTypesPropDescription),
+		// aihub#590 (2026-09-10): this said "Work item ID (or use project)"
+		// while handleListEvents has resolved id-or-slug since aihub#343; the
+		// schema was the last place still implying the slug is not accepted.
+		// Pinned by slug_publication_test.go
+		// (TestSlugAcceptanceIsPublishedByReadEvents).
+		"work_item_id": prop("string", "Work item — canonical id or slug; either resolves to the "+
+			"same stream (aihub#343). Or use project."),
+		"project": prop("string", "Project name (or use work_item_id)"),
+		"user_id": prop("string", readEventsUserIDPropDescription),
+		"types":   prop("array", readEventsTypesPropDescription),
 		// aihub#425. Unlike pf_recall's cursor, this one was NOT merely
 		// unpublished — it was never put on the wire either, so this tool
 		// needed both halves. handleListEvents has always bound it and

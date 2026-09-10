@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_get_step",
-  "description_sha256": "d126976f936ff5634b88bac923688f25842c25ef88cab717de73905f561845e6",
+  "description_sha256": "7c843970e4b28c379391a4c76e182b9d29685af5b54da1392f0af6d821257e69",
   "input_schema_sha256": "0d138f8f344be0161281deb07d0ff88f782e6397ea2be18bb413fb2c4cfe88e4",
   "params": {
     "work_item_id": {
@@ -141,10 +141,17 @@ which is where the echo could quietly become the caller's own parameter.
 ⚠️ This card used to say those two tools "return nothing for a slug", which was the
 pre-`aihub#343` / pre-`aihub#363` behaviour, and `aihub#422`'s own test header had
 already recorded that line as stale with nothing red anywhere. The **tool
-description** still carries the same clause, which this card records rather than
-fixes: it is item 17 of `aihub#400` §3.2, one of the findings `aihub#450` left behind
-when it landed the other two, and no probe pins it — a probe on today's wording
-arrives red on the day it is corrected.
+description** carried the same clause long after — item 17 of the `aihub#385` audit's
+§3.2, one of the findings `aihub#450` left behind when it landed the other two, and
+deliberately unprobed while it stood, since a probe on the then-current wording
+would have arrived red on the day it was corrected. `aihub#590` (2026-09-10)
+corrected it: the description now says `pf_recall` / `pf_read_events` resolve either
+form and the canonical echo is informational, and
+`internal/mcp/slug_publication_test.go` (`TestSlugAcceptanceIsNotDeniedByGetStep`)
+pins the corrected clause while refusing the stale one by its exact words, with
+(`TestSlugDenialIsNowhereInThePublishedSurface`) sweeping every published
+description and schema so the sentence cannot migrate to a tool that arm does not
+read.
 
 ## hop 5 — what comes back
 

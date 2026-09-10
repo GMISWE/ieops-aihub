@@ -167,10 +167,12 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   declared key set with it, and the SATURATING call's body is now asserted as an
   exact three-key set by
   `internal/server/routes_memory_reinforce_returning_db_test.go`
-  (`TestReinforceMemory_IntegralDeltaStillMoves`) — K10 is a one-directional
-  ratchet on keys that ARE carried, so a key ARRIVING is precisely what it cannot
-  see, and that call is the one request a withdrawn disclosure field would have had
-  something to say on. So a delta of `+4` on a row stored at `4` still answers
+  (`TestReinforceMemory_IntegralDeltaStillMoves`) — K10's single direction is the
+  other one: every key a live response CARRIES must be declared, so a `clamped`
+  field arriving undeclared is precisely what K10 DOES catch, and what it cannot see
+  is a key that stops being sent. The exact three-key set is what covers that second
+  half, on the one call a withdrawn disclosure field would have had something to say
+  on. So a delta of `+4` on a row stored at `4` still answers
   200 with `base_strength` `5` — the difference is that the caller is told in
   advance that it will, which
   `internal/server/routes_memory_reinforce_returning_db_test.go`

@@ -241,7 +241,10 @@ except `work_item_id` and `brief` into the body of
   halves are driven against a real row in `internal/domain/work_items_attrs_db_test.go`
   — (`TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys`) for the merge and
   (`TestUpdateWorkItemAttrs_ReplaceStillDestroysUnsentKeys`) for the wipe, which is
-  retained deliberately because it is the only way to delete a key.
+  retained deliberately because reinterpreting a field every existing caller already
+  sends is a worse defect than the one `aihub#288` fixed. It is NOT the only way to
+  delete a key: `attrs_unset` deletes named top-level keys, and
+  (`TestUpdateWorkItemAttrsUnset_DeletesNamedKeys`) below is what holds it.
   `attrs_patch` is shallow: a top-level key replaces that key's stored value
   outright rather than merging into it recursively — a subtest of
   (`TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys`) patches a nested object
@@ -410,11 +413,14 @@ the three cases that separate those two are `internal/mcp/wi_echo_test.go`
 (`TestUpdateBriefDropsContentTheCallerNeverSent`),
 (`TestUpdateSuppressesTheContentItWasJustSent`) and
 (`TestUpdateKeepsContentWhenTheStoredValueDiffers`).
-`brief` is the wider rule and is checked first, which is observable at exactly one
-input — a body that differs from the one just sent, where the equality gate would keep
-it and `brief` drops it anyway:
+`brief` is the WIDER rule — it drops the body whether or not the caller sent one and
+whether or not what they sent matches what is stored — and that width, at the single
+input where the equality gate alone would keep the body, is what
 `internal/mcp/update_wi_wire_shape_test.go`
-(`TestBriefDropsTheBodyWhereTheEqualityGateWouldKeepIt`).
+(`TestBriefDropsTheBodyWhereTheEqualityGateWouldKeepIt`) holds; branch ORDER is not
+part of it, because that arm's own M22a mutant swapped the two branches and stayed
+GREEN — either order ends in `dropContentEcho` once `brief` is set and the reply is
+the same bytes.
 
 `brief` here is **not** `pf_get_work_item`'s `brief`: this one reports
 `content_len`, that one reports nothing, and both the published sentence saying so and
@@ -522,7 +528,7 @@ no body", never "the body was withheld".
 - **§6.4 item 7 — CLOSED by `aihub#440`.** T2-1 left one sub-question open in
   **both** directions: whether `attrs` staying writable on a terminal work item is
   the defect or the feature.
-  <!-- prose-only: because=external-state -->
+  <!-- prose-only: because=judgement -->
   It is the **feature**, decided on traffic rather than
   taste. Measured over the 21-day transcript corpus (87 files, 738
   `pf_update_work_item` calls, 715 whose response carried a status): of the 49

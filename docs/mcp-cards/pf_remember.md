@@ -133,10 +133,9 @@ only place a caller can learn that an in-range `number` is refused, which is why
 narrowing the published type to `integer` would make the word redundant, and a
 redundant sentence is the next one deleted.
 
-`tags` reached the endpoint unpublished until `aihub#425`: this handler forwards its
+`tags` reached the endpoint unpublished until `aihub#425`: the handler forwarded its
 whole argument map, so the value was on the wire and reachable only by guessing a
 name no schema mentioned.
-<!-- prose-only: because=history -->
 Until then the only published way to tag a memory was to
 create it and then call `pf_update_memory`.
 <!-- prose-only: because=history -->

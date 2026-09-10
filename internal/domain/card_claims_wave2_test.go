@@ -214,6 +214,10 @@ func TestListProjectsSelectsAndBindsTheItemFieldsTheCardNames(t *testing.T) {
 // The admin branch is asserted too: it runs no predicate at all, and a sentence
 // that described only the three-term one would be true of half the callers.
 //
+// ⚠️ And the SQL is not the whole scope, which this arm missed at first: the
+// post-query applyProjectScope narrowing applies on both branches, so a scoped
+// api key confines an admin as well. That is its own subtest below.
+//
 // MUTANTS:
 //
 //	M29 enforcement: rank the caller's role in ListProjects (`_ = RoleLevel[...]`)
@@ -222,6 +226,13 @@ func TestListProjectsSelectsAndBindsTheItemFieldsTheCardNames(t *testing.T) {
 //	                                            RED  the_predicate_has_all_three_terms
 //	M31 enforcement: give the admin branch a WHERE clause
 //	                                            RED  the_admin_branch_has_no_predicate
+//	M31b enforcement: delete the applyProjectScope call, so a scoped api key reads
+//	     the whole table                        RED  the_scope_filter_runs_after_the
+//	                                                 _query (added by aihub#543's
+//	                                                 review round; every subtest
+//	                                                 above stayed GREEN through it,
+//	                                                 which is why the card could say
+//	                                                 the admin branch has no scope)
 //	P2  publication: make every citation in the pf_list_projects card unresolvable
 //	                                            RED  K12
 func TestListProjectsScopesBySQLAndNeverRanksARole(t *testing.T) {
@@ -296,6 +307,33 @@ func TestListProjectsScopesBySQLAndNeverRanksARole(t *testing.T) {
 				"ladder inversion could never bite on this endpoint FOR A SIMPLER REASON THAN THE "+
 				"MEASUREMENT — that no role is ranked on this path at all — and that conclusion is "+
 				"what a ranking here withdraws. `members` is reported, not compared.", ranked)
+		}
+	})
+
+	// 🔴 The half the card MISSED until aihub#543's review round: the SQL is not the
+	// whole scope. After the rows are scanned, ListProjects narrows them again in
+	// Go, and that second narrowing applies to the admin branch too — so "no
+	// predicate at all on the admin branch" is true of the query and false of the
+	// answer whenever the caller's api key carries a project_scope. A card that
+	// described only the SQL would tell a scoped admin they see every project.
+	t.Run("the_scope_filter_runs_after_the_query", func(t *testing.T) {
+		var scoped []string
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, isIdent := call.Fun.(*ast.Ident); isIdent && id.Name == "applyProjectScope" {
+				scoped = append(scoped, id.Name)
+			}
+			return true
+		})
+		if len(scoped) != 1 {
+			t.Errorf("ListProjects calls applyProjectScope %d time(s), want exactly 1. That call is "+
+				"the post-query narrowing the card now names, and it is the ONLY thing confining a "+
+				"caller whose api key is scoped to one project — the admin branch runs no WHERE "+
+				"clause at all, so without it a scoped admin key reads the whole table. Two calls "+
+				"would be two places to forget one, which is aihub#432's argument.", len(scoped))
 		}
 	})
 }

@@ -82,9 +82,11 @@ parameter IS forwarded fails, and an entry naming a parameter no tool publishes 
 That is the correct landing point rather than a drop: the projection is a property of
 what this process hands the model, and this process is the last hop before the model.
 The same reasoning is written out at length for `pf_recall`'s `fields`, and the
-contrast with `similarity_threshold` — published, implemented in domain, and carried
-by neither hop in between — is what makes the distinction worth stating.
-<!-- prose-only: because=judgement -->
+contrast with `similarity_threshold` — which WAS published there, fully implemented in
+domain, and carried by neither hop in between until both hops were wired to forward
+it, which is why `pf_recall`'s own card states that contrast in the past tense — is
+what makes the distinction worth stating.
+<!-- prose-only: because=history -->
 
 ## hop 4 — what it actually does
 
@@ -93,10 +95,14 @@ The server resolves slug or canonical id — `internal/domain/work_item_ref_db_t
 with the id prefix, and `internal/domain/work_item_ref_policy_test.go`
 (`TestNoWorkItemPrefixDispatch`) is the DB-free half that refuses any resolver
 choosing a column by prefix — and returns the whole work-item record, including
-`content`, `attrs`, `declared_resources` and `resources_version`, which
+`content`, `attrs`, `declared_resources` and `resources_version`.
 `internal/mcp/get_work_item_shape_test.go`
-(`TestGetWorkItemBriefDeletesContentAndLeavesNoLengthBehind`) requires to survive this
-process on both the plain and the `brief` call. Two consequences worth carding:
+(`TestGetWorkItemBriefDeletesContentAndLeavesNoLengthBehind`) holds that in two
+different directions rather than one: `id`, `slug`, `goal`, `attrs`,
+`declared_resources` and `resources_version` must all survive the `brief` projection,
+while `content` must come back on the plain call and must be ABSENT under `brief` —
+deleting it is what the flag is for, so requiring it to survive both calls would be
+requiring the flag not to work. Two consequences worth carding:
 
 - **This is the tool that returns `content`.** `pf_list_work_items` will not do: its
   response is projected and its `content` is null by design, held by
@@ -154,14 +160,20 @@ corpus record above spans 2,063 calls, the highest-volume tool in the census, at
   `request_adjusted` disclosures, which is the population
   `internal/mcp/request_adjusted_writers_test.go`
   (`TestRequestAdjustedHasOneClampAppenderAndOneUnknownArgumentWriter`) enumerates.
-  The mechanism has four writers, and the other three are clamp disclosures rather
-  than unknown-argument ones:
-  `internal/domain/memory.go` (`Recall`) for `top_k`, `internal/domain/work_items.go`
-  (`ListWorkItems`) for `limit`, and `internal/domain/work_items.go` (`newReadyQueue`)
-  for `max` — carded on `pf_recall`, `pf_list_work_items` and `pf_get_ready_queue`
-  respectively, and censused by `internal/mcp/request_adjusted_writers_test.go`
+  The mechanism has **five** writers, all of them censused by
+  `internal/mcp/request_adjusted_writers_test.go`
   (`TestRequestAdjustedHasOneClampAppenderAndOneUnknownArgumentWriter`), which reports
-  a fourth clamp by name rather than absorbing it. The unknown-argument writer is its
+  a fourth clamp — or a sixth writer of any shape — by name rather than absorbing it:
+  three are clamp disclosures sharing one appender, `internal/domain/memory.go`
+  (`Recall`) for `top_k`, `internal/domain/work_items.go` (`ListWorkItems`) for
+  `limit` and `internal/domain/work_items.go` (`newReadyQueue`) for `max`, carded on
+  `pf_recall`, `pf_list_work_items` and `pf_get_ready_queue` respectively; the fourth
+  is this unknown-argument writer; and the fifth is neither kind and is carded on
+  `pf_update_step` instead, `internal/server/routes_step.go` (`handleUpdateStep`)
+  hand-building its own `domain.RequestAdjustment` entries for the `step_id` and
+  `status` a heartbeat DISCARDS — a value the server declined to act on rather than
+  one it clamped or one it did not recognise, and reachable only by a direct HTTP
+  caller. The unknown-argument writer is its
   own site, `internal/mcp/unknown_params.go` (`unknownParamsField`), and the three
   clamps share `internal/domain/request_adjusted.go` (`appendIntAdjustment`), and
   `internal/mcp/request_adjusted_writers_test.go`

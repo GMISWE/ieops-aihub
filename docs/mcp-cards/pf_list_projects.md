@@ -103,7 +103,14 @@ the corpus README warns about.
   `internal/domain/card_claims_wave2_test.go`
   (`TestListProjectsScopesBySQLAndNeverRanksARole`) reads all three terms, the
   unscoped branch and the absence of any ranking identifier out of that function's
-  own AST. `members` is reported rather than compared
+  own AST. ⚠️ The SQL is not the whole scope, and the admin branch is not
+  unscoped in the ANSWER: after the rows are scanned, `ListProjects` narrows them
+  again in Go through `applyProjectScope`, which drops every project whose name is
+  not the caller's api-key `project_scope` — on BOTH branches, so a scoped admin key
+  sees one project rather than the whole table — held by that same arm's
+  `the_scope_filter_runs_after_the_query` subtest and, on the filter's own behaviour,
+  by `internal/domain/projects_test.go` (`TestApplyProjectScope`). It ranks no role
+  either, so the conclusion above stands. `members` is reported rather than compared
   (`TestListProjectsScopesBySQLAndNeverRanksARole`). `pf_list_dependencies` is the
   tool where the inverted ladder did bite, and it is the one of T2-8's two named
   surfaces with live instances.

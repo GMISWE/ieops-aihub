@@ -62,9 +62,13 @@ as well as of the two flat ones. A batch item that omits it reaches the same
 batch-specific default, which
 `internal/mcp/batch_create_work_items_wire_shape_test.go`
 (`TestBatchAppliesNoRequiresHumanSessionDefaultOfItsOwn`) drives both ways against an
-explicit `false` in the same batch, with the segment itself held by
-`internal/domain/ready_queue_items_db_test.go`
-(`TestGetReadyQueue_ItemsExcludesHumanSessionAndBlocked`).
+explicit `false` in the same batch. The segmentation itself is held only from the
+`items[]` side: `internal/domain/ready_queue_items_db_test.go`
+(`TestGetReadyQueue_ItemsExcludesHumanSessionAndBlocked`) requires a work item whose
+`requires_human_session` is SQL NULL to be absent from `items[]` — its own comment
+says such a row belongs to `unclassified[]` — and nothing in the tree asserts that it
+arrives THERE, so the destination is the queue's documented behaviour rather than a
+checked one.
 
 **Why a separate tool rather than an `items` array on `pf_create_work_item`:**
 `project` and `goal` sit in that tool's flat `required` list while an item requires

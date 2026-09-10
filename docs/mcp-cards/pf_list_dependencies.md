@@ -109,14 +109,15 @@ the union of top-level keys real callers have been handed.
   (`TestRoleLevelIsTheDomainLadder`), which compares contents AND map identity, and the
   vocabulary half by `internal/domain/projects_test.go`
   (`TestRoleLevel_LadderIsExactlyTheValidatedVocabulary`).
-  The `Accessible` computation above accounts for **two** of the ladder's **six**
-  non-test readers — one per direction of this response — with `checkProjectAccess`'s
-  member loop in `internal/domain/projects.go` the third `domain.RoleLevel` reader and
-  four more in `internal/server` reading the same map value through the `roleLevel`
-  alias (`checkProjectAccess`, `hasProjectAccess`, `handleListWorkItems`,
-  `checkProjectAccessSoft`); **this card said "three" until 2026-09-10 (`aihub#584`),
-  counting only the domain-spelled reads** — a third of the blast radius of changing
-  the ladder — and the set is now censused in both directions by
+  The `Accessible` computation above is **one** of the ladder's **six** non-test
+  reader functions and reads it in **two** statements, one per direction of this
+  response; `checkProjectAccess`'s member loop in `internal/domain/projects.go` is the
+  other `domain.RoleLevel` reader, and the remaining four are in `internal/server`,
+  reading the same map value through the `roleLevel` alias (`checkProjectAccess`,
+  `hasProjectAccess`, `handleListWorkItems`, `checkProjectAccessSoft`) — 1 + 1 + 4 —
+  where **this card said "three" until 2026-09-10 (`aihub#584`), counting
+  domain-spelled STATEMENTS only**, a third of the blast radius of changing the
+  ladder, and the set is now censused in both directions by
   `internal/mcp/dependency_card_claims_test.go`
   (`TestRoleLevelIsReadAtExactlyTheSitesThisCardNames`).
 - **§6.2 T2-16** — the chain needs no change of its own; it inverts for exactly one

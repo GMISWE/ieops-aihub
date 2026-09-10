@@ -336,9 +336,18 @@ passing nothing returned the same 20 items in the same order.
   matches nothing" — which was true until `aihub#363` and stale after it. False in
   the harmless direction, so nothing in the tree could redden on it: the advice
   merely cost a caller a `pf_get_work_item` they no longer need, and read as a
-  reason to skip a filter that works. The same stale claim still sits on
-  `pf_get_step`'s card and in `pf_get_step`'s own published description, both
-  outside this slice.
+  reason to skip a filter that works. Only HALF of that stale claim is still live:
+  `pf_get_step`'s card was corrected in this same wave and now records the
+  correction, while `pf_get_step`'s own published description
+  (`internal/mcp/tools_step.go`) still tells a caller to pass the canonical id
+  because `pf_recall` and `pf_read_events` "return nothing for a slug" — outside
+  this slice, and tracked by `aihub#590` (filed 2026-09-10).
+  <!-- probe-waiver: kind=known-defect | decided=2026-09-10 |
+  citation=aihub#590 |
+  reason=the live half of this sentence is a wrong clause in pf_get_step's
+  published description, and a probe pinning today's wording would arrive RED on
+  the day aihub#590 corrects it — the same shape as the pf_get_step card's own
+  record of it, which is why the claim is carried rather than pinned -->
 - **`type` entries that match nothing come back in `unmatched_types`**, which is what
   distinguishes a wrong type name from a project that genuinely holds none — the
   diagnostic itself held by `internal/domain/memory_unmatched_test.go`

@@ -87,8 +87,10 @@ the MCP package by `internal/mcp/save_artifact_wire_shape_test.go`
 outside `internal/mcp/artifact_path.go` to carry a written reason why no caller names
 the file it opens. ⚠️ That sentence used to claim `path` is the one parameter "consumed by the
 local filesystem", and measured against the tree the quantifier is false —
-`workspace_root` on `pf_commit`, `pf_push` and `pf_ship` is published too and its
-value locates a worktree on this machine, which the universal gate's own
+`workspace_root` is published on SIX tools, not three — `pf_diff`, `pf_commit`,
+`pf_push`, `pf_pr`, `pf_ship` and `pf_wrap`, every one of them registered in
+`internal/mcp/tools_coding.go` — and its value locates a worktree on this machine,
+which the universal gate's own
 local-consumption table records in as many words — so the claim was narrowed to the
 property that is unique, and `TestOnlyOnePublishedParameterNamesAFileThisProcessReads`
 carries the measurement in its doc comment. A path outside the workspace is refused,
@@ -164,10 +166,14 @@ refused by this tool at hop 2 and by `domain.Remember` at hop 4 rather than by
 - **`internal/server/routes_memory.go` (`enforceMethodologyAttemptGate`) is the
   branch point.** Its methodology arm binds to the TARGET memory's own work item,
   while its non-methodology arm demands the request's `work_item_id` whenever
-  credentials are present — all four cells of that are driven against a nil pool by
-  `internal/server/routes_memory_methodology_test.go`
-  (`TestEnforceMethodologyAttemptGate`), which is what proves both guards fire BEFORE
-  any database access. That asymmetry is why `pf_reinforce_memory`'s missing
+  credentials are present, the four REJECT-BEFORE-VERIFY cells of that being driven
+  against a nil pool by `internal/server/routes_memory_methodology_test.go`
+  (`TestEnforceMethodologyAttemptGate`), which is what proves those guards fire
+  BEFORE any database access, while the BINDING half — which work item the
+  methodology arm verifies against — is the branch that arm deliberately EXCLUDES and
+  is held beside it by
+  (`TestMethodologyGateBindsToTheTargetMemorysWorkItem`). That asymmetry is why
+  `pf_reinforce_memory`'s missing
   `work_item_id` broke every non-methodology reinforce while methodology traffic —
   this tool's — was unaffected and nobody noticed.
   <!-- prose-only: because=history -->

@@ -76,12 +76,17 @@ guessed a name no schema mentions. The consequence was narrow and total: aliases
 could be set at creation and never changed from MCP again.
 
 ⚠️ What the aliases are FOR is a separate question, and the answer measured
-2026-09-10 is "nothing yet": `users.author_aliases` has writers and no reader
-anywhere in `internal/` or `pkg/` — censused, with `display_name` as the positive
-control for the read-detector, by `internal/mcp/user_admin_surface_test.go`
+2026-09-10 is "nothing yet": `users.author_aliases` has writers and no SQL statement
+this census can see reading it, anywhere in `internal/` or `pkg/` — censused, with
+`display_name` as the positive control for the read-detector and two synthetic
+controls for the shapes that detector used to miss (a SELECT split across
+concatenated literals, and a `RETURNING` clause), by
+`internal/mcp/user_admin_surface_test.go`
 (`TestAuthorAliasesIsWrittenAndNeverRead`), which also refuses a published description
-claiming attribution — so nothing in aihub today maps a git commit author to a user by
-this column. This card and `pf_create_user.md` both used to say it did; that was
+claiming attribution; a statement assembled through a slice of fragments stays outside
+what it can see, so the claim is "no readable statement" rather than "no read" — and
+on that evidence nothing in aihub today maps a git commit author to a user by this
+column. This card and `pf_create_user.md` both used to say it did; that was
 never true of this tree. It leaves the field in the §6.1 T1-9 shape the Policy
 section below names, in the "a published field nothing reads" direction — recorded
 rather than fixed, because wiring a reader is a behaviour change.

@@ -44,9 +44,13 @@ it securely.**"
 §6.2 T2-18 says every `user_id`-shaped parameter must disambiguate —
 `internal/mcp/api_key_surface_test.go`
 (`TestApiKeyToolsPublishTheOwnersIdentityUnderTheAdminGroup`) holds the quote above
-against the live description and the identity against the request's own path. On
-this tool it is unambiguous because there is only one user in the operation; on the
-filtering tools it is not.
+against the live description as an equality, requires both key tools to publish a
+non-empty `user_id` description, and reads the admin route group out of the router;
+the identity itself is held on the WIRE, by
+(`TestApiKeyWireShapePutsTheOwnerInThePathAndTheRestInTheBody`) under hop 2-3 below,
+because a description can name an owner while the request filters on something else.
+On this tool it is unambiguous because there is only one user in the operation; on
+the filtering tools it is not.
 
 ## hop 2-3 — what leaves this process, and what binds it
 

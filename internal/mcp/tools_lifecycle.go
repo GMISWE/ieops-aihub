@@ -437,7 +437,17 @@ func (s *Server) registerLifecycleTools() {
 				}
 			}
 		}
-		// If listing projects fails, still return whoami without projects field (best-effort)
+		// If listing projects fails, this returns the whoami half with the
+		// `projects` key the SERVER sent still in place — an array of project NAME
+		// STRINGS built from project_roles by handleWhoami — rather than the
+		// {name, relation, role} objects the enrichment above writes. Best-effort,
+		// and the key is NEVER absent: the element TYPE is the only signal a caller
+		// has that the second call failed, which is what
+		// whoami_projects_shape_test.go's
+		// TestWhoamiKeepsTheServersOwnProjectsWhenTheEnrichmentFails holds on both
+		// branches. ⚠️ This comment said "without projects field" until 2026-09-10
+		// (aihub#543) — the same falsehood the pf_whoami card corrected, and a
+		// caller who believed it would read `.name` off a list of strings.
 
 		return jsonResult(result)
 	})

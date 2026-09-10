@@ -61,10 +61,13 @@ and nothing at hop 2 that can be dropped.
 - There is no un-revoke, and no listing of keys on this surface: `pf_list_users`
   returns users rather than their keys, so a caller must already hold the `key_id`
   from creation — `internal/mcp/api_key_surface_test.go`
-  (`TestTheApiKeySurfaceOffersOnlyCreationAndRevocation`) enumerates every statement
-  in the tree that touches `revoked_at` and requires each one to be either the single
-  writer or a null-check, censuses the registry for a third api-key tool, and reads
-  the users query's own column list.
+  (`TestTheApiKeySurfaceOffersOnlyCreationAndRevocation`) enumerates every
+  non-comment mention of `revoked_at` in the `.go` and `.sql` files under
+  `internal/` — tests excluded, and `pkg/` outside the walk — and requires each one
+  to be either the single writer or one of three recognised reads (the authentication
+  null-check, a `/ui` projection alias, or the bearer struct field), with exactly one
+  writer; it also censuses the registry for a third api-key tool and reads the users
+  query's own column list.
 
 ## hop 5 — what comes back
 

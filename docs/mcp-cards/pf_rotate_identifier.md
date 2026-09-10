@@ -40,12 +40,15 @@ claims held on the recorded request by
 reads the route out of this card. The name is the path segment; nothing else is sent.
 
 The handler carries an explicit `NOTE: result contains plain token — do NOT log it`
-at the call site, and the same instruction is repeated at each of the other three
-hops that hold the plaintext — `pkg/client/client.go`,
-`internal/server/routes_projects.go` and `internal/domain/projects.go` — four
-comments, which `internal/mcp/rotate_identifier_surface_test.go`
+at the call site, and each of the other three hops that hold the plaintext carries a
+notice of its own — `pkg/client/client.go` ("must not be logged"),
+`internal/server/routes_projects.go` ("NEVER logged or stored") and
+`internal/domain/projects.go` ("plain never stored") — four comments in all, and NOT
+one instruction repeated four times (two say only do-not-log, one says both, and the
+domain hop's says only do-not-store), which
+`internal/mcp/rotate_identifier_surface_test.go`
 (`TestTheDoNotLogNoticeRidesEveryHopThatHoldsThePlainToken`) turns into a check by
-requiring the notice at all four and requiring none of those four to reach a
+requiring each hop's own notice at that hop and requiring none of the four to reach a
 logger.
 
 ## hop 4 — what it actually does

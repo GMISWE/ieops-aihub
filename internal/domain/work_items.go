@@ -1922,9 +1922,12 @@ type workItemUpdate struct {
 //
 //   - `attrs` keeps REPLACE, byte for byte. Changing its default to merge would
 //     silently rewrite the behaviour of every caller that exists today (the Web
-//     UI, pkg/client, the MCP tool, anything scripted against the REST API) and
-//     would remove the only way to delete a key. A silent semantic change is a
-//     worse defect than the one being fixed.
+//     UI, pkg/client, the MCP tool, anything scripted against the REST API). A
+//     silent semantic change is a worse defect than the one being fixed. ⚠️ That
+//     compatibility argument is the whole of it: this bullet also said the merge
+//     default "would remove the only way to delete a key", which the third
+//     bullet below contradicts in the same comment — `attrs_unset` deletes keys.
+//     Corrected 2026-09-10 (aihub#543).
 //   - `attrs_patch` is the opt-in merge: `attrs = attrs || $n::jsonb`. Shallow,
 //     i.e. a top-level key present in the patch replaces the stored value for
 //     that key outright and is NOT merged into it recursively. `null` in the

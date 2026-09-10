@@ -95,9 +95,11 @@ passes the **whole argument map** to `pkg/client/client.go` (`CreateProject`) â†
   `internal/domain/project_creation_row_test.go` holds the reason it has no effect,
   which is that the create request struct has no field to bind it to.
 - The all-or-nothing rule fires on a NARROWER trigger than the description's
-  wording: `internal/domain/projects.go` (`validateDescriptionBlock`) is reached only
-  when one of the four content fields is set, so a repo carrying only `generated_at`
-  or only `generated_commit` is accepted with no content field at all, which
+  wording: `internal/domain/projects.go` (`validateDescriptionBlock`) runs on every
+  repo entry but returns immediately unless the entry's own `hasDescriptionBlock`
+  predicate is true, and that predicate tests the four content fields and nothing
+  else â€” so a repo carrying only `generated_at` or only `generated_commit` is
+  accepted with no content field at all, which
   `internal/domain/project_repo_block_rule_test.go`
   (`TestRepoDescriptionBlockTriggersOnTheFourContentFieldsOnly`) drives one field at
   a time, in both directions.

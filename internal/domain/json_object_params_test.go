@@ -12,13 +12,13 @@ package domain
 // cause).
 //
 // These run unconditionally — no AIHUB_TEST_DB — and that is the point rather
-// than a convenience. Three of the five guarded call sites are exercised
+// than a convenience. Three of the SEVEN guarded call sites are exercised
 // through their real domain function with a NIL pool, which works because the
 // guard sits above the first query: the request is rejected before anything
 // would be read. That placement is itself part of the fix (a check below the
 // first query answers 500 with the driver's text in it, per aihub#433), so a
 // future refactor that moves the guard down turns these into a nil-pointer
-// panic rather than a silent pass. The remaining two sites are pure functions
+// panic rather than a silent pass. The remaining four sites are pure functions
 // extracted for the reason mem_I98xpPgY gives: a check written inline in a
 // pool-taking function can only be covered by the DB-gated suite, which SKIPs
 // everywhere but its own CI step, so deleting it would leave `go test ./...`

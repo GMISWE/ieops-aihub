@@ -73,9 +73,16 @@ best-effort `pr_opened` event through `internal/mcp/tools_coding.go`
 list to be exactly that one path.
 
 So there is no aihub hop 3 for `title`, `body`, `head` or `base`: they are `gh`
-arguments, each one found in the recorded argv and absent from the event body by
+arguments, each one found in the recorded argv by
 `internal/mcp/pr_gh_boundary_test.go`
-(`TestThePRIsCreatedByGhAndTheOnlyAihubHopIsTheEvent`).
+(`TestThePRIsCreatedByGhAndTheOnlyAihubHopIsTheEvent`), which asserts `body`, `head`
+and `base` ABSENT from the event body as well. `title` is the one exception and is
+not a counter-example to the sentence: `internal/mcp/helpers.go` (`prPayload`) puts
+it in the `pr_opened` payload unconditionally, and
+`internal/mcp/pr_gh_boundary_test.go`
+(`TestThePRIsCreatedByGhAndTheOnlyAihubHopIsTheEvent`) asserts that value on the
+recorded request, because the timeline record is built after the PR exists rather
+than being a hop-3 binding of the caller's argument.
 `internal/mcp/helpers.go` (`prPayload`) is what turns the `gh` result into
 the event payload, which is the only aihub-side record that the PR exists — its
 four keys are asserted on the wire by `internal/mcp/pr_gh_boundary_test.go`

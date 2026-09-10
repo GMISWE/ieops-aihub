@@ -134,9 +134,11 @@ callers have been handed.
   `internal/domain/run_attempts_test.go`
   (`TestAcquireLocksReleasePausedSQL_FileScopeOnly` and
   `TestAcquireLocksReleasePausedSQL_NotAllLocks`) holds on the DELETE's predicate.
-  Landed by `aihub#416` (2026-09-09): the pause SQL is byte-unchanged (it always
-  named `file_scope` explicitly); what changed is that nothing else is being derived
-  for it to retain. <!-- prose-only: because=history -->
+  Landed by `aihub#416` (2026-09-09) with the pause SQL byte-unchanged — it always
+  named `file_scope` explicitly — so what that work item changed is upstream of this
+  DELETE: `repo` and `service` entries derive no lock for it to retain, which
+  `internal/domain/commit_lock_type_test.go`
+  (`TestCommitGateKeysFileScopeAndTheAdvisoryTypesDeriveNothing`) holds.
 
 ## Open
 

@@ -258,16 +258,16 @@ one, which is a data loss to fix a documentation defect.
   recorded as an unexplained side effect of an unrelated `pf_update_work_item` call;
   see this card's Policy section.
   <!-- prose-only: because=external-state -->
-- **`attrs` must be a JSON object** (`aihub#465`). It binds to a bare
-  `json.RawMessage` and is assigned straight into the jsonb column, so before that
-  work item a JSON-encoded STRING of an object was stored verbatim under a 200 and
-  every reader that expects an object got a string.
-  <!-- prose-only: because=history -->
+- **`attrs` must be a JSON object** (`aihub#465`). Before that work item it bound to
+  a bare `json.RawMessage` that was assigned straight into the jsonb column, so a
+  JSON-encoded STRING of an object was stored verbatim under a 200 and every reader
+  that expected an object got a string.
   The rejection is the same one
   the PATCH path gives — type, byte length, and `details.string_decodes_to` saying
   whether the quoted text was itself valid JSON — and nothing is coerced, which
   `internal/domain/json_object_params_test.go` (`TestStringifiedObjectParamIsRejected`)
-  drives through this tool's own entry point alongside the five other guarded sites. An
+  drives through this tool's own entry point alongside the SIX other guarded sites —
+  seven in that table today, one of which is this one. An
   omitted `attrs` is still defaulted to `{}`, and a literal `null` is unchanged —
   `internal/domain/create_work_item_scenario_and_attrs_test.go`
   (`TestCreateDefaultsAnOmittedAttrsAndLeavesALiteralNullAlone`) reads the request back

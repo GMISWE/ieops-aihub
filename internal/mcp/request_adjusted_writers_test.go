@@ -1,12 +1,12 @@
 package mcp_test
 
-// aihub#543 probe wave 2 — the pf_get_work_item card's four-writer census.
+// aihub#543 probe wave 2 — the pf_get_work_item card's request_adjusted census.
 //
 // The card's Policy section is the only place in the repo that states the SHAPE
-// of the `request_adjusted` mechanism: four writers, three of them clamp
-// disclosures sharing one appender, one of them the unknown-argument disclosure
-// on its own site — and therefore that the `param` value is the only thing that
-// tells a caller which kind they were handed.
+// of the `request_adjusted` mechanism: how many writers there are, that three of
+// them are clamp disclosures sharing one appender, that one is the
+// unknown-argument disclosure on its own site — and therefore that the `param`
+// value is the only thing that tells a caller which kind they were handed.
 //
 // Every part of that had an arm for ONE writer and none for the relation:
 //
@@ -15,12 +15,32 @@ package mcp_test
 //	the two kinds coexisting on one reply  TestUnknownParamsDisclosureKeepsTheServersOwnAdjustments
 //	the POPULATION                         nothing
 //
-// A fifth writer — a second unknown-argument site, or a clamp that appends its
+// A further writer — a second unknown-argument site, or a clamp that appends its
 // own entry without going through the appender — would leave all three of those
 // green while the card's census became wrong and, worse, while the `param` value
 // stopped being a reliable discriminator. That is the aihub#532 argument applied
 // one convention over: a reach written in prose is invisible to everything
 // except a human reading the whole tree.
+//
+// 🔴 REBUILT BY aihub#543's REVIEW ROUND, and the three defects it fixes are
+// worth stating because each one made this arm quieter than it reads:
+//
+//   - The population was WRONG, not just narrow. The walk covered
+//     internal/domain only, so it counted four writers while the tree held five:
+//     internal/server/routes_step.go hand-builds its own RequestAdjustment
+//     entries for the step_id/status a heartbeat discards (documented on the
+//     pf_update_step card), which is neither a clamp nor an unknown argument. The
+//     card said "four writers" and this arm agreed with it by not looking.
+//   - Half of it was a TEXT SCAN over unknown_params.go, and that file's own doc
+//     comment contains `"unknown_params"` as an example payload — so renaming the
+//     real constant (mutant M22) left the arm green against the comment, with its
+//     t.Logf still printing the value from a Go const nobody had changed. Both
+//     halves are read with go/parser now, from code rather than from bytes.
+//   - Two assertions could never fire: one asked whether a set of
+//     internal/domain filenames contained "unknown_params.go", and one compared
+//     two constants declared in this file. Both are gone, and the mutants that
+//     were attributed to them are re-attributed to the checks that really caught
+//     them.
 //
 // 🔴 Why a source census and not a call. The relation is between CALL SITES, and
 // no response carries the number of them. clampdisclosure/ does the equivalent
@@ -32,6 +52,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +63,10 @@ import (
 
 // clampAppender is the one function the three clamp disclosures share.
 const clampAppender = "appendIntAdjustment"
+
+// adjustmentType is the entry type every writer of this field constructs, under
+// either spelling: bare inside internal/domain, qualified everywhere else.
+const adjustmentType = "RequestAdjustment"
 
 // unknownArgumentWriter is the fourth writer's own site, and the parameter name
 // it stamps.
@@ -64,16 +89,43 @@ const (
 // a disclosure no card mentions.
 var expectedClampParams = []string{"limit", "max", "top_k"}
 
+// expectedAdjustmentBuilders is every file allowed to construct an adjustment
+// entry by hand, with what the card says each one is.
+//
+// A MAP rather than a count, for the same reason expectedClampParams is a list:
+// "three files build one" is satisfied by any three, and the claim is which. A
+// file arriving here is a writer no card mentions, and a file LEAVING it is a
+// disclosure that stopped being made — the second direction is why this is
+// compared both ways below.
+var expectedAdjustmentBuilders = map[string]string{
+	"internal/domain/request_adjusted.go": "the shared clamp appender itself, which is how the " +
+		"three clamp disclosures avoid hand-building anything",
+	"internal/mcp/unknown_params.go": "the unknown-argument disclosure, on its own site and " +
+		"stamping its own param value",
+	"internal/server/routes_step.go": "the heartbeat's dropped step_id/status disclosure — " +
+		"neither a clamp nor an unknown argument, carded on pf_update_step, and reachable only " +
+		"by a direct HTTP caller",
+}
+
 // floorRequestAdjustedWriters is how many clamp-appender call sites the walk
 // must find.
 //
 // A walk that finds none asserts nothing: the checks below would pass over an
-// empty population, which is the same green as a repo whose four writers are
-// exactly the four. Equal to the measured count, and it is a floor rather than
-// an equality only in the direction that matters — a FIFTH site is reported by
-// name below, and a fourth clamp disclosure is a real event that needs a card
-// edit, not a number bump.
+// empty population, which is the same green as a repo whose writers are exactly
+// the expected ones. Equal to the measured count, and it is a floor rather than
+// an equality only in the direction that matters — a FOURTH clamp site is
+// reported by name below, and a fourth clamp disclosure is a real event that
+// needs a card edit, not a number bump.
 const floorRequestAdjustedWriters = 3
+
+// floorAdjustmentFilesWalked bounds the tree-wide walk for hand-built entries.
+//
+// The clamp half has its own floor over one package; this one covers internal/
+// and pkg/, and without it a walk pointed at a directory that does not exist
+// reports "no writer outside the expected three" — which is the answer a correct
+// tree gives. Measured 2026-09-10: 102 non-test .go files, so the floor is set
+// well below that and moves only when the tree is restructured.
+const floorAdjustmentFilesWalked = 80
 
 // TestRequestAdjustedHasOneClampAppenderAndOneUnknownArgumentWriter is the
 // census.
@@ -93,9 +145,10 @@ const floorRequestAdjustedWriters = 3
 //	                                             disclosure no card mentions
 //	M21 make internal/mcp/unknown_params.go append its entry through
 //	    domain's appender instead of its own site
-//	                                        RED  the two kinds stopped being
-//	                                             separable by site, which is the
-//	                                             half the card's last sentence
+//	                                        RED  the_unknown_argument_writer_is_its
+//	                                             _own_site — the two kinds stopped
+//	                                             being separable by site, which is
+//	                                             the half the card's last sentence
 //	                                             rests on
 //
 //	── declaration side (the param names, the call sites untouched) ──
@@ -104,11 +157,43 @@ const floorRequestAdjustedWriters = 3
 //	                                             on moved, and the response-side
 //	                                             arm beside this one filters on
 //	                                             the old string
+//	                                        ⚠️ GREEN before the aihub#543 rebuild:
+//	                                             the check was a text scan and this
+//	                                             file's own doc comment carries
+//	                                             `"unknown_params"` as an example
+//	                                             payload, so the arm matched the
+//	                                             COMMENT while the code said
+//	                                             something else
 //	M23 change the ready-queue clamp's param literal from "max" to "limit"
 //	                                        RED  two clamp disclosures now answer
 //	                                             to one name, so `param` no
 //	                                             longer says which endpoint
 //	                                             adjusted the request
+//
+//	── population side (aihub#543's review round, 2026-09-10) ──
+//	M26 add a hand-built domain.RequestAdjustment to a file outside the expected
+//	    three (internal/server/routes_memory.go), written in the ELIDED form
+//	    `[]domain.RequestAdjustment{{Param: …}}`
+//	                                        GREEN before the rebuild — the walk
+//	                                              never left internal/domain
+//	                                        GREEN on the rebuild's FIRST version
+//	                                              too, and this is why the run is
+//	                                              recorded rather than the result:
+//	                                              an elided element literal carries
+//	                                              no type of its own, so matching on
+//	                                              the type alone saw nothing. The
+//	                                              array-element branch exists
+//	                                              because of this mutant.
+//	                                        RED   the_hand_built_entries_are_the
+//	                                              _three_the_card_names, naming the
+//	                                              file and the param
+//	M27 delete the heartbeat's two dropped-field entries in
+//	    internal/server/routes_step.go
+//	                                        GREEN before the rebuild, for the same
+//	                                              reason
+//	                                        RED   the same subtest, from the other
+//	                                              direction: a disclosure the card
+//	                                              names stopped being made
 func TestRequestAdjustedHasOneClampAppenderAndOneUnknownArgumentWriter(t *testing.T) {
 	// Half one: every clamp-appender call site in the domain, with the
 	// parameter each one names.
@@ -160,47 +245,91 @@ func TestRequestAdjustedHasOneClampAppenderAndOneUnknownArgumentWriter(t *testin
 				"finding, verbatim.", clampAppender, param, files)
 		}
 	}
-	if strings.Contains(strings.Join(flattenSiteFiles(named), " "), unknownArgumentWriterFile) {
-		t.Errorf("the unknown-argument writer appends through %s. The card's last sentence — "+
-			"that a caller reading `request_adjusted` cannot infer an unknown argument and the "+
-			"`param` value is what tells the two apart — rests on these being separate sites "+
-			"with separate names.", clampAppender)
-	}
 
-	// Half two: the fourth writer, on its own site, stamping its own name.
-	t.Run("the unknown-argument writer is its own site", func(t *testing.T) {
-		raw, err := os.ReadFile(unknownArgumentWriterFile)
+	// Half two: the fourth writer, on its own site, stamping its own name — read
+	// from the AST, so a doc comment carrying the value cannot answer for the code.
+	t.Run("the_unknown_argument_writer_is_its_own_site", func(t *testing.T) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, unknownArgumentWriterFile, nil, parser.SkipObjectResolution)
 		if err != nil {
-			t.Fatalf("read %s: %v — the card names this file as the unknown-argument "+
+			t.Fatalf("parse %s: %v — the card names this file as the unknown-argument "+
 				"disclosure's own site, and an arm cannot pass by not finding its subject",
 				unknownArgumentWriterFile, err)
 		}
-		src := string(raw)
-		if !strings.Contains(src, strconv.Quote(unknownArgumentParamName)) {
-			t.Errorf("%s does not carry the literal %q. That value is the discriminator: "+
-				"unknown_params_test.go's unknownParamsEntry filters responses on it, the card "+
-				"tells callers to read it, and moving it breaks both without breaking a build.",
-				unknownArgumentWriterFile, unknownArgumentParamName)
-		}
-		if strings.Contains(src, clampAppender) {
-			t.Errorf("%s calls %s. The card says this writer is its OWN site and the three "+
-				"clamps share the appender; routing it through them makes the two kinds of "+
-				"disclosure indistinguishable by anything except the string above.",
-				unknownArgumentWriterFile, clampAppender)
-		}
-		// And the name must not collide with a clamp's, or `param` stops
-		// discriminating.
-		for _, clamp := range expectedClampParams {
-			if unknownArgumentParamName == clamp {
-				t.Errorf("the unknown-argument disclosure and a clamp both answer to %q, so a "+
-					"caller reading `param` cannot tell an argument the server did not "+
-					"recognise from a value it changed.", clamp)
+
+		var literals []string
+		var appenderCalls int
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.BasicLit:
+				if v.Kind == token.STRING {
+					if s, uerr := strconv.Unquote(v.Value); uerr == nil {
+						literals = append(literals, s)
+					}
+				}
+			case *ast.CallExpr:
+				if id, ok := v.Fun.(*ast.Ident); ok && id.Name == clampAppender {
+					appenderCalls++
+				}
 			}
+			return true
+		})
+
+		found := false
+		for _, lit := range literals {
+			if lit == unknownArgumentParamName {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s declares no string literal %q anywhere in its CODE (it holds %d string "+
+				"literal(s)). That value is the discriminator: unknown_params_test.go's "+
+				"unknownParamsEntry filters responses on it, the card tells callers to read it, "+
+				"and moving it breaks both without breaking a build. ⚠️ This is read from the "+
+				"parsed file rather than from its bytes on purpose — the file's doc comment "+
+				"carries the same string as an example payload, and a text scan was satisfied by "+
+				"that comment alone.",
+				unknownArgumentWriterFile, unknownArgumentParamName, len(literals))
+		}
+		if appenderCalls > 0 {
+			t.Errorf("%s calls %s %d time(s). The card says this writer is its OWN site and the "+
+				"three clamps share the appender; routing it through them makes the two kinds of "+
+				"disclosure indistinguishable by anything except the param value.",
+				unknownArgumentWriterFile, clampAppender, appenderCalls)
 		}
 	})
 
-	t.Logf("request_adjusted writers: %d clamp site(s) naming %v, plus %s naming %q",
-		len(sites), disclosedParamNames(named), unknownArgumentWriterFile, unknownArgumentParamName)
+	// Half three: the population itself, across the whole tree rather than one
+	// package. This is the half that was missing, and the fifth writer is why.
+	t.Run("the_hand_built_entries_are_the_three_the_card_names", func(t *testing.T) {
+		builders, walked := adjustmentBuilderFiles(t)
+		if walked < floorAdjustmentFilesWalked {
+			t.Fatalf("the walk read only %d non-test .go file(s) under internal/ and pkg/, floor "+
+				"is %d. A walk that reads almost nothing finds no unexpected writer, which is "+
+				"exactly what a correct tree looks like from here.", walked, floorAdjustmentFilesWalked)
+		}
+		for file, why := range expectedAdjustmentBuilders {
+			if _, present := builders[file]; !present {
+				t.Errorf("%s no longer constructs a %s. The card names it as %s — a disclosure "+
+					"the card promises and the code stopped making is the aihub#314 defect in the "+
+					"direction nobody watches. Found: %v",
+					file, adjustmentType, why, sortedBuilderFiles(builders))
+			}
+		}
+		for file, params := range builders {
+			if _, expected := expectedAdjustmentBuilders[file]; expected {
+				continue
+			}
+			t.Errorf("%s hand-builds a %s naming %v, and no contract card mentions it. Every "+
+				"entry in this field is a promise on some tool's response, and a writer that is "+
+				"neither the shared clamp appender nor a carded site means a caller reading "+
+				"`request_adjusted` is being told something no card explains.",
+				file, adjustmentType, params)
+		}
+		t.Logf("request_adjusted writers: %d clamp site(s) naming %v via %s, plus hand-built "+
+			"entries in %v", len(sites), disclosedParamNames(named), clampAppender,
+			sortedBuilderFiles(builders))
+	})
 }
 
 type clampSite struct {
@@ -259,6 +388,122 @@ func clampAppenderSites(t *testing.T, dir string) (sites []clampSite, filesWalke
 	return sites, filesWalked
 }
 
+// adjustmentBuilderFiles censuses every non-test Go file under internal/ and
+// pkg/ that constructs an adjustment entry by hand, keyed on the repo-relative
+// path, with each site's `Param` value where that value is a literal.
+//
+// 🔴 The WHOLE tree, and that is the aihub#543 review-round fix rather than
+// thoroughness for its own sake: this census used to walk internal/domain only,
+// and the writer it therefore could not see — internal/server/routes_step.go —
+// is the fifth one, whose existence made the card's own "four writers" false.
+// A census scoped more narrowly than the claim it holds is a census that agrees
+// with a wrong number by not looking.
+//
+// A composite literal rather than a call, because that is what a hand-built
+// entry IS: `domain.RequestAdjustment{Param: …}` under the qualified spelling
+// outside internal/domain and the bare one inside it. Both are matched, since
+// which spelling a file uses is a fact about its imports and not about the
+// disclosure it makes.
+func adjustmentBuilderFiles(t *testing.T) (builders map[string][]string, filesWalked int) {
+	t.Helper()
+	builders = map[string][]string{}
+	for _, root := range []string{filepath.Join("..", "..", "internal"), filepath.Join("..", "..", "pkg")} {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if d.IsDir() {
+				switch d.Name() {
+				case ".git", "vendor", "node_modules", "testdata":
+					return fs.SkipDir
+				}
+				return nil
+			}
+			name := d.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				return nil
+			}
+			filesWalked++
+			fset := token.NewFileSet()
+			file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if perr != nil {
+				return perr
+			}
+			rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+			ast.Inspect(file, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				if isAdjustmentLiteralType(lit.Type) {
+					builders[rel] = append(builders[rel], adjustmentLiteralParam(lit))
+					return true
+				}
+				// 🔴 The ELIDED form, and it is here because the first version of this
+				// census missed it: inside `[]domain.RequestAdjustment{{Param: …}}` the
+				// element literal carries NO type of its own, so matching on the type
+				// alone reported nothing for a writer sitting in plain sight. Measured —
+				// mutant M26 was written in exactly that shape and stayed green.
+				//
+				// Elements that are not composite literals (unknown_params.go writes
+				// `[]domain.RequestAdjustment{entry}`) are deliberately not counted here:
+				// the construction happened elsewhere and is recorded at its own site.
+				if at, isArray := lit.Type.(*ast.ArrayType); isArray && isAdjustmentLiteralType(at.Elt) {
+					for _, elt := range lit.Elts {
+						if el, isLit := elt.(*ast.CompositeLit); isLit {
+							builders[rel] = append(builders[rel], adjustmentLiteralParam(el))
+						}
+					}
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v — a failed walk reports no writer at all, which is the same "+
+				"answer as a tree whose writers are exactly the expected ones", root, err)
+		}
+	}
+	return builders, filesWalked
+}
+
+// isAdjustmentLiteralType matches both spellings of the entry type and nothing
+// else: a slice OF them is not a construction of one (unknown_params.go writes
+// `[]domain.RequestAdjustment{entry}` around an entry it built above).
+func isAdjustmentLiteralType(expr ast.Expr) bool {
+	switch v := expr.(type) {
+	case *ast.Ident:
+		return v.Name == adjustmentType
+	case *ast.SelectorExpr:
+		return v.Sel != nil && v.Sel.Name == adjustmentType
+	}
+	return false
+}
+
+// adjustmentLiteralParam reports the literal `Param:` value of one hand-built
+// entry, or a placeholder when the value is computed. The placeholder is
+// deliberate rather than a skip: a disclosure whose param is an identifier is
+// still a disclosure, and dropping it here would shrink the population.
+func adjustmentLiteralParam(lit *ast.CompositeLit) string {
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "Param" {
+			continue
+		}
+		if v, isLit := kv.Value.(*ast.BasicLit); isLit && v.Kind == token.STRING {
+			if s, err := strconv.Unquote(v.Value); err == nil {
+				return s
+			}
+		}
+		return "<computed>"
+	}
+	return "<no Param field>"
+}
+
 func disclosedParamNames(named map[string][]string) []string {
 	out := make([]string, 0, len(named))
 	for k := range named {
@@ -268,10 +513,10 @@ func disclosedParamNames(named map[string][]string) []string {
 	return out
 }
 
-func flattenSiteFiles(named map[string][]string) []string {
-	var out []string
-	for _, files := range named {
-		out = append(out, files...)
+func sortedBuilderFiles(builders map[string][]string) []string {
+	out := make([]string, 0, len(builders))
+	for k, params := range builders {
+		out = append(out, k+" ("+strings.Join(params, ", ")+")")
 	}
 	sort.Strings(out)
 	return out

@@ -186,4 +186,4 @@ real callers have been handed.
 - Whether `base_strength` should be publishable on an update at all, given that
   activation and reinforcement also move strength, is not settled anywhere this card
   can cite.
-  <!-- prose-only: because=external-state -->
+  <!-- prose-only: because=judgement -->

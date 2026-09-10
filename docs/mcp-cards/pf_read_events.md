@@ -131,10 +131,8 @@ parameter at all.
   indistinguishable from a work item with no events, and it advised getting a
   canonical id out of `pf_get_step`'s echo. That was true of the tree before
   `aihub#343`, which fixed the read side in the same change that started emitting the
-  lock events this card's hop-0 caveat is about; the resolution site in
-  `internal/server/routes_memory.go` carries the two production readings the fix was
-  filed on.
-  <!-- prose-only: because=history -->
+  lock events this card's hop-0 caveat is about, and which was filed on two
+  production readings taken before that fix.
   The advice went with the defect — there is nothing left to work around.
 - **`types` is a FILTER rather than a whitelist**, and `aihub#444` renamed it for
   that reason (`aihub#411` §6.2 T2-5) — `internal/mcp/tools_events_vocab_test.go`

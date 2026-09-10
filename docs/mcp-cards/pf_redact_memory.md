@@ -57,10 +57,14 @@ dependency tools carry: authorization is by role, and building unread credential
 into the body would make a reader — including a reviewer — conclude the path is
 attempt-gated when it is not. ⚠️ The aihub#325 credential invariant
 (`TestMemoryToolsSendCredentialsWithTheirWorkItem`) `continue`s on any tool whose
-body carries no `attempt_id`, so it has always SKIPPED this tool — a day when
-this renderer started injecting credentials without a work item would have moved
-it from skipped to skipped. The exact key set above is the positive control that
-gap needed.
+body carries no `attempt_id`, so it has always SKIPPED this tool — but its blind
+spot is the opposite shape from the one this card used to name. Credentials
+WITHOUT a work item is the exact pair that invariant refuses, so a renderer that
+started sending them would move this tool from skipped to RED. What the
+invariant cannot see is credentials arriving WITH a work item: that satisfies it,
+and it is the shape that would quietly turn a role-authorized path into one a
+reader takes for attempt-gated. The exact key set above is the positive control
+that gap needed.
 
 ## hop 4 — what it actually does
 

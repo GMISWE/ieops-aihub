@@ -9,13 +9,14 @@ package server
 //	  "the description says it is required for human users … so it is prose and
 //	   the server enforces it" / "`machine` users get a generated email"
 //	      -> TestCreateUserEmailIsRequiredForHumansAndGeneratedForMachines
-//	  "The response does **not** include an API key" / the corrected corpus
-//	   sentence about why `author_aliases` is absent
+//	  "The response does **not** include an API key" / the dormant-column
+//	   sentence about why `author_aliases` is neither written nor returned
 //	      -> TestCreateUserResponseIsTheHandlersOwnProjection
 //	pf_update_user.md
-//	  "an omitted field leaves the column alone while `[]` … CLEARS it" /
+//	  "`author_aliases` … behaves exactly as though the body carried nothing"
+//	   (withdrawn by aihub#587, 2026-09-10) /
 //	   "`user_type` is **not updatable** on this path at all"
-//	      -> TestUpdateUserBindsThreeFieldsAndDropsTheRest
+//	      -> TestUpdateUserBindsTwoFieldsAndDropsTheRest
 //
 // The nil pool is the instrument, as in create_user_vocab_test.go and
 // update_user_vocab_test.go: any DB access panics, so "reached the statement" and
@@ -23,7 +24,7 @@ package server
 // than usual here — every DB-gated test in this repo SKIPs on `go test ./...`
 // while still reading as coverage, and these are the claims a caller acts on.
 //
-//	GOWORK=off go test ./internal/server/ -run 'TestCreateUserEmailIsRequired|TestUpdateUserBindsThreeFields|TestCreateUserResponseIsTheHandlers' -count=1
+//	GOWORK=off go test ./internal/server/ -run 'TestCreateUserEmailIsRequired|TestUpdateUserBindsTwoFields|TestCreateUserResponseIsTheHandlers' -count=1
 
 import (
 	"encoding/json"
@@ -143,47 +144,50 @@ func TestCreateUserEmailIsRequiredForHumansAndGeneratedForMachines(t *testing.T)
 // absence of a panic.
 type recorderHolder struct{ r *httptest.ResponseRecorder }
 
-// TestUpdateUserBindsThreeFieldsAndDropsTheRest holds two pf_update_user claims
-// with one instrument, because they are the same fact seen from two sides: the
-// handler acts on the fields its request struct binds, and only those.
+// TestUpdateUserBindsTwoFieldsAndDropsTheRest holds pf_update_user's binding
+// census from the enforcement side: the handler acts on the fields its request
+// struct binds — display_name and role, since aihub#587 — and only those.
 //
 // 🔴 The discriminating observable is "did this request produce a WRITE", and the
 // nil pool answers it without a database. `if len(sets) == 0` refuses with 400
 // "no fields to update", so:
 //
-//	{"author_aliases": []}       must WRITE  — [] is non-nil, so it clears
-//	{"author_aliases": null}     must NOT    — null decodes to nil, same as absent
+//	{"author_aliases": ["x"]}    must NOT WRITE — withdrawn by aihub#587
+//	{"author_aliases": []}       must NOT WRITE — same, and this spelling used to
+//	                             CLEAR the column, so it is the destructive
+//	                             direction a stale caller would still send
 //	{}                           must NOT    — the control for "no write"
-//	{"user_type": "machine"}     must NOT    — the field is not bound at all
+//	{"user_type": "machine"}     must NOT    — the field was never bound here
 //	{"display_name": "x"}        must WRITE  — the control for "a write happens"
 //
-// The `[]` versus `null` pair is the whole of "absent and empty are different
-// instructions here". A handler testing `len(req.AuthorAliases) > 0` instead of
-// `!= nil` would make them identical, and the caller who sent `[]` meaning "no
-// change" would be right by accident — after having been told, by the published
-// description, that it clears.
+// Until aihub#587 (2026-09-10) this arm was
+// TestUpdateUserBindsThreeFieldsAndDropsTheRest and held the OPPOSITE verdict
+// for the alias rows: `[]` was a write that cleared the column and `["x"]`
+// replaced the list wholesale, with the absent/empty/null distinction published
+// on the schema. The owner's ruling withdrew the parameter — the column has no
+// reader anywhere in internal/ or pkg/ — so `author_aliases` now sits in the
+// same census bucket `user_type` has always occupied: silently dropped by
+// c.Bind, the request behaving exactly as though it carried nothing. The
+// tree-wide zero-write census is TestAuthorAliasesIsNeitherWrittenNorRead
+// (internal/mcp/user_admin_surface_test.go); this arm pins the same fact at the
+// handler boundary, where a regression would actually re-enter.
 //
-// The `user_type` case is the same instrument used as a census: the value is
-// silently DROPPED rather than refused, so the request behaves exactly as though
-// the caller had sent nothing. That is a stronger statement than "the struct has
-// three fields", and it is the one pf_update_user.md's Open section makes.
+// MUTANTS (aihub#587, 2026-09-10):
 //
-// MUTANTS:
-//
-//	M36 enforcement: `if len(req.AuthorAliases) > 0` in place of `!= nil`
-//	                                          RED  empty_array_is_a_write
+//	M36 enforcement: re-bind AuthorAliases in the request struct and restore its
+//	     SET clause                          RED  alias_list_is_not_a_write and
+//	                                              empty_alias_list_is_not_a_write
 //	M37 enforcement: bind UserType in the request struct and add its SET clause
 //	                                          RED  user_type_is_not_a_write
 //	M38 enforcement: drop the `len(sets) == 0` refusal
 //	                                          RED  no_fields_is_not_a_write and
-//	                                               null_alias_list_is_not_a_write
-//	M39 publication: drop "[]"/"clear" from the published author_aliases
-//	     description                          RED  in internal/mcp,
-//	                                               TestUpdateUserAuthorAliasesIsPublished
+//	                                               alias_list_is_not_a_write
 //	M40 publication: publish `user_type` on pf_update_user
-//	                                          RED  K3 (the card's param list) and
-//	                                               the layer-1 published-field gate
-func TestUpdateUserBindsThreeFieldsAndDropsTheRest(t *testing.T) {
+//	                                          RED  K3, twice — PARAM_UNCARDED (the
+//	                                               card pins no such param) and
+//	                                               INPUT_SCHEMA_DRIFT (the pinned
+//	                                               schema hash moved)
+func TestUpdateUserBindsTwoFieldsAndDropsTheRest(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		body      map[string]any
@@ -191,21 +195,20 @@ func TestUpdateUserBindsThreeFieldsAndDropsTheRest(t *testing.T) {
 		why       string
 	}{
 		{
-			name: "empty_array_is_a_write", body: map[string]any{"author_aliases": []any{}},
-			wantWrite: true,
-			why: "[] decodes to a non-nil empty slice and the handler tests req.AuthorAliases " +
-				"!= nil, so it CLEARS the column. That is what the published description " +
-				"promises; a handler that treated it as \"nothing to do\" would leave the " +
-				"aliases in place and answer 400 to a caller who asked to clear them.",
+			name: "alias_list_is_not_a_write", body: map[string]any{"author_aliases": []any{"probe@example.com"}},
+			wantWrite: false,
+			why: "author_aliases was withdrawn by aihub#587: the request struct no longer binds " +
+				"it, so c.Bind drops it and the request behaves as though it carried nothing. " +
+				"A write here means the binding came back without the schema, the cards and " +
+				"the census (TestAuthorAliasesIsNeitherWrittenNorRead) moving with it.",
 		},
 		{
-			name: "null_alias_list_is_not_a_write", body: map[string]any{"author_aliases": nil},
+			name: "empty_alias_list_is_not_a_write", body: map[string]any{"author_aliases": []any{}},
 			wantWrite: false,
-			why: "null decodes to a nil slice, which is what an OMITTED field also decodes to. " +
-				"Absent and empty being different instructions is the whole claim, and null " +
-				"has to land on the absent side of it — the MCP tool never sends null (see " +
-				"TestUpdateUserClearingAliasesIsDistinctFromOmitting), so this is the HTTP " +
-				"surface's half.",
+			why: "[] used to be the destructive spelling — a non-nil empty slice that CLEARED " +
+				"the column — and it is exactly what a caller who read the pre-aihub#587 " +
+				"description would still send. It must land in the same dropped-field bucket " +
+				"as every other unbound name, not resurrect the clear.",
 		},
 		{
 			name: "no_fields_is_not_a_write", body: map[string]any{},
@@ -216,14 +219,14 @@ func TestUpdateUserBindsThreeFieldsAndDropsTheRest(t *testing.T) {
 		{
 			name: "user_type_is_not_a_write", body: map[string]any{"user_type": "machine"},
 			wantWrite: false,
-			why: "the request struct binds display_name, role and author_aliases only, so " +
-				"user_type is silently dropped — the request behaves as though it carried " +
-				"nothing. pf_update_user.md records that as an HTTP-only exposure precisely " +
-				"because the tool does not publish the field; binding it here without " +
-				"publishing it would be the aihub#419 BOUND_FIELD_UNPUBLISHED shape.",
+			why: "the request struct binds display_name and role only, so user_type is silently " +
+				"dropped — the request behaves as though it carried nothing. " +
+				"pf_update_user.md records that as an HTTP-only exposure precisely because " +
+				"the tool does not publish the field; binding it here without publishing it " +
+				"would be the aihub#419 BOUND_FIELD_UNPUBLISHED shape.",
 		},
 		{
-			name: "display_name_is_a_write", body: map[string]any{"display_name": "Probe 580"},
+			name: "display_name_is_a_write", body: map[string]any{"display_name": "Probe 587"},
 			wantWrite: true,
 			why: "the control for the \"is a write\" verdict: a bound field must reach the " +
 				"UPDATE, or every \"not a write\" above is green because nothing ever writes.",
@@ -247,31 +250,36 @@ func TestUpdateUserBindsThreeFieldsAndDropsTheRest(t *testing.T) {
 	}
 }
 
-// TestCreateUserResponseIsTheHandlersOwnProjection is the correction aihub#543
-// wave 2 made to pf_create_user.md's hop 5.
+// TestCreateUserResponseIsTheHandlersOwnProjection holds pf_create_user.md's
+// hop 5, through two states of the tree.
 //
-// 🔴 The card used to reason that `author_aliases` is absent from
-// `response_keys_observed` because "under a non-projecting response" the six
-// corpus calls did not set one. Measured 2026-09-10: the response IS projected,
-// just not by this process. `jsonResult` forwards whatever the server sent, and
-// handleCreateUser answers with a hand-built five-key map rather than the
-// inserted row — so `author_aliases` could not appear however many callers set
-// it, and neither could `created_at` or `updated_at`. The corpus record is
-// evidence about the HANDLER's key set, not about caller behaviour.
+// 🔴 State one (aihub#543 wave 2): the card used to reason that `author_aliases`
+// is absent from `response_keys_observed` because "under a non-projecting
+// response" the six corpus calls did not set one. Measured 2026-09-10: the
+// response IS projected, just not by this process. `jsonResult` forwards
+// whatever the server sent, and handleCreateUser answers with a hand-built
+// five-key map rather than the inserted row — so `author_aliases` could not
+// appear however many callers set it, and neither could `created_at` or
+// `updated_at`. The corpus record is evidence about the HANDLER's key set, not
+// about caller behaviour.
+//
+// State two (aihub#587, 2026-09-10): the parameter is WITHDRAWN and the column
+// dormant. The asymmetry this arm used to pin — written but not returned — is
+// now symmetric in the other direction: the INSERT no longer names the column
+// (the DEFAULT '{}' is what lands) AND the answer still cannot carry it. The
+// `the_column_is_not_written` leg flipped accordingly; before aihub#587 it was
+// `the_column_is_written` and REQUIRED the column in the INSERT list.
 //
 // The response literal is compared against aihub#412's corpus record in BOTH
 // directions, so this cannot be satisfied by editing one of them: a key added to
 // the handler is red, and a key added to the corpus record is red. K7 already
 // pins the card's copy to that record, which makes the three one value.
 //
-// The `author_aliases` asymmetry is asserted directly, because it is the sentence
-// being corrected: the column is in the INSERT and not in the answer.
+// MUTANTS (aihub#587, 2026-09-10):
 //
-// MUTANTS:
-//
-//	M41 enforcement: add "author_aliases": req.AuthorAliases to the response map
+//	M41 enforcement: add "author_aliases" to the response map
 //	                                          RED  response_keys_match_the_corpus
-//	                                               AND the_written_column_is_not
+//	                                               AND the_dormant_column_is_not
 //	                                               _returned
 //	M42 enforcement: return the inserted row instead of the literal
 //	                                          RED  the_response_is_a_literal — the
@@ -280,8 +288,8 @@ func TestUpdateUserBindsThreeFieldsAndDropsTheRest(t *testing.T) {
 //	M43 publication: add a key to the corpus record
 //	                                          RED  response_keys_match_the_corpus
 //	                                               (and K7 for the card's copy)
-//	M44 enforcement: drop author_aliases from the INSERT column list
-//	                                          RED  the_column_is_written
+//	M44 enforcement: restore author_aliases to the INSERT column list
+//	                                          RED  the_column_is_not_written
 //	M45 floor: point the AST walk at a handler name router.go does not declare
 //	                                          RED  the fatal in
 //	                                               createUserResponseAndInsert. ⚠️
@@ -310,18 +318,17 @@ func TestCreateUserResponseIsTheHandlersOwnProjection(t *testing.T) {
 		}
 	})
 
-	t.Run("the_column_is_written", func(t *testing.T) {
-		found := false
+	t.Run("the_column_is_not_written", func(t *testing.T) {
 		for _, c := range insertColumns {
 			if c == column {
-				found = true
+				t.Fatalf("handleCreateUser's INSERT column list is %v and includes %q again. "+
+					"aihub#587 (2026-09-10) removed it: the parameter is withdrawn, nothing "+
+					"reads the column, and the DEFAULT '{}' is what lands. Restoring the write "+
+					"without a reader is the state the owner ruled out — and restoring it WITH "+
+					"a reader means the schemas, both cards and the census "+
+					"(TestAuthorAliasesIsNeitherWrittenNorRead) all have to move in the same "+
+					"change.", insertColumns, column)
 			}
-		}
-		if !found {
-			t.Fatalf("handleCreateUser's INSERT column list is %v and does not include %q. The "+
-				"whole point of the corrected sentence is that the column is WRITTEN and not "+
-				"RETURNED; without the write half there is no asymmetry to describe.",
-				insertColumns, column)
 		}
 	})
 
@@ -342,13 +349,14 @@ func TestCreateUserResponseIsTheHandlersOwnProjection(t *testing.T) {
 		}
 	})
 
-	t.Run("the_written_column_is_not_returned", func(t *testing.T) {
+	t.Run("the_dormant_column_is_not_returned", func(t *testing.T) {
 		for _, k := range responseKeys {
 			if k == column {
 				t.Errorf("handleCreateUser now returns %q. pf_create_user.md says it cannot, "+
 					"and reasons from that to why the corpus record does not list it — reword "+
 					"hop 5 in the same change, and regenerate the corpus record and the card's "+
-					"copy.", column)
+					"copy. A returned value would also only ever be the DEFAULT: since "+
+					"aihub#587 nothing writes the column.", column)
 			}
 		}
 	})

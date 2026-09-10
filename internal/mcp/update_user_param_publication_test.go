@@ -1,37 +1,72 @@
 package mcp_test
 
-// aihub#426 — pf_update_user binds author_aliases and did not publish it, found
-// by the aihub#419 layer-1 gate as BOUND_FIELD_UNPUBLISHED.
+// aihub#587 (2026-09-10) — `author_aliases` is WITHDRAWN from pf_create_user and
+// pf_update_user, and this file holds the withdrawal.
 //
-// ─── What was actually broken ─────────────────────────────────────────────
+// ─── What this file used to hold, and why it flipped ──────────────────────
 //
-// Not the plumbing. handleUpdateUser has always bound the field (PATCH
-// /v1/admin/users/:id appends `author_aliases=$n` whenever it is present) and
-// the MCP handler has always forwarded it, because it copies its whole args map
-// into the request body. Measured below rather than assumed: the value reaches
-// the PATCH body even while unpublished, exactly as aihub#425 measured for
-// pf_recall's cursor and pf_remember's tags.
+// It was aihub#426's arm: pf_update_user bound `author_aliases` without
+// publishing it (the aihub#419 layer-1 gate's BOUND_FIELD_UNPUBLISHED), and the
+// fix then was to PUBLISH the field, with the empty-array-clears spelling
+// documented and the forwarding measured at the wire. Publishing a bound field
+// was right on what was known then.
 //
-// What was broken is that the capability was reachable only by a caller who
-// guessed a name no schema mentions — and the consequence was narrow and total.
-// pf_create_user DOES publish author_aliases, so aliases could be set once at
-// creation and never changed from MCP again — and the case that could not be
-// fixed was the one that matters: an alias entered wrongly, or an author who
-// acquired a new email.
+// What aihub#543 measured later (2026-09-10) is that the column the field fed
+// has no reader: no SQL statement anywhere in internal/ or pkg/ selects
+// users.author_aliases, and commit records take their author from the
+// authenticated caller — the "aliases drive attribution" sentence both cards
+// carried was never true of this tree. That put the field in §6.1 T1-9's shape
+// (a published field nothing reads: withdraw, fix, or file), and the owner's
+// aihub#587 ruling was to WITHDRAW: remove the published parameter, the
+// bindings and all three write sites. The COLUMN stays — dropping it is a
+// destructive migration and a separate decision — recorded as dormant, dated,
+// in docs/mcp-cards/pf_create_user.md and pf_update_user.md.
 //
-// ⚠️ This comment used to say "aliases are how a git commit author maps to a
-// user". Measured 2026-09-10 by aihub#543: users.author_aliases has writers and
-// NO reader anywhere in internal/ or pkg/, so nothing in aihub attributes a
-// commit by it — commit records take their author from the authenticated caller.
-// TestAuthorAliasesIsWrittenAndNeverRead (user_admin_surface_test.go) is that
-// census, and docs/mcp-cards/pf_create_user.md and pf_update_user.md carry the
-// corrected sentence. The gap is real and is recorded rather than fixed; what
-// this file asserts is unaffected, since publishing a bound field is worth doing
-// whether or not a reader exists yet.
+// ─── What is asserted now ──────────────────────────────────────────────────
+//
+// A caller who has not heard about the withdrawal will keep sending the name,
+// and the failure mode aihub#389 measured is exactly this shape: an argument no
+// schema publishes crosses every hop with no error anywhere, and a caller
+// believes aliases were stored that never were. So the arm here holds the
+// DISCLOSURE: a call sending `author_aliases` gets it named in the response's
+// `request_adjusted` under `unknown_params`, for both tools, on the same
+// mechanism every tool shares ((*Server).addTool → unknown_params.go).
+//
+// "Nothing lands in the column" is held at the layer where landing happens:
+//   - the tree-wide census — zero SQL write sites, zero reads —
+//     is TestAuthorAliasesIsNeitherWrittenNorRead (user_admin_surface_test.go);
+//   - handleCreateUser's INSERT column list not naming the column is
+//     internal/server/user_admin_write_shape_test.go
+//     (TestCreateUserResponseIsTheHandlersOwnProjection);
+//   - handleUpdateUser treating a body that carries ONLY the withdrawn name as
+//     "no fields to update" is the same file's
+//     TestUpdateUserBindsTwoFieldsAndDropsTheRest.
+//
+// ⚠️ The MCP handler still FORWARDS the key (pf_update_user copies its whole
+// args map into the PATCH body; pf_create_user passes the map wholesale). That
+// is deliberate phase-1 aihub#389 behaviour — report, do not strip — and it is
+// why the third bullet above matters: the name arrives at the server and the
+// server binds nothing to it, which the wire assertion below pins so the
+// disclosure cannot silently become the only true half.
 //
 // No database needed:
 //
-//	go test ./internal/mcp/ -run TestUpdateUserAuthorAliases -v
+//	go test ./internal/mcp/ -run TestAuthorAliasesWithdrawal -v
+//
+// MUTANTS (aihub#587, 2026-09-10 — each applied, run RED, reverted, with
+// `git diff --stat` checked non-empty before each run):
+//
+//	W7 publication: republish author_aliases on pf_update_user's schema
+//	                                          RED  the_echo_names_it (the key is
+//	                                               then known, so no disclosure
+//	                                               comes back) — and
+//	                                               neither_tool_publishes_it in
+//	                                               user_admin_surface_test.go
+//	W8 enforcement: strip author_aliases from the forwarded body instead of
+//	     forwarding it                        RED  the_name_still_reaches_the_wire
+//	     (pf_update_user)                          — phase 2 (reject/strip) is a
+//	                                               separate, licensed change, not
+//	                                               a side effect of this one
 
 import (
 	"encoding/json"
@@ -39,105 +74,129 @@ import (
 	"testing"
 )
 
-// TestUpdateUserAuthorAliasesIsPublished is the arm that is RED before this
-// change. It reads the schema the server actually publishes over tools/list.
-func TestUpdateUserAuthorAliasesIsPublished(t *testing.T) {
-	props := schemaProps(t, publishedTool(t, "pf_update_user"))
-
-	prop, ok := props["author_aliases"]
-	if !ok {
-		t.Fatalf("pf_update_user does not publish author_aliases; it publishes %v.\n"+
-			"    The server binds it and this handler forwards it, so the capability exists "+
-			"and is reachable only by guessing.", keysOf(props))
+// withdrawnUnknownParams pulls the `requested` list of the unknown_params entry
+// out of a decoded tool response, or nil when no such entry exists.
+func withdrawnUnknownParams(t *testing.T, decoded map[string]any) []string {
+	t.Helper()
+	raw, err := json.Marshal(decoded["request_adjusted"])
+	if err != nil {
+		t.Fatalf("re-marshal request_adjusted: %v", err)
 	}
-	if prop.Type != "array" {
-		t.Errorf("author_aliases is published as %q, want \"array\" — pf_create_user publishes "+
-			"it as an array and the server binds []string; a scalar here would teach callers "+
-			"a shape the far end cannot decode", prop.Type)
+	var entries []struct {
+		Param     string   `json:"param"`
+		Requested []string `json:"requested"`
 	}
-
-	// The empty-array spelling must be documented, because the server
-	// distinguishes it and nothing else does. `req.AuthorAliases != nil` means an
-	// omitted field leaves the column alone while [] decodes to a non-nil empty
-	// slice and CLEARS every alias. A caller told only "updated git author
-	// aliases" would reasonably send [] meaning "no change" and silently wipe
-	// the mapping — the destructive direction, which is why this is asserted
-	// rather than left to the description's author.
-	for _, want := range []string{"[]", "clear"} {
-		if !strings.Contains(prop.Description, want) {
-			t.Errorf("author_aliases' description must tell callers what the empty array does "+
-				"(absent = keep, [] = clear); it is missing %q.\n  got: %s", want, prop.Description)
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if e.Param == "unknown_params" {
+			return e.Requested
 		}
+	}
+	return nil
+}
+
+// TestAuthorAliasesWithdrawalIsDisclosed drives both tools with the withdrawn
+// name and requires the aihub#389 echo to name it — the difference between a
+// withdrawal and a silent drop.
+func TestAuthorAliasesWithdrawalIsDisclosed(t *testing.T) {
+	const withdrawn = "author_aliases"
+
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"pf_create_user", map[string]any{
+			"display_name": "probe 587",
+			"user_type":    "machine",
+			withdrawn:      []any{"probe587@example.com"},
+		}},
+		{"pf_update_user", map[string]any{
+			"id":           "u_probe587",
+			"display_name": "probe 587, renamed",
+			withdrawn:      []any{"probe587@example.com"},
+		}},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			f := newFakeAihub(t)
+			decoded, isErr := callTool(t, f, tc.tool, tc.args)
+			if isErr {
+				t.Fatalf("%s answered an error for a call whose only defect is one withdrawn "+
+					"argument: %v\naihub#389 phase 1 is report-not-reject, and flipping to "+
+					"rejection is a separate licensed change.", tc.tool, decoded)
+			}
+
+			t.Run("the_echo_names_it", func(t *testing.T) {
+				requested := withdrawnUnknownParams(t, decoded)
+				if len(requested) == 0 {
+					t.Fatalf("%s's response carries no request_adjusted.unknown_params entry "+
+						"(response: %v).\nThe parameter was withdrawn by aihub#587, so a call "+
+						"sending it must be TOLD so — a caller who set aliases and got a clean "+
+						"200 believes a mapping was stored that no column write ever received. "+
+						"Either the withdrawal regressed (the schema publishes the name again) "+
+						"or the aihub#389 disclosure stopped covering this tool.", tc.tool, decoded)
+				}
+				found := false
+				for _, name := range requested {
+					if name == withdrawn {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("%s disclosed unknown params %v, and %q is not among them",
+						tc.tool, requested, withdrawn)
+				}
+			})
+
+			t.Run("the_name_still_reaches_the_wire", func(t *testing.T) {
+				calls := f.recorded()
+				if len(calls) != 1 {
+					t.Fatalf("expected exactly one HTTP call, got %d", len(calls))
+				}
+				if _, present := calls[0].Body[withdrawn]; !present {
+					t.Errorf("%s no longer forwards %q in the body (%v). Phase 1 of aihub#389 "+
+						"is report-not-strip: the disclosure names the key while the request "+
+						"still crosses the wire unchanged, and the far end binds nothing to it "+
+						"(internal/server/user_admin_write_shape_test.go holds that half). "+
+						"Stripping is phase 2, a separately licensed change — if it has been "+
+						"licensed, update this arm and the cards together.", tc.tool, withdrawn, calls[0].Body)
+				}
+			})
+		})
 	}
 }
 
-// TestUpdateUserAuthorAliasesReachesTheWire is the other end, and it is GREEN on
-// both arms by design.
-//
-// It is a regression pin, NOT evidence for this change: the value already
-// reached the PATCH body before the schema line existed, and this test is the
-// measurement that establishes that, restated so it cannot silently stop being
-// true. Publishing a name the process then drops is the aihub#148/#259 defect
-// wearing the opposite sign, and nothing else in the tree would catch it for
-// this tool — pf_update_user has no wire-probe registry of its own.
-func TestUpdateUserAuthorAliasesReachesTheWire(t *testing.T) {
+// TestWithdrawnAliasArgAloneIsRefusedNotSilentlyHonoured pins the sharpest edge
+// of the withdrawal at this layer: a pf_update_user call whose ONLY payload is
+// the withdrawn name. Before aihub#587 that call REPLACED the alias list; now
+// the server binds none of it, finds no fields to update, and refuses — so the
+// caller gets a 400 AND the disclosure, rather than a success for a write that
+// did not happen.
+func TestWithdrawnAliasArgAloneIsRefusedNotSilentlyHonoured(t *testing.T) {
 	f := newFakeAihub(t)
-	callTool(t, f, "pf_update_user", map[string]any{
-		"id":             "u_probe426",
-		"author_aliases": []any{"alice@example.com", "Alice A"},
-	})
-
-	calls := f.recorded()
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly one HTTP call, got %d", len(calls))
-	}
-	raw, _ := json.Marshal(calls[0].Body["author_aliases"])
-	if string(raw) != `["alice@example.com","Alice A"]` {
-		t.Errorf("author_aliases in the PATCH body = %s, want [\"alice@example.com\",\"Alice A\"]", raw)
-	}
-	// `id` addresses the user in the URL and must not also appear in the body,
-	// where the server does not bind it. Without this the test would pass for a
-	// handler that forwarded its arguments indiscriminately.
-	if _, leaked := calls[0].Body["id"]; leaked {
-		t.Errorf("id was forwarded into the request body as well as the URL: %v", calls[0].Body)
-	}
-}
-
-// TestUpdateUserClearingAliasesIsDistinctFromOmitting pins the distinction the
-// description now publishes, at the wire.
-//
-// The two spellings must arrive differently, or the description is a promise
-// about behaviour the client does not implement: [] has to reach the body as an
-// empty array (the server's non-nil test then clears the column), and omitting
-// the field has to leave it out entirely rather than sending null.
-func TestUpdateUserClearingAliasesIsDistinctFromOmitting(t *testing.T) {
-	t.Run("empty array is sent as an empty array", func(t *testing.T) {
-		f := newFakeAihub(t)
-		callTool(t, f, "pf_update_user", map[string]any{
-			"id": "u_probe426", "author_aliases": []any{},
-		})
-		body := f.recorded()[0].Body
-		v, present := body["author_aliases"]
-		if !present {
-			t.Fatalf("author_aliases was dropped when empty; the server can only clear the "+
-				"column if the key arrives: %v", body)
+	// The fake answers what the real handler answers for an empty SET list —
+	// measured against handleUpdateUser's `len(sets) == 0` refusal — so this
+	// test documents the real end-to-end verdict without a database.
+	f.on("/v1/admin/users/u_probe587", func(body map[string]any) (int, any) {
+		if _, present := body["display_name"]; present {
+			return 200, map[string]any{"ok": true}
 		}
-		raw, _ := json.Marshal(v)
-		if string(raw) != "[]" {
-			t.Errorf("author_aliases = %s, want []", raw)
-		}
+		// Top-level {code, message}: the shape errorResponse in
+		// internal/server/middleware.go actually writes.
+		return 400, map[string]any{"code": "BAD_REQUEST", "message": "no fields to update"}
 	})
-
-	t.Run("omitted stays absent", func(t *testing.T) {
-		f := newFakeAihub(t)
-		callTool(t, f, "pf_update_user", map[string]any{
-			"id": "u_probe426", "display_name": "Alice",
-		})
-		body := f.recorded()[0].Body
-		if _, present := body["author_aliases"]; present {
-			t.Errorf("author_aliases appeared in the body for a call that did not mention it "+
-				"(%v). The server tests req.AuthorAliases != nil, so a key sent as null or [] "+
-				"here would clear a user's aliases on a display-name change.", body)
-		}
+	decoded, isErr := callTool(t, f, "pf_update_user", map[string]any{
+		"id":             "u_probe587",
+		"author_aliases": []any{"probe587@example.com"},
 	})
+	if !isErr {
+		t.Fatalf("an update whose only argument is withdrawn answered success: %v\nEvery "+
+			"bound field is absent, so the server refuses with \"no fields to update\"; a "+
+			"success here would be the exact silent-drop aihub#389 exists to prevent.", decoded)
+	}
+	raw, _ := decoded["_raw"].(string)
+	if !strings.Contains(raw, "no fields") {
+		t.Errorf("the error text does not carry the server's refusal: %q", raw)
+	}
 }

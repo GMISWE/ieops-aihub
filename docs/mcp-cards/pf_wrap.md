@@ -84,11 +84,21 @@ it later is impossible because the completion deletes the credentials.
 
 - **It never sets `force_terminate_step`.** So wrapping with a step still
   `in_progress` always fails at the completion — which is the failure that actually
-  happens, and it is why the note is recorded twice on that retry. Short duplicate
-  notes are noise rather than damage, which is why this is documented rather than
-  solved; the alternative is an idempotency key on events.
+  happens, and it is why the note is recorded twice on that retry, all of it driven
+  in `internal/mcp/wrap_completion_shape_test.go`: the flag's absence from the
+  completion body by `TestWrapSendsNoForceTerminateStep` (with the flag's name taken
+  from this sentence and required to be a real published parameter of
+  `pf_complete_attempt`), and the duplicate by
+  `TestWrapRecordsTheNoteAgainWhenTheCompletionFailed`, which retries a wrap whose
+  completion answered that very conflict and counts the notes.
+  Short duplicate notes are noise rather than damage, which is why this is
+  documented rather than solved; the alternative is an idempotency key on events.
 - The state file is deleted by the resolved canonical key and best-effort by the
-  passed key, mirroring `pf_complete_attempt`.
+  passed key, mirroring `pf_complete_attempt` — both halves in
+  `internal/mcp/wrap_completion_shape_test.go`
+  (`TestWrapDeletesBothTheCanonicalAndThePassedStateFileKeys`), which addresses the
+  wrap by slug with the slug-keyed pre-claim file seeded, since that is the only
+  shape in which the two keys differ at all.
 - **The timeline events are the only durable record that a wrap delivered
   something**, because by then the state file and credentials are gone and a no-op
   replay looks identical from the outside.
@@ -102,9 +112,13 @@ spans 90 calls at a 10.00% error rate.
 🔴 **In this repo's own workflow this tool is not the end-of-loop call.** The
 in-tree plugin's own lifecycle reference —
 `plugins/polyforge/skills/_common/references/lifecycle-details.md` — ends the run at
-`pf_complete_attempt(work_item_id=..., status="wrapped")`, not here, because by then
-the PR has usually already been merged and re-running the push/PR half has nothing to
-do. That is a process convention, not a property of the tool, and it is recorded
+`pf_complete_attempt(work_item_id=..., status="wrapped")` rather than here, because
+by then the PR has usually already been merged and re-running the push/PR half has
+nothing to do, which
+`internal/mcp/wrap_completion_shape_test.go`
+(`TestTheInTreeLifecycleReferenceEndsTheLoopAtCompleteAttempt`) checks by reading
+that reference's own code blocks: one of them has to make that call, and none of them
+may call this tool. That is a process convention, not a property of the tool, and it is recorded
 because a card that only described the tool would leave a reader thinking otherwise.
 
 ## Policy

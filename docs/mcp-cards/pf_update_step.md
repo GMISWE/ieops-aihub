@@ -79,10 +79,16 @@ Description + InputSchema, ~115 tokens on every request, with
 
 Three of those sentences exist because the earlier wording was false in a way that
 changed what a caller sends. "Concurrency is guarded server-side by the idle-step
-predicate" named one predicate and implied it covered the endpoint; "keep the lease
-alive" on `heartbeat` described a lease that v1.21 removed; and `error_type` /
-`escalated` on a `completed` call are silently dropped, which is documented rather
-than changed because rejecting them is a behaviour change.
+predicate" named one predicate and implied it covered the endpoint — the wording
+that replaced it is held by `internal/mcp/tools_step_contract_test.go`
+(`TestUpdateStepSchemaNamesBothPredicatesAndTheGapBetweenThem`); "keep the lease
+alive" on `heartbeat` described a lease that v1.21 removed
+(`TestUpdateStepSchemaDoesNotPromiseALease`); and `error_type` / `escalated` on a
+`completed` call are silently dropped — neither stored in the history row nor
+refused, driven against a database by
+`internal/server/routes_step_dbgated_test.go`
+(`TestHandleUpdateStep_EscalatedSurvivesToTheHistoryRead`) — which is documented
+rather than changed because rejecting them is a behaviour change.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -91,42 +97,89 @@ of `PATCH /v1/work_items/<id>/step`, bound by
 `internal/server/routes_step.go` (`handleUpdateStep`). Three things happen at this
 hop that the schema cannot show:
 
-- **`step_id` is renamed on the wire.** The body key is `step`; the server reads
-  `json:"step"`. `updateStepBody` was extracted from the handler precisely so a test
-  can hold it against `server.UpdateStepRequest` — the `aihub#290` defect was a key
-  this function emitted for which no bound field existed.
-- **Optional keys are forwarded only when non-empty**, so omitting one stays
-  distinguishable from sending `""`. The server binds them as `*string`.
+- **`step_id` is renamed on the wire.** The body key is `step`, observed on a
+  request a fake aihub really received by `internal/mcp/tools_fusion_test.go`
+  (`TestFusedUpdateStepForwardsNextStep`); the server reads `json:"step"`, which
+  `internal/mcp/tools_step_contract_test.go`
+  (`TestUpdateStepPublishedParamsAreBoundServerSide`) holds against
+  `server.UpdateStepRequest`. `updateStepBody` was extracted from the handler
+  precisely so a test can hold it against `server.UpdateStepRequest` — the
+  `aihub#290` defect was a key this function emitted for which no bound field
+  existed.
+- **Optional keys are forwarded only when non-empty**, so a key that arrives always
+  carries a value the caller meant — measured on the wire by
+  `internal/mcp/step_wire_shape_test.go`
+  (`TestUpdateStepForwardsOptionalKeysOnlyWhenSet`). ⚠️ This bullet used to claim
+  the rule keeps an omission distinguishable from sending an explicit `""`, and the
+  measured effect is the reverse: `strArg` cannot tell an absent argument from an explicit
+  empty string and this renderer skips both, so the two produce byte-identical
+  bodies. The server binds them as `*string`, and every empty value therefore
+  arrives as an absent field rather than as a present-but-empty one.
 - **`heartbeat` returns early with a credentials-only body**, so on that path
-  `step_id`, `status`, `next_step` and everything else go nowhere. Two client-side
+  `step_id`, `status`, `next_step` and everything else go nowhere — the exact key set
+  that request carries is pinned by `internal/mcp/step_wire_shape_test.go`
+  (`TestUpdateStepHeartbeatSendsNothingButCredentials`). Two client-side
   validators — `validateNextStepArgs` and `validateTerminalStepArgs` — mirror the
   server's checks of the same names so a caller error costs no round trip; the
   server remains the authority.
 
 Credentials (`attempt_id`, `claim_epoch`, `session_secret`) are injected from the
-local state file via `internal/config/state.go` (`ResolveStateFile`).
+local state file via `internal/config/state.go` (`ResolveStateFile`), which
+`internal/mcp/step_wire_shape_test.go`
+(`TestUpdateStepInjectsTheResolvedStateFileCredentials`) drives on both branches
+from a slug-addressed call with a pre-claim stub sitting on disk beside the
+canonical file.
 
 ## hop 4 — what it actually does
 
-- **`in_progress`** is guarded by the idle predicate. **`completed` / `failed`**
-  must name the step the server has open; a mismatch is 409 naming both. Neither
-  checks step STATE, so an idle step with a matching name can be completed twice.
+- **`in_progress`** is guarded by the idle predicate, which
+  `internal/server/routes_step_identity_db_test.go`
+  (`TestHandleUpdateStep_DoubleCompleteIsCaughtByWhicheverGuardApplies`) drives by
+  starting an open step a second time. **`completed` / `failed`** must name the step
+  the server has open; a mismatch is 409 naming both, asserted row by row by
+  `TestHandleUpdateStep_TerminalStepIdMustMatchTheStoredCurrentStep` and at the
+  predicate itself by `internal/server/routes_step_authority_test.go`
+  (`TestValidateStepIdentity`). Neither checks step STATE, so an idle step with a
+  matching name can be completed twice.
 - **A 200 on a terminal transition means BOTH records landed** — the step-history
   row `pf_get_step`'s `completed_steps` reads from, and the
   `step_completed`/`step_failed` event. A transition that cannot deliver both is
-  refused with nothing committed: 400 for a missing or blank `step_attempt_id`, 409
-  for one that already has a history row, 413 for an oversized `artifact_summary`.
+  refused with nothing committed: 400 for a missing or blank `step_attempt_id`
+  (`internal/server/routes_step_outcome_records_db_test.go`,
+  `TestHandleUpdateStep_TerminalWithoutStepAttemptIDIsRefused`), 409 for one that
+  already has a history row and 413 for an oversized `artifact_summary` (both in
+  `internal/server/routes_step_history_row_db_test.go`,
+  `TestHandleUpdateStep_DuplicateStepAttemptIsAConflictNotASilentDrop` and
+  `TestHandleUpdateStep_ArtifactSummaryAtTheCapIsRecordedAndOverItIsRefused`).
   That is `aihub#399` closing `aihub#390`, where a best-effort INSERT wrapped in a
   SAVEPOINT swallowed a CHECK violation and the handler still answered 200.
 - **`next_step` is not guaranteed to be honoured by the peer.** This binary and the
   aihub server deploy on separate schedules, so the schema publishing `next_step`
-  says nothing about what the remote binds. `checkNextStepHonoured` turns an old
-  server's silent drop into a loud failure by looking for `next_step` echoed in the
-  response — the one capability signal available, because `GET /v1/version` carries
-  no capability list. Left unchecked the failure is corrupting rather than inert:
-  `current_step` never advances, and the server derives each completion row's
-  `step_id` from `current_step`, so every later completion files under the first
-  step's name.
+  says nothing about what the remote binds, so the tool is driven against a peer
+  that drops the parameter by `internal/mcp/tools_fusion_test.go`
+  (`TestFusedUpdateStepDetectsAServerThatDroppedNextStep`, with
+  `TestFusedUpdateStepAcceptsAServerThatHonouredNextStep` as its control).
+  `checkNextStepHonoured` turns an old server's silent drop into a loud failure by
+  looking for `next_step` echoed in the response — the one capability signal
+  available, because `GET /v1/version` carries no capability list, which
+  `internal/server/version_capability_list_test.go`
+  (`TestVersionPayloadCarriesNoCapabilityList`) holds as a closed key set. Left
+  unchecked the failure is corrupting rather than inert: on a peer that old
+  `current_step` never advances, and a server predating `aihub#398` derives each
+  completion row's `step_id` from `current_step` instead of from the request, so
+  every later completion files under the first step's name.
+  <!-- probe-waiver: kind=structurally-unreachable | decided=2026-09-10 |
+  citation=aihub#543 spec §4.2 (the kind's definition) and the aihub#398 change
+  itself, whose completed branch records "stepID comes from req.Step, NOT from the
+  currentStep read above" |
+  reason=its one unprobed claim is the last clause, which is about a PRE-aihub#398
+  peer. What is missing is that server binary: this tree files the history row from
+  req.Step, and validateStepIdentity refuses the only request whose two step names
+  could differ, so the interleaving described here has no reachable path in this
+  repo and pinning it would need a pinned old-server image in the harness. The
+  client half of the bullet — that the drop is detected rather than trusted — is
+  driven by TestFusedUpdateStepDetectsAServerThatDroppedNextStep. It closes the way
+  the git tools' K10 gap closed, when such a harness appears. -->
 - **Error classification compares the server's CODE field, not the rendered text.**
   `classifyStepUpdateErr` used to run `strings.Contains` over the whole error
   string, so a step literally NAMED `ATTEMPT_MISMATCH` turned a step-identity refusal
@@ -134,24 +187,41 @@ local state file via `internal/config/state.go` (`ResolveStateFile`).
   deliberately no substring fallback: the only arm with a side effect is the
   deleting one.
 - **An invalid `session_secret` is 403 `ATTEMPT_MISMATCH`, and that DELETES the
-  local state file** (`aihub#441`, `aihub#411` T2-3 residue (c)). It answered 401
+  local state file** (`aihub#441`, `aihub#411` T2-3 residue (c)) — the code and the
+  status come from `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret`), and the deletion is
+  driven from the tool call through to the state directory by
+  `internal/mcp/stale_credential_delete_test.go`
+  (`TestStaleCredentialCanonicallyAddressedStillDeletes`). It answered 401
   `UNAUTHORIZED` before, which fell through `classifyStepUpdateErr`'s `default` arm
   and kept the file — so this tool is the one place in the batch where the code
-  change is also a client behaviour change. Keeping it was the wrong behaviour: a
+  change is also a client behaviour change. <!-- prose-only: because=history -->
+  Keeping it was the wrong behaviour: a
   stored secret that does not match the stored hash can never succeed again, so
   every retry failed identically and the only recovery, re-claim, was never
   suggested. `pf_complete_attempt` and `pf_wrap` delete the state file on SUCCESS
-  only, so nothing else in the batch changes what the client does with the file.
+  only — held in both directions by `internal/mcp/step_credential_file_test.go`
+  (`TestTerminalToolsDeleteTheCredentialFileOnlyOnSuccess`, with
+  `TestSlugAddressedWrapCompletesUnderTheCanonicalID` in
+  `internal/mcp/state_resolve_wiring_test.go` covering the wrap's success path) — so
+  nothing else in the batch changes what the client does with the file, which
+  `TestOnlyThreeCallSitesDeleteTheCredentialFile` checks as a census over every call
+  site in the package.
 
 ## hop 5 — what comes back
 
 Passed through by `jsonResult`; no projection. `heartbeat_ok` is what a heartbeat
 answers, and it still answers it when `status="completed"` rides along — that
-combination completes nothing. Since `aihub#442` the body stops looking like a
-plain success while it does so: every heartbeat carries
+combination completes nothing, which
+`internal/server/routes_step_heartbeat_db_test.go`
+(`TestHandleUpdateStep_HeartbeatDisclosesTheArgumentsItDrops`) asserts from the
+response and from an empty completion table together. Since `aihub#442` the body
+stops looking like a plain success while it does so: every heartbeat carries
 `step_started_at_refreshed`, which is `false` when the work item has no
-`wi_step_state` row and the bump therefore matched nothing; a bump that actually
-FAILS is now a 500 naming the write instead of a discarded error; and a `step_id`
+`wi_step_state` row and the bump therefore matched nothing
+(`TestHandleUpdateStep_HeartbeatReportsWhetherItRefreshedAnything`); a bump that
+actually FAILS is now a 500 naming the write instead of a discarded error
+(`TestHandleUpdateStep_HeartbeatDBFailureIsReportedNotDiscarded`); and a `step_id`
 or `status` that arrived alongside comes back in `request_adjusted` as requested
 but not applied, with `step_id`'s `applied` naming the step that really was
 refreshed. ⚠️ Only a DIRECT HTTP caller ever sees that last part — this tool's own
@@ -172,4 +242,5 @@ reach the server. The corpus record above is the union over 1,617 real calls at 
 - **§6.4 item 8** — nothing here describes the live server. `aihub#399`'s
   enforcement is on `origin/main`; production can trail a merge by days, so a
   caller seeing a 200 with no history row is seeing an older server, not a
-  regression. `aihub#399` wrapped 2026-09-07; re-checked 2026-09-08.
+  regression. <!-- prose-only: because=external-state --> `aihub#399` wrapped
+  2026-09-07; re-checked 2026-09-08.

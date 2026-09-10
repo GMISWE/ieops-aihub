@@ -460,7 +460,14 @@ func recallSchema() json.RawMessage {
 		// tombstone on recallStringParams above for the measurement. It promised
 		// "Filter by visibility" and no recall-path function in internal/domain
 		// ever read it, and 0 of 835 deduplicated corpus calls had ever sent one.
-		"work_item_id": prop("string", "Filter by work item ID"),
+		// aihub#590 (2026-09-10): this said "Filter by work item ID" while
+		// domain.Recall has resolved id-or-slug since aihub#363 — the capability
+		// existed and the published text hid it, so the slug every human and
+		// skill types looked unsupported and callers burned a pf_get_work_item
+		// round-trip for a canonical id nothing needs. Pinned by
+		// slug_publication_test.go (TestSlugAcceptanceIsPublishedByRecall).
+		"work_item_id": prop("string", "Filter by work item — canonical id or slug; either resolves "+
+			"to the same filter (aihub#363)."),
 		"top_k": prop("string", "Max results (default 20, ceiling 200). A JSON number is also "+
 			"accepted, and is what most callers send."),
 		"similarity_threshold": prop("number", "Minimum cosine similarity, 0-1. Applies to the "+

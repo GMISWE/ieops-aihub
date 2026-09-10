@@ -4,7 +4,7 @@
 {
   "tool": "pf_read_events",
   "description_sha256": "c495ca6b4e50e46b49bc56d8e8eeb357784284e54b737ff696a6734c6f6d42ae",
-  "input_schema_sha256": "bbd3846e6d7b3bb0b6d94865efbe2e90bb3f49cd3663c47ec5c1bbf0c5497aa4",
+  "input_schema_sha256": "785169078a3d1f45d3949297e10d1fc19540df6cc0ff26eda0e454ccf4b33de8",
   "params": {
     "cursor": {
       "type": "string",
@@ -59,7 +59,7 @@ directions.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
-| `work_item_id` | string | no | one work item (or use `project`) |
+| `work_item_id` | string | no | one work item — canonical id or slug (or use `project`) |
 | `project` | string | no | one project (or use `work_item_id`) |
 | `user_id` | string | no | "Filter by ACTOR: matches agent_events.actor_user_id" |
 | `types` | array | no | "A FILTER, not a whitelist and not a validator" — a claim emits one `lock_acquired` PER declared path |
@@ -67,6 +67,12 @@ directions.
 | `since` | string | no | RFC3339 |
 | `limit` | string | no | max events (server default 50) |
 | `pinned_first` | boolean | no | pinned events first |
+
+Since `aihub#590` (2026-09-10) the `work_item_id` property states the id-or-slug fact
+itself — it used to read "Work item ID (or use project)", which left the slug every
+human and skill types looking unsupported while the handler had resolved it since
+`aihub#343` — held by `internal/mcp/slug_publication_test.go`
+(`TestSlugAcceptanceIsPublishedByReadEvents`).
 
 The description carries a **cutover caveat** on the tool itself rather than only in
 the design doc: `lock_acquired` / `lock_released` / `wi_resources_updated` exist only

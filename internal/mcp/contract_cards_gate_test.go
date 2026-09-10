@@ -2240,7 +2240,7 @@ const k12ContractCards = 45
 // re-derived by hand.
 var k12Ledger = map[string]cardclaims.Census{
 	"pf_acquire_locks":           {Candidates: 14, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_activate_memory":         {Candidates: 4, Cited: 0, Unclassified: 4, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_activate_memory":         {Candidates: 4, Cited: 4, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_batch_create_work_items": {Candidates: 16, Cited: 0, Unclassified: 16, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_cancel_work_item":        {Candidates: 9, Cited: 0, Unclassified: 9, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_claim_work_item":         {Candidates: 22, Cited: 21, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
@@ -2268,8 +2268,8 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_push":                    {Candidates: 7, Cited: 0, Unclassified: 7, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_read_events":             {Candidates: 13, Cited: 0, Unclassified: 13, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_recall":                  {Candidates: 34, Cited: 2, Unclassified: 32, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_redact_memory":           {Candidates: 6, Cited: 0, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_reinforce_memory":        {Candidates: 22, Cited: 4, Unclassified: 18, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_redact_memory":           {Candidates: 7, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_reinforce_memory":        {Candidates: 22, Cited: 20, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_remember":                {Candidates: 41, Cited: 4, Unclassified: 37, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_remove_dependency":       {Candidates: 3, Cited: 0, Unclassified: 3, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_resolve_commit":          {Candidates: 9, Cited: 1, Unclassified: 8, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
@@ -2277,7 +2277,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_rotate_identifier":       {Candidates: 7, Cited: 1, Unclassified: 6, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_save_artifact":           {Candidates: 22, Cited: 1, Unclassified: 21, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_ship":                    {Candidates: 8, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_memory":           {Candidates: 10, Cited: 3, Unclassified: 7, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_update_memory":           {Candidates: 10, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
 	"pf_update_project":          {Candidates: 14, Cited: 0, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_update_step":             {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_update_user":             {Candidates: 16, Cited: 2, Unclassified: 14, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},

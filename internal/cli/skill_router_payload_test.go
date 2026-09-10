@@ -138,13 +138,15 @@ const (
 // tidied away — it is the assertion that the engine branch really is not consulted in that mode.
 // aihub#553's 1.1.31 batch moved these: aihub#519 corrected output-format.md's Status example
 // (the de-locked locks line, the lease-era expires row), -34 chars in the header of every
-// routed skill; aihub#553 grew engine.native.md (native branch only) by +84 for the explicit
-// dispatch-model instruction. Net native: 9,227 -> 9,277, inside its existing band, so its
-// entry deliberately keeps the old floor rather than raising the gate toward the ~9,460
-// discriminator ceiling.
+// routed skill; aihub#553 grew engine.native.md (native branch only) by a net +47 for the
+// explicit dispatch-model instruction. Every floor sits on the measured payload per this
+// map's own invariant — the native gate (9,274+150) still clears both real ceilings: the
+// ~9,460 discriminator bound applies to the PAYLOAD (which is 186 under it), and the
+// worst-case check on the gate (9,424 + 2 pointers x 125 = 9,674) stays under the harness
+// limit.
 var routerBudget = map[string]int{
 	"pf-execute/superpowers": 6954 + routerGateSlack,
-	"pf-execute/native":      9227 + routerGateSlack,
+	"pf-execute/native":      9274 + routerGateSlack,
 	"pf-plan/native":         1701 + routerGateSlack,
 	"pf-plan/superpowers":    1701 + routerGateSlack,
 	"pf-spec/native":         1701 + routerGateSlack,
@@ -1134,6 +1136,7 @@ func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
 		{"output-format-empty", []string{outputFormatFragment}},
 		{"both-empty", []string{ironRulesFragment, outputFormatFragment}},
 	}
+	droveHeaderOnly, droveStepBody := 0, 0
 	for _, skill := range routedSkills(t, pluginRoot) {
 		headerOnly := modes[skill] == routerModeHeaderOnly
 		for _, tc := range cases {
@@ -1152,6 +1155,7 @@ func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
 				}
 				out, stderr := runRouterRaw(t, root, skill, false)
 				if headerOnly {
+					droveHeaderOnly++
 					if strings.TrimSpace(out) != "" {
 						t.Errorf("header-only %s still emitted %d bytes with %v empty — a "+
 							"payload claiming to carry the resident rules while carrying none",
@@ -1161,12 +1165,36 @@ func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
 						t.Errorf("the guard fired silently — stderr must say why, or the "+
 							"missing payload is undiagnosable outside the model: %q", stderr)
 					}
-				} else if strings.TrimSpace(out) == "" {
-					// The guard's scope is the mode whose payload is nothing but rules.
-					t.Errorf("step-body %s went inert on an empty resident fragment — the "+
-						"guard over-fired and killed the engine payload", skill)
+					return
+				}
+				// The guard's scope is the mode whose payload is nothing but rules:
+				// step-body must stay fail-open, and "fail-open" means a WELL-FORMED
+				// payload, not merely bytes. Reviewer-confirmed on PR #452: asserting
+				// non-emptiness alone stayed green when the hook printed non-JSON here.
+				droveStepBody++
+				var emitted struct {
+					HookSpecificOutput struct {
+						AdditionalContext string `json:"additionalContext"`
+					} `json:"hookSpecificOutput"`
+				}
+				if err := json.Unmarshal([]byte(out), &emitted); err != nil {
+					t.Errorf("step-body %s must stay fail-open with a well-formed payload; "+
+						"got unparseable output (%v): %.120q", skill, err, out)
+				} else if strings.TrimSpace(emitted.HookSpecificOutput.AdditionalContext) == "" {
+					t.Errorf("step-body %s emitted JSON carrying no additionalContext — "+
+						"fail-open in name only", skill)
 				}
 			})
 		}
+	}
+	// Anti-vacuity (reviewer-confirmed on PR #452: without these, deleting the header-only
+	// TARGETS entries left every guard assertion unexecuted and this test green).
+	if droveHeaderOnly == 0 {
+		t.Error("no header-only skill was driven — the guard assertions ran zero times; if " +
+			"the mode was removed, remove this test with it rather than leaving it green by " +
+			"vacancy")
+	}
+	if droveStepBody == 0 {
+		t.Error("no step-body skill was driven — the fail-open negative control ran zero times")
 	}
 }

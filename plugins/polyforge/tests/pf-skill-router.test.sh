@@ -121,8 +121,20 @@ run_fx() { # skill -> stdout, against the fixture tree
 # Control first: the copy renders before gutting, so the silence below is the guard, not the copy.
 ck "$(run_fx polyforge:pf-spec)" "Three-Segment Output" "fixture copy renders pf-spec before gutting (control)"
 # F5: a header-only payload with an empty resident fragment claims rules it does not carry -> inert.
+# ck_empty alone would record a CRASHED hook as PASS (empty stdout either way), so the guard is
+# pinned three-sided: empty stdout AND exit 0 AND the reason on stderr (reviewer-confirmed hole:
+# a broken %-format in the guard passed the empty-stdout check).
 : > "$fx/skills/using-polyforge/fragments/iron-rules.md"
-ck_empty "$(run_fx polyforge:pf-spec)" "pf-spec with empty iron-rules.md -> no payload (guard fires)"
+fx_out="$(printf '{"tool_name":"Skill","tool_input":{"skill":"polyforge:pf-spec"},"cwd":"%s"}' "$ws_off" \
+  | HOME="$home_empty" CLAUDE_PLUGIN_ROOT="$fx" bash "$fx/hooks/pf-skill-router" 2>"$tmp/fx_err")"
+fx_rc=$?
+ck_empty "$fx_out" "pf-spec with empty iron-rules.md -> no payload (guard fires)"
+if [ "$fx_rc" -eq 0 ]; then
+  echo "  PASS: guard exits 0 (inert, not a crash)"
+else
+  echo "  FAIL: guard exits $fx_rc — a crash is indistinguishable from the guard firing" >&2; fails=$((fails+1))
+fi
+ck "$(cat "$tmp/fx_err")" "NOT emitted" "guard names the reason on stderr"
 # ...and the guard is scoped: step-body keeps its payload (the step body is the point there).
 ck "$(run_fx polyforge:pf-execute)" "parse_review_result" "pf-execute with empty iron-rules.md still emits (fail-open)"
 # F4: an over-budget header-only payload is tail-cut, so the banner must LEAD to survive.

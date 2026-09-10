@@ -25,7 +25,8 @@ import (
 //  1. The §0b template carries an explicit `model:` argument, stated as REQUIRED, ahead of
 //     the prompt — deleting the argument goes red.
 //  2. The template names BOTH tiers, and each name matches the mapping constants declared in
-//     engine.native.md — swapping the tiers (in either file) goes red.
+//     engine.native.md; §0f's hand-written mapping table is pinned to the same constants —
+//     a swap in any of the three copies goes red.
 //  3. The raised tier is keyed on the review predicate (`is_review`), and the model choice
 //     does not mention `level` — re-keying the choice on the review-depth parameter (the
 //     aihub#358 defect) goes red.
@@ -60,6 +61,13 @@ var (
 	// The resident loop's dispatch line. The model expression is asserted verbatim: it is the
 	// single line that makes the tier a dispatch argument rather than narrative.
 	engineDispatchRe = regexp.MustCompile(`dispatch Agent\(model=RAISED_TIER if is_review\(step_id\) else DEFAULT_TIER`)
+
+	// §0f's step-kind -> tier table — the THIRD hand-written copy of the mapping (after the
+	// constants and the §0b template). Reviewer-confirmed on PR #452: the first version of
+	// this gate pinned only the other two, so a re-tier could move both and leave the table
+	// contradicting them.
+	tableRaisedRe  = regexp.MustCompile("`RAISED_TIER` = ([a-z][a-z0-9.-]*)")
+	tableDefaultRe = regexp.MustCompile("`DEFAULT_TIER` = ([a-z][a-z0-9.-]*)")
 )
 
 // dispatchModelRegion extracts the `model:` argument of the §0b template — the text between
@@ -167,6 +175,24 @@ func TestEngineNativeDispatchCarriesExplicitModel(t *testing.T) {
 		}
 	})
 
+	t.Run("SectionZeroFTableAgreesWithConstants", func(t *testing.T) {
+		raised := tableRaisedRe.FindStringSubmatch(details)
+		deflt := tableDefaultRe.FindStringSubmatch(details)
+		if raised == nil || deflt == nil {
+			t.Fatalf("%s no longer states the §0f mapping table (`RAISED_TIER` = <name> / "+
+				"`DEFAULT_TIER` = <name>). That table is the copy a reader of the deferred "+
+				"file actually consults; if it moved, move this regex with it.", dispatchDetailDoc)
+		}
+		if raised[1] != raisedTier {
+			t.Errorf("§0f's table raises to %q but %s declares RAISED_TIER = %q — the two "+
+				"copies contradict each other", raised[1], dispatchEngineDoc, raisedTier)
+		}
+		if deflt[1] != defaultTier {
+			t.Errorf("§0f's table defaults to %q but %s declares DEFAULT_TIER = %q — the two "+
+				"copies contradict each other", deflt[1], dispatchEngineDoc, defaultTier)
+		}
+	})
+
 	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
 		// Every assertion above is "no defect was found", which a parser that finds nothing
 		// satisfies for free. Each fixture is one of the mutants this gate exists to reject.
@@ -197,6 +223,12 @@ func TestEngineNativeDispatchCarriesExplicitModel(t *testing.T) {
 			}
 		} else {
 			t.Error("dispatchModelRegion could not parse the level-keyed fixture")
+		}
+		swappedTable := "| review | predicate | `RAISED_TIER` = " + defaultTier + " |\n" +
+			"| everything else | otherwise | `DEFAULT_TIER` = " + raisedTier + " |\n"
+		if m := tableRaisedRe.FindStringSubmatch(swappedTable); m == nil || m[1] != defaultTier {
+			t.Errorf("tableRaisedRe did not extract a swapped §0f table value (got %v) — the "+
+				"table-agreement assertion could not have caught a swap", m)
 		}
 		noDispatchModel := strings.Replace(engine,
 			"dispatch Agent(model=RAISED_TIER if is_review(step_id) else DEFAULT_TIER",

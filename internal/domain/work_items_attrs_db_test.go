@@ -148,6 +148,70 @@ func TestUpdateWorkItemAttrsPatch_DoesNotDestroyOtherKeys(t *testing.T) {
 	assert.Equal(t, "attrs is whole-column REPLACE", got["second_agent_finding"])
 	// ...and it must not have overwritten an untouched key's value.
 	assert.Equal(t, "reported to dahe", got["dahe_report_2026_08_06"])
+
+	// aihub#543: the card says the merge is SHALLOW — "a top-level key replaces
+	// that key's stored value outright rather than merging into it recursively".
+	// Every assertion above is about DISJOINT top-level keys, where a shallow
+	// merge and a recursive one behave identically, so none of them can tell the
+	// two apart. This subtest is the input that can: a nested object patched with
+	// a partial one.
+	//
+	// It matters to a caller because attrs is where post-wrap decision records
+	// live, and callers group them (`{"review": {"round_1": …}}`). Under a
+	// recursive merge the sibling keys would survive; under this one they are
+	// gone, and the only way to keep them is to send them.
+	//
+	// MUTANTS (applied to this tree and run against a scratch Postgres):
+	//
+	//	M34 enforcement: swap the merge operands in buildWorkItemUpdate
+	//	    (`$1::jsonb || attrs`)               RED  the shallow assertion — the
+	//	                                              stored nested value wins and the
+	//	                                              patch is the loser, which is also
+	//	                                              the direction that silently
+	//	                                              discards every colliding patch
+	//	                                              key
+	//	M35 enforcement: make attrs_patch compile to `attrs = $1::jsonb`
+	//	                                         RED  the sibling control here (and the
+	//	                                              parent's key-survival assertions,
+	//	                                              which run first), while the
+	//	                                              shallow assertion stays GREEN —
+	//	                                              measured, and exactly why the
+	//	                                              control is here
+	//	M36 publication: drop the citation clause from the card sentence
+	//	                                         RED  K12 DEBT_GROWTH — but only after
+	//	                                              the card sentence was SPLIT in
+	//	                                              two. It first came back GREEN:
+	//	                                              the shallow claim and the
+	//	                                              null-stores-null claim shared one
+	//	                                              sentence with one citation each,
+	//	                                              so dropping this one left the
+	//	                                              sentence still "cited". K12
+	//	                                              classifies a SENTENCE, not a
+	//	                                              claim (aihub#543 spec §1.3), so
+	//	                                              two claims in one sentence share
+	//	                                              one binding
+	t.Run("the merge is shallow: a patched key's stored value is replaced outright", func(t *testing.T) {
+		nested := seedWIWithAttrs(t, pool, project, u, `{
+			"review": {"round_1": "done", "round_2": "pending"},
+			"untouched": "kept"
+		}`)
+
+		merged, aerr := UpdateWorkItem(context.Background(), pool, nested.ID, u, "admin", nil,
+			updateReqFromJSON(t, `{"attrs_patch":{"review":{"round_3":"new"}}}`))
+		require.Nil(t, aerr)
+
+		attrs := attrKeysOf(t, merged)
+		assert.Equal(t, map[string]any{"round_3": "new"}, attrs["review"],
+			"`jsonb || jsonb` replaces a colliding key's whole value; round_1 and round_2 "+
+				"surviving would mean the merge had become recursive, which is a different "+
+				"contract from the one this tool publishes — a caller relying on it would stop "+
+				"being able to REMOVE a nested key at all")
+		// The control: without it, a whole-column REPLACE satisfies the assertion
+		// above for the wrong reason.
+		assert.Equal(t, "kept", attrs["untouched"],
+			"the TOP level still merges — a sibling key the patch never mentioned must survive, "+
+				"or this is the destructive `attrs` path wearing attrs_patch's name")
+	})
 }
 
 // TestUpdateWorkItemAttrs_ReplaceStillDestroysUnsentKeys is the incident itself,
@@ -302,6 +366,54 @@ func TestUpdateWorkItemAttrsPatch_WorksOnTerminalWorkItem(t *testing.T) {
 	require.Nil(t, aerr, "attrs must stay writable on a terminal work item")
 	assert.Equal(t, "wrapped", updated.Status)
 	assert.Equal(t, map[string]any{"pre_wrap": "kept", "post_wrap": "added"}, attrKeysOf(t, updated))
+
+	// aihub#543: the card's mixing rule — "the strictest tier a patch touches
+	// governs the whole patch … refused whole rather than applied in part".
+	//
+	// TestStrictestSuppliedEditTierGovernsTheWholePatch pins which TIER such a
+	// patch selects and TestUpdateGate pins what that tier answers on a wrapped
+	// work item, both by calling their subject directly. Neither can see whether
+	// the record-tier half of the SAME patch reached the column anyway — and a
+	// half-applied patch is worse than a rejected one, because the caller was
+	// told "no" and has no reason to go looking. That is the assertion here, and
+	// it needs the row.
+	//
+	// MUTANTS (applied to this tree and run against a scratch Postgres):
+	//
+	//	M37 enforcement: make strictestSuppliedEditTier return the LOOSEST tier
+	//	                                         RED  the refusal — the mixed patch is
+	//	                                              allowed and labels land on a
+	//	                                              wrapped work item
+	//	M38 enforcement: "applied in part" — when the gate refuses, strip the field
+	//	    it named and carry on with the rest
+	//	                                         RED  the refusal, which is a require
+	//	                                              and aborts the subtest before the
+	//	                                              attrs check runs. Recorded that
+	//	                                              way deliberately: a nil error
+	//	                                              makes every later assertion
+	//	                                              meaningless, so the ordering is
+	//	                                              the point rather than a gap
+	//	M39 publication: drop the citation clause from the card sentence
+	//	                                         RED  K12 DEBT_GROWTH
+	t.Run("a patch mixing attrs_patch with a working-tier field is refused whole", func(t *testing.T) {
+		_, aerr := UpdateWorkItem(context.Background(), pool, seeded.ID, u, "admin", nil,
+			updateReqFromJSON(t, `{"attrs_patch":{"smuggled":"x"},"labels":["late-label"]}`))
+		require.NotNil(t, aerr, "labels is working-tier and this work item is wrapped, so the "+
+			"patch as a whole must be refused — attrs_patch is not a carrier that pulls a "+
+			"labels write past the terminal-state gate")
+		assert.Equal(t, ErrConflictTerminalState, aerr.Code,
+			"the refusal is about the STATE, and one error code per rejection KIND is the whole "+
+				"point of the matrix")
+
+		fresh, gerr := GetWorkItem(context.Background(), pool, seeded.ID)
+		require.Nil(t, gerr)
+		assert.Equal(t, map[string]any{"pre_wrap": "kept", "post_wrap": "added"}, attrKeysOf(t, fresh),
+			"the record-tier half of the refused patch must not have landed: a PATCH that wrote "+
+				"some fields and refused others would need a response shape that says which, and "+
+				"there is none")
+		assert.NotContains(t, fresh.Labels, "late-label",
+			"the working-tier half must not have landed either")
+	})
 }
 
 // TestUpdateWorkItemAttrsPatch_SurvivesANonObjectStoredValue covers the hole

@@ -40,31 +40,65 @@ calls, not one:
 2. `pkg/client/client.go` (`ListProjects`) → `GET /v1/projects`, bound by
    `internal/server/routes_projects.go` (`handleListProjects`).
 
-The second is **best-effort**: if it fails, the tool still answers with the whoami
-half and simply omits `projects`. So an absent `projects` key means "the second
-call failed", not "you have access to none".
+The second is **best-effort**: if it fails, the tool still answers the whoami half
+and leaves in place the `projects` key the SERVER sent — `internal/server/router.go`
+(`handleWhoami`) always sends one of its own, an array of project NAME STRINGS built
+from `project_roles`, and the enrichment below overwrites it with
+`{name, relation, role}` objects only when the second call succeeds, one branch at a
+time in `internal/mcp/whoami_projects_shape_test.go`
+(`TestWhoamiKeepsTheServersOwnProjectsWhenTheEnrichmentFails`). The element TYPE is
+therefore the only signal a caller has that the second call failed, and
+`TestWhoamiKeepsTheServersOwnProjectsWhenTheEnrichmentFails` asserts it on both
+branches.
+
+⚠️ This card used to say the key was omitted, and that an absent `projects` meant
+"the second call failed" — the key was never absent, and a caller that believed it
+would read `.name` off a list of strings.
 
 ## hop 4 — what it actually does
 
-The `projects` array is computed **in this process**, not by the server. For each
-visible project the handler derives `relation` (`owner` | `member` | `public`) and
-`role`, and the derivation has two properties a caller should know:
+The `projects` array is computed **in this process** rather than by the server, which
+`internal/mcp/whoami_projects_shape_test.go`
+(`TestWhoamiComputesTheProjectsArrayItself`) drives against a fake whose own
+`projects` value names a project no row carries, so forwarding and computing are
+distinguishable. For each visible project the handler derives `relation`
+(`owner` | `member` | `public`) and `role` — six member shapes of that derivation are
+driven by `internal/mcp/tools_whoami_members_test.go`
+(`TestWhoamiMembersBranchClassifiesOrdinaryMembers`) — and the derivation has two
+properties a caller should know:
 
-- **Admin and owner short-circuit to `owner`/`owner`.** `owner` is not a member
-  role — it is the `projects.owner_user_id` column — so the `role` this tool
+- **Admin and owner short-circuit to `owner`/`owner`.** Both callers are pinned
+  byte-for-byte by `internal/mcp/tools_whoami_members_test.go`
+  (`TestWhoamiAdminAndOwnerResponsesAreByteIdentical`). `owner` is the
+  `projects.owner_user_id` column and no member role, so the `role` this tool
   reports is drawn from a **wider vocabulary** than the one `pf_update_project`'s
-  `members` accepts. §6.2 T2-17 is the ruling that this two-vocabulary split stays
-  and must be **named** here, because only the value a caller cannot send is
-  visible to an LLM.
+  `members` accepts: `internal/mcp/whoami_projects_shape_test.go`
+  (`TestWhoamiReportsAnOwnerRoleThatIsNoMemberRole`) drives the reported value and
+  `internal/domain/card_claims_wave2_test.go`
+  (`TestOwnerIsNotAMemberRoleUpdateProjectAccepts`) reads the refusal out of
+  `UpdateProject`'s own validation. §6.2 T2-17 is the ruling that this
+  two-vocabulary split stays and must be **named** here, because only the value a
+  caller cannot send is visible to an LLM.
 - **The member scan is a SECOND derivation of a fact the server also derives.**
   `internal/server/middleware.go` (`roleForUserInMembers`) computes the same
-  "caller's role out of `projects.members`" for `project_roles`. Both were fixed
+  "caller's role out of `projects.members`" for `project_roles`, and one response
+  carries both — `internal/mcp/whoami_projects_shape_test.go`
+  (`TestWhoamiDerivesTheMemberRoleWithoutReadingProjectRoles`) makes the two
+  disagree on purpose and requires this tool's answer to come from the members
+  array. Both were fixed
   independently (`aihub#312` here, `aihub#315` there) and nothing makes them agree;
-  the server package gates its own copy with a test requiring one derivation, and
-  nothing gates the pair across the mcp/server boundary. Measured 2026-09-02 against
-  eight call sites: 8/8 agree. One shape outside that set still differs — a member
-  whose `role` is not a string — and it is a payload difference, not an
-  authorization one.
+  the server package gates its own copy with a test requiring one derivation
+  (`internal/server/middleware_project_roles_test.go`,
+  `TestProjectRolesHaveOneDerivation`), and nothing gates the pair across the
+  mcp/server boundary. Measured 2026-09-02 against eight call sites: 8/8 agree. One
+  shape outside that set still differs — a member whose `role` is not a string — and
+  the difference is in the payload rather than in authorization:
+  `internal/server/middleware_project_roles_test.go`
+  (`TestRoleForUserInMembers_NonStringRoleIsFoundWithNoRole`) holds the server's
+  `("", found)` and that an empty role clears no rung, against this tool's
+  member/viewer answer for the same entry
+  (`internal/mcp/whoami_projects_shape_test.go`,
+  `TestWhoamiNonStringMemberRoleKeepsTheDefaultRole`).
 
 ## hop 5 — what comes back
 
@@ -76,10 +110,21 @@ callers have been handed.
 
 - **§6.2 T2-17** — keep the two-vocabulary role split and name it in the contract
   cards. Named above: `role` here can be `owner`, which `pf_update_project` will
-  refuse.
-- **§6.2 T2-8** — the member-role vocabulary is `viewer | writer | maintainer`, and
-  the two contradicting `roleLevel` ladders that ruling was about are now one shared
-  map (`aihub#443`, LANDED). A `maintainer` reported here used to be a role one of the
+  refuse — the pair
+  `internal/mcp/whoami_projects_shape_test.go`
+  (`TestWhoamiReportsAnOwnerRoleThatIsNoMemberRole`) and
+  `internal/domain/card_claims_wave2_test.go`
+  (`TestOwnerIsNotAMemberRoleUpdateProjectAccepts`) holds both ends of that
+  sentence, since a value can be absent from a vocabulary without anything ever
+  reporting it.
+- **§6.2 T2-8** — the member-role vocabulary is `viewer | writer | maintainer`, read
+  out of `UpdateProject`'s validation by `internal/domain/projects_test.go`
+  (`TestRoleLevel_LadderIsExactlyTheValidatedVocabulary`), and the two contradicting
+  `roleLevel` ladders that ruling was about are now one shared map (`aihub#443`,
+  LANDED) — `internal/server/middleware_project_roles_test.go`
+  (`TestRoleLevelIsTheDomainLadder`) compares the two by contents AND by pointer,
+  because equal contents are what a re-forked copy looks like on the day it is
+  written. A `maintainer` reported here used to be a role one of the
   two ladders scored at 0.
 - **§6.2 T2-11** — "scoped to visible projects" has **two** implementation shapes.
   A new resolver must be told which one it inherits; this tool inherits
@@ -90,10 +135,15 @@ callers have been handed.
 - **§6.4 item 1 — measured.** `aihub#443`'s attrs record the DB read (a live-DB read
   dated 2026-09-08, so it dates rather than pins — a row count is not a property of a
   commit): 4 live `projects.members` rows hold `role:"maintainer"`, so a
-  `maintainer` reported by this tool is a role a real row really carries. Migration
-  `0013` mapped `maintainer` to `writer` on backfill, so those rows arrived from later
-  members writes, as this card said they would have to. The urgency is therefore no
-  longer unmeasured: it is low for this tool, which only reports the role, and it was
-  real for `pf_list_dependencies`, which ranked it.
+  `maintainer` reported by this tool is a role a real row really carries.
+  <!-- prose-only: because=measurement -->
+  Migration `0013` mapped `maintainer` to `writer` on backfill — held by
+  `internal/domain/card_claims_wave2_test.go`
+  (`TestMigration0013MappedMaintainerToWriterOnBackfill`), which reads the mapping
+  out of every backfill migration rather than out of `0013` alone — so those rows
+  arrived from later members writes, as this card said they would have to. The
+  urgency is therefore no longer unmeasured: it is low for this tool, which only
+  reports the role, and it was real for `pf_list_dependencies`, which ranked it.
+  <!-- prose-only: because=judgement -->
 - The mcp/server duplication above is held together by a comment, not a gate. That
   is stated in the source and is not closed by this card.

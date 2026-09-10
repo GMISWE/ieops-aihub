@@ -642,7 +642,7 @@ func TestPushWhoseLeaseIsStaleAnswersBaseMovedAndOverwritesNothing(t *testing.T)
 	for k := range out {
 		if !declared[k] {
 			t.Errorf("the base-moved response carries %q, which %s does not list in "+
-				"response_keys_observed %v", k, pushCardPath, sortedKeysOf(declared))
+				"response_keys_observed %v", k, pushCardPath, sortedBoolKeys(declared))
 		}
 	}
 }
@@ -684,7 +684,7 @@ func TestBaseMovedRecognitionIsSharedByPushAndShipWithDifferentShapes(t *testing
 
 	// Deliberately different shapes, asserted so "they share the recogniser and
 	// not the shape" cannot quietly become "they share both".
-	pushKeys, shipKeys := sortedKeysOf(setOf(push)), sortedKeysOf(setOf(ship))
+	pushKeys, shipKeys := sortedBoolKeys(setOf(push)), sortedBoolKeys(setOf(ship))
 	if strings.Join(pushKeys, ",") == strings.Join(shipKeys, ",") {
 		t.Errorf("pf_push and pf_ship answered the same key set %v on the base-moved path. The "+
 			"shapes are deliberately not shared: pf_ship has to say which stage it reached and what "+
@@ -786,7 +786,11 @@ func setOf(m map[string]any) map[string]bool {
 	return out
 }
 
-func sortedKeysOf(m map[string]bool) []string {
+// sortedBoolKeys sorts a set's keys. Named for its VALUE type: another arm in
+// this package already owns `sortedKeysOf` for a schema's property map, and two
+// helpers with one name is a compile error rather than a subtle one — but the
+// name that has to move is the newer one.
+func sortedBoolKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

@@ -357,3 +357,70 @@ func TestRoleLevelIsTheDomainLadder(t *testing.T) {
 			"apart again the way they did before aihub#443")
 	}
 }
+
+// TestRoleForUserInMembers_NonStringRoleIsFoundWithNoRole is the SERVER half of
+// the one shape the two derivations of the caller's member role still disagree
+// about, published by docs/mcp-cards/pf_whoami.md as "a member whose `role` is
+// not a string — and it is a payload difference, not an authorization one".
+//
+// aihub#543 probe wave 2. The mcp half is
+// internal/mcp/whoami_projects_shape_test.go
+// (TestWhoamiNonStringMemberRoleKeepsTheDefaultRole): there the membership is
+// found and the role stays at the "viewer" default, because the type assert on
+// an `any` fails and the default is left standing. Here the value decodes into a
+// TYPED struct, so the same entry yields ("", found) and project_roles carries
+// {"<project>":""} rather than {} — a different payload for the same row, which
+// is the whole of the claim.
+//
+// The authorization half is asserted too, because "not an authorization one" is
+// the load-bearing clause: a reader who took the difference for an access
+// difference would treat the two derivations as a live privilege bug. An empty
+// role and no membership at all clear exactly the same rungs, which is the
+// comparison checkProjectAccess makes.
+//
+// MUTANTS (applied to this tree; the verdict is what ran):
+//
+//	M9  enforcement: bail out of roleForUserInMembers on a non-nil decodeErr
+//	    (the pre-aihub#315 guard)                RED  the membership is lost
+//	M10 enforcement: give domain.RoleLevel a rung for "" (`"": 1`)
+//	                                            RED  an empty role would then
+//	                                                 clear viewer and the
+//	                                                 difference WOULD be an
+//	                                                 authorization one
+//	P1  publication: make every citation in the pf_whoami card unresolvable
+//	                                            RED  K12
+func TestRoleForUserInMembers_NonStringRoleIsFoundWithNoRole(t *testing.T) {
+	const members = `[{"user_id":"u_me","role":5}]`
+
+	role, found, decodeErr := roleForUserInMembers([]byte(members), "u_me")
+	if !found {
+		t.Fatalf("the membership was lost for %s. The entry names the caller, so it is found "+
+			"whatever the role's type — losing it is the pre-aihub#315 wholesale discard, and it "+
+			"would make this a role difference rather than the payload difference the card "+
+			"publishes", members)
+	}
+	if role != "" {
+		t.Errorf("role = %q, want the empty string: encoding/json leaves a field whose type does not "+
+			"match at its zero value, and coercing it into some other role here would invent an "+
+			"authorization answer for a row that carries none", role)
+	}
+	if decodeErr == nil {
+		t.Error("decodeErr is nil for a members array with a non-string role — the type error is the " +
+			"only signal that this row is dirty, and a silent decode would leave the difference " +
+			"between the two derivations unexplainable")
+	}
+
+	// The authorization half: an empty role and an absent membership clear the
+	// same rungs, so neither shape grants anything the other does not.
+	if domain.RoleLevel[""] >= domain.RoleLevel["viewer"] {
+		t.Errorf("domain.RoleLevel[\"\"] = %d and RoleLevel[\"viewer\"] = %d, so an empty role now "+
+			"clears the viewer rung checkProjectAccess compares against. The pf_whoami card says "+
+			"the disagreement between the two derivations is a payload difference and NOT an "+
+			"authorization one; with a rung for \"\" that sentence is false and the two derivations "+
+			"differ about access.", domain.RoleLevel[""], domain.RoleLevel["viewer"])
+	}
+	if domain.RoleLevel["viewer"] == 0 {
+		t.Fatal("domain.RoleLevel has no viewer rung, so the comparison above is 0 >= 0 and cannot " +
+			"fail however the ladder is written — the floor for this arm")
+	}
+}

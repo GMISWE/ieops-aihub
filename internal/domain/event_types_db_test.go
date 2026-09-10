@@ -220,8 +220,63 @@ func TestEmitEventNullWorkItem_IsA400NotA500(t *testing.T) {
 			require.Contains(t, errMsg, "work_item_id is required")
 			require.Contains(t, errMsg, "chk_evt_work_item_id",
 				"the 400 does not name the constraint it mirrors, so a reader cannot check the list")
+			// aihub#543 lane L5: the card says EmitEvent "names the constraint AND
+			// ITS LIST". The constraint name alone sends a reader to the
+			// migrations; the list is what lets them fix the call from the error.
+			// Built from the Go mirror rather than written out, so a reordering or
+			// an added type moves both sides together.
+			require.Contains(t, errMsg, strings.Join(NullWorkItemEventTypes, ", "),
+				"the 400 names chk_evt_work_item_id but not the %d types it admits, so a caller "+
+					"is told which rule they broke and not which values satisfy it",
+				len(NullWorkItemEventTypes))
 		})
 	}
+
+	// aihub#543 lane L5 — the complement, and the half no arm in this tree held:
+	// the card's "`event_type` is still a free string … every other string is
+	// accepted". Every case above carries NO work item, so all of them are
+	// answered by the null-work-item guard; a Go vocabulary check added tomorrow
+	// would be invisible to them because the guard refuses first.
+	//
+	// A subtest of this function rather than a new top-level one, per aihub#543
+	// spec §3.3 rule 2: gated_tests.txt and ci.yml already name it, so this costs
+	// no manifest edit.
+	//
+	// MUTANTS (applied to this tree against a migrated database; the verdict is
+	// what ran):
+	//
+	//	M47 add a `slices.Contains(EventVocabulary, req.EventType)` refusal to
+	//	    EmitEvent                            RED  this subtest, and the
+	//	                                              pre-existing
+	//	                                              definitely_not_an_event_type
+	//	                                              case with it
+	//	M48 install CHECK (event_type IN ('note')) NOT VALID on agent_events
+	//	                                         RED  this subtest, plus three
+	//	                                              pre-existing arms — a column
+	//	                                              vocabulary breaks all of them,
+	//	                                              which is the point
+	t.Run("an off-vocabulary type WITH a work item is accepted", func(t *testing.T) {
+		project := testProject(t, pool, uid)
+		wi := seedWI(t, pool, project, uid)
+
+		// Two values, because a guard keyed on either published list is red on
+		// only one of them: artifact_action IS in EventVocabulary (retired, no
+		// publisher left), and the other is in nothing at all.
+		for _, typ := range []string{"artifact_action", "definitely_not_an_event_type"} {
+			require.NotContains(t, setOf(NullWorkItemEventTypes), typ,
+				"%q has joined the null-work-item list, so this arm no longer distinguishes "+
+					"\"accepted because free\" from \"accepted because listed\"", typ)
+
+			id, errMsg, status := emitAs(t, pool, uid, wi.ID, typ, "member", false)
+			require.Empty(t, errMsg,
+				"%q was refused with HTTP %d (%s). agent_events.event_type is TEXT NOT NULL with "+
+					"no vocabulary CHECK (TestEventTypeCarriesNoVocabularyCheckAtHead) and the "+
+					"published 45-name list is advisory, so a refusal here means the column or a "+
+					"Go guard has closed the set and the card's hop 0-1 is now false",
+				typ, status, errMsg)
+			require.NotEmpty(t, id, "%q was accepted and no event id came back", typ)
+		}
+	})
 }
 
 // TestMigration0036_AdmitsAdminGcManualWithNoWorkItem is the column's own answer,
@@ -276,6 +331,33 @@ func TestMigration0036_AdmitsAdminGcManualWithNoWorkItem(t *testing.T) {
 		"the column accepted an off-list type with a NULL work_item_id — chk_evt_work_item_id has "+
 			"been widened into uselessness, and the Go mirror is now the only thing checking")
 	require.Contains(t, err.Error(), "chk_evt_work_item_id")
+
+	// aihub#543 lane L5 — the OTHER side of the disjunction, which is what makes
+	// the pf_emit_event card's "no CHECK behind it … every other string is
+	// accepted" a statement about the column and not only about Go.
+	// chk_evt_work_item_id reads `work_item_id IS NOT NULL OR event_type IN (…)`,
+	// so the list above governs only the NULL case; with a work item present the
+	// column takes any string. Asserted here because the arm above proves the
+	// opposite for the NULL case, and the two together are the disjunction —
+	// separately, either one reads as a vocabulary.
+	//
+	// A subtest of a function gated_tests.txt and ci.yml already name, per
+	// aihub#543 spec §3.3 rule 2.
+	t.Run("the column takes any type when a work item is present", func(t *testing.T) {
+		uid := testUser(t, pool)
+		project := testProject(t, pool, uid)
+		wi := seedWI(t, pool, project, uid)
+
+		_, insErr := pool.Exec(ctx,
+			`INSERT INTO agent_events (id, work_item_id, event_type, payload, created_at)
+			 VALUES ($1, $2, $3, '{}'::jsonb, clock_timestamp())`,
+			NewID("evt"), wi.ID, "definitely_not_an_event_type")
+		require.NoError(t, insErr,
+			"the column refused an off-list event_type on a row that DOES carry a work item. "+
+				"chk_evt_work_item_id is disjunctive on work_item_id IS NOT NULL, so this insert "+
+				"is unconstrained by it; a failure here means some other constraint has closed "+
+				"the vocabulary and the card's hop 0-1 must be rewritten")
+	})
 
 	// Leave the table as it was found: these rows carry no work item, so
 	// seedWI's per-project cleanup would never reach them.

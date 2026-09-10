@@ -43,7 +43,11 @@ last two mean retry or re-read, not "the server is broken".
 `internal/mcp/tools_lifecycle.go` (`registerLifecycleTools`) sends `{reason}` — and
 only when non-empty — to `pkg/client/client.go` (`CancelWorkItem`) →
 `POST /v1/work_items/<id>/cancel`, bound by `internal/server/router.go`
-(`handleCancelWorkItem`).
+(`handleCancelWorkItem`); the route, both reason directions and the body's
+emptiness otherwise are observed on the request by
+`internal/mcp/pause_cancel_wire_shape_test.go`
+(`TestCancelSendsOnlyAReasonAndNoAttemptCredential`), which drives the tool with no
+state file present at all.
 
 No attempt credential is involved: cancelling is authorized by project role, which
 is why it works on a work item this machine holds no state file for.
@@ -54,13 +58,26 @@ is why it works on a work item this machine holds no state file for.
   emitting a `lock_released` event with `cause=wi_cancelled`, so `pf_read_events`
   can confirm the release actually happened.
 - **That release is what the change was for.** Pausing deliberately releases only
-  `file_scope` and KEEPS every other lock type — and before `aihub#355`, cancelling a
-  paused work item left those held forever: the wi was terminal, so no claim,
-  takeover or completion could ever release them, and the orphan sweep skips a paused
-  attempt's rows by design.
+  `file_scope` and KEEPS every other lock type — held by
+  `internal/domain/run_attempts_test.go`
+  (`TestAcquireLocksReleasePausedSQL_FileScopeOnly` with
+  `TestAcquireLocksReleasePausedSQL_NotAllLocks`) — and before `aihub#355`,
+  cancelling a paused work item left those held forever: the wi was terminal, so no
+  claim, takeover or completion could ever release them, and the orphan sweep skips
+  a paused attempt's rows by design, which is the retention predicate
+  `internal/domain/gc_test.go` (`TestOrphanLockSweepSQL_RetainsPausedLocks`) pins.
 - ⚠️ **Since `aihub#416` the retained set is normally EMPTY**, because `file_scope`
-  is the only lock the server derives. It is non-empty for an attempt that supplied
-  `requested_locks` explicitly, and for rows predating that change. So this release
+  is the only lock the server derives —
+  `internal/domain/lock_derivation_retired_test.go`
+  (`TestResourceToLock_RepoAndServiceDeriveNoLock`,
+  `TestResourceToLock_PathStillDerivesFileScope`) per type, and
+  `internal/domain/read_intent_scope_test.go`
+  (`TestReadIntentIsHonouredOnlyOnTheTypesThatDeriveALock`) over the whole
+  declared-type vocabulary. It is non-empty for an attempt that supplied
+  `requested_locks` explicitly — the one surviving route, asserted by
+  `internal/domain/lock_derivation_retired_test.go`
+  (`TestDeriveClaimLocks_RepoAndServiceContributeNoLock`) — and for rows predating
+  that change. So this release
   path is now a rarely-exercised safety net rather than the ordinary case — which is
   why it is still tested and still described, not why it should be removed.
 - **The status check is re-run inside the transaction against a locked row.** A
@@ -70,18 +87,30 @@ is why it works on a work item this machine holds no state file for.
   `cancelled` with an `ended_at`, in the same transaction and BEFORE the lock
   release (`aihub#441`, `aihub#411` T2-3 residue (b)). The predicate is the
   retention set `IN ('running','paused')`, so an attempt that already ended keeps
-  the terminal status it earned. What this buys is not the locks — those were
-  already released here since `aihub#355` — it is the credential answer: while a
-  cancelled work item's attempt read `paused`, every credentialed call answered 409
-  `ATTEMPT_PAUSED`, whose contract is "keep your state file, resume this", and
-  resume is impossible because `pf_claim_work_item` refuses a terminal work item.
-  It now answers 403 `ATTEMPT_MISMATCH`: re-claim, and drop the dead credential.
+  the terminal status it earned — the control in
+  `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_CancelEndsTheLiveAttempt`) is an already-wrapped
+  attempt on the same work item that must survive the cancel unchanged. What this
+  buys is not the locks — those were already released here since `aihub#355` — it is
+  the credential answer: while a cancelled work item's attempt read `paused`, a
+  credentialed call through `verifyAttemptCredential` answered 409 `ATTEMPT_PAUSED`,
+  whose contract is "keep your state file, resume this", and resume is impossible
+  because `pf_claim_work_item` refuses a terminal work item — the refused re-claim
+  is driven in
+  `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused`). It now
+  answers 403 `ATTEMPT_MISMATCH`: re-claim, and drop the dead credential, read off
+  `VerifyAttemptCredentialPool` on both sides of the cancel in
+  `internal/domain/attempt_status_vocabulary_dbgated_test.go`
+  (`TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused`).
 
 ## hop 5 — what comes back
 
 `jsonResult`, no projection. The corpus record above spans 161 calls at a **17.39%
 error rate** — the highest of any tool with 100 or more calls, though not the highest
-overall (`pf_reinforce_memory` is, at 83.33% over 6). That is consistent with a tool
+overall (`pf_reinforce_memory` is, at 83.33% over 6).
+<!-- prose-only: because=measurement -->
+That is consistent with a tool
 whose legal-state set is narrow and whose refusals are 409s rather than faults: a
 high error rate here is not by itself evidence of a defect.
 
@@ -95,9 +124,13 @@ high error rate here is not by itself evidence of a defect.
   and a cancelled work item has no successor attempt to name.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection KIND: 409 for state, 403 for permission. This tool's three 409s are three
-  distinct states, which is the shape that ruling asks for — and `aihub#440` carried
+  distinct states, which is the shape that ruling asks for — `internal/domain/work_items_cancel_gate_test.go`
+  (`TestCancelGate`) walks every status against four actors — and `aihub#440` carried
   it across, so `pf_update_work_item` now refuses with **these** codes rather than
-  with two field-specific ones of its own. Nothing about this tool changed.
+  with two field-specific ones of its own, which
+  `internal/domain/work_items_update_gate_test.go` (`TestUpdateGate` for the codes,
+  `TestRetiredErrCodesAreNotProducedByTheUpdatePath` for the absence of the two
+  retired ones) holds in both directions. Nothing about this tool changed.
 
 ## Open
 

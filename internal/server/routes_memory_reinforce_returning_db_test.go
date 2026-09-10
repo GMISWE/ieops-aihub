@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -256,8 +257,39 @@ func TestReinforceMemory_IntegralDeltaStillMoves(t *testing.T) {
 
 	// Past the top: the clamp is unchanged by aihub#475 and must still land on
 	// MaxBaseStrength rather than on the driver's constraint error.
-	got = reinforceRespBaseStrength(t,
-		callReinforce(t, pool, memID, `{"additional_context":"way up","strength_delta":99}`, writer))
+	rec := callReinforce(t, pool, memID, `{"additional_context":"way up","strength_delta":99}`, writer)
+	got = reinforceRespBaseStrength(t, rec)
 	require.Equal(t, 5.0, got, "the clamp must still hold the value at MaxBaseStrength")
 	require.Equal(t, 5.0, storedBaseStrength(t, pool, memID))
+
+	// aihub#543 wave 2, slice L6 — the response SHAPE on the saturating call.
+	//
+	// The pf_reinforce_memory card records which candidates lost when aihub#506
+	// adjudicated the clamp: "a 400 on an overflowing sum and a `clamped: true`
+	// field in the response; the second is why the response shape is untouched
+	// and K10's declared key set with it." K10 is a one-directional ratchet on
+	// keys that ARE carried, so a key ARRIVING is exactly what it cannot see —
+	// and this call, a delta of 99 onto a row at the top, is the one request
+	// where the withdrawn field would have had something to say.
+	//
+	// An EXACT key set, not a check that `clamped` is absent: the ruling was
+	// that the shape is untouched, and "no key named clamped" is satisfied by a
+	// response that grew a differently-named disclosure instead. Reading it off
+	// the same recorder the arms above use costs nothing.
+	//
+	//	M1  add "clamped": true to the reinforce response      RED
+	//	M2  rename memory_id to id in the response             RED
+	//	M3  drop activation_count from the response            RED
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &decoded), "body=%s", rec.Body.String())
+	keys := make([]string, 0, len(decoded))
+	for k := range decoded {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	require.Equal(t, []string{"activation_count", "base_strength", "memory_id"}, keys,
+		"the saturating call answered with the keys %v. The owner's aihub#506 ruling kept the "+
+			"clamp and REJECTED a `clamped: true` field, so this is the request that would "+
+			"disclose one if it existed — and the card's claim that the response shape is "+
+			"untouched, K10's declared key set with it, is about exactly this body.", keys)
 }

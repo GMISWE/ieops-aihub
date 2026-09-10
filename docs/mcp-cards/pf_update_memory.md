@@ -77,18 +77,36 @@ distinct semantic from sending a zero value.
 
 "Any id in the lineage" is load-bearing: a memory is versioned, and updating creates
 a **new version** and advances the `latest_id` cursor, so the id a caller holds from
-an old recall still resolves.
+an old recall still resolves — driven against a real database by
+`internal/domain/memory_latest_test.go` (`TestUpdateMemory`), which updates from
+v1's id twice and requires v1's own id to keep resolving to the newest head, with
+the resolver itself held by (`TestGetLatestByID`).
 
 ## hop 2-3 — what leaves this process, and what binds it
 
 `internal/mcp/tools_memory.go` (`buildUpdateMemoryBody`) sends the three credentials
 plus `work_item_id`, then copies each of `updateMemoryPassthroughFields` **only when
 the key is present** — absent means "keep current", which is not the same fact as
-sending a zero value, and the server binds these as optional fields.
+sending a zero value, and the server binds them as optional fields (`*string` /
+`[]string` / `*float64`) so an absent key inherits the lineage head's value; both
+directions are measured on the wire by `internal/mcp/memory_wire_shape_test.go`,
+which asserts the base body as an exact key set
+(`TestReinforceAndUpdateSendCredentialsAndTheWorkItemAndNoMemoryId`) and drives
+every optional field set AND omitted
+(`TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`), with the
+inheritance the absence buys driven at the layer that decides it by
+`internal/domain/memory_latest_test.go` (`TestUpdateMemory`) — ⚠️ the omitted
+direction having been invisible to every arm until this slice, because the
+`aihub#325` wire gate only ever sends values it picked itself, so a `content: ""`
+reaching the body and overwriting a memory's text with nothing went unobserved.
 
 Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
 (`UpdateMemory`), bound by `internal/server/routes_memory.go` (`handleUpdateMemory`).
-`memory_id` is the path segment, not a body field.
+`memory_id` is the path segment rather than a body field, which the exact key set
+above and `internal/mcp/memory_tools_wire_test.go`
+(`TestMemoryToolsForwardEveryPublishedPropertyByValue`) assert from the two
+directions absence needs: the value is required to arrive in the URL, and the body
+is required to hold exactly the four keys that are not it.
 
 ## hop 4 — what it actually does
 
@@ -99,7 +117,12 @@ Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
   `aihub#433` it is validated by the same guard: `internal/domain/memory.go`
   (`UpdateMemory`) builds a `RememberRequest` and calls `internal/domain/memory.go`
   (`Remember`), whose `internal/domain/memory.go` (`validateBaseStrength`) sits above
-  the first query. So an out-of-range value is a 400 here too, and this tool's own
+  the first query — the reach is a code property, held by
+  `internal/domain/memory_base_strength_range_test.go`
+  (`TestUpdateMemoryInheritsTheStrengthGuardRatherThanRestatingIt`), and the guard
+  running before any query is held by (`TestRememberRejectsOutOfRangeBaseStrengthBeforeThePool`),
+  which drives `Remember` with a nil pool so a refusal cannot have touched the
+  database. So an out-of-range value is a 400 here too, and this tool's own
   description publishes that range as well — `aihub#433` changed all three strength
   surfaces in one commit, and `internal/mcp/tools_memory_test.go`
   (`TestPublishedBaseStrengthRangeIsTheEnforcedOne`) iterates `pf_remember` and
@@ -110,11 +133,25 @@ Destination: `PATCH /v1/memories/<id>/update` via `pkg/client/client.go`
   `internal/domain/memory.go` (`ValidateIntegralStrength`) after its range check, so
   `2.5` is a 400 on this tool without a line of this tool's own code changing —
   which is the point of the guard sitting in `Remember` rather than in either
-  handler. The description was updated for the reason the range one was: a caller
+  handler, and both halves are checked:
+  `internal/domain/memory_base_strength_range_test.go`
+  (`TestUpdateMemoryInheritsTheStrengthGuardRatherThanRestatingIt`) requires this
+  path to reach `Remember` and to carry NO strength check of its own, while
+  `internal/domain/memory_latest_test.go` (`TestUpdateMemory`) drives `2.5` down
+  this path against a real database and requires a 400 naming the value, with a
+  whole in-range value accepted as the control — 🔴 DB-gated rather than free
+  because the nil-pool technique the range arms use cannot reach this claim:
+  `UpdateMemory` reads the lineage head before it builds anything, so a nil pool
+  panics on the read rather than answering. The description was updated for the reason the range one was: a caller
   told about a refusal by only one of two tools that share a guard meets the other's
   400 with no warning, and the gate above iterates both.
 - `tags` is a **replacement**, like every other field here: the value sent becomes
-  the list.
+  the list, which `internal/domain/memory_latest_test.go` (`TestUpdateMemory`)
+  drives by updating a memory tagged `keep` with `fresh` and requiring the stored
+  list to be exactly `fresh` — ⚠️ which every other arm in that function misses,
+  because they only ever OMIT `tags` and observe it inherited, so a handler that
+  MERGED the sent list into the stored one (the intuitive reading of "new tags",
+  and what a caller adding one tag would expect) was green until this slice.
 
 ## hop 5 — what comes back
 
@@ -149,3 +186,4 @@ real callers have been handed.
 - Whether `base_strength` should be publishable on an update at all, given that
   activation and reinforcement also move strength, is not settled anywhere this card
   can cite.
+  <!-- prose-only: because=external-state -->

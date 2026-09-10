@@ -70,8 +70,7 @@ user = pf_create_user(
   display_name=<required>,
   user_type=<"human"|"machine", default: "human">,
   role=<"writer"|"admin", default: "writer">,
-  email=<optional>,
-  author_aliases=<optional, array of strings>
+  email=<optional>
 )
 
 # Step 2: issue the initial API key for the new user
@@ -92,7 +91,6 @@ key = pf_create_api_key(
 | email | yes (human) / auto (machine) | — | required for human users; auto-generated for machine users |
 | key_name | no | "initial" | initial key name |
 | project_scope | no | — | restrict the key to a single project it can access (single string; leave empty = global) |
-| author_aliases | no | — | git commit author aliases, used for attribution |
 
 **Token is shown only once**: the plaintext `token` returned by `pf_create_api_key` is displayed only in this response — ask the user to save it immediately.
 

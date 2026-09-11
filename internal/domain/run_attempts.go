@@ -424,29 +424,45 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		`SELECT id, claim_epoch FROM run_attempts WHERE work_item_id=$1 AND idempotency_key=$2`,
 		wi.ID, req.IdempotencyKey,
 	).Scan(&existingAttemptID, &existingEpoch)
+	// aihub#522: ErrNoRows means "no idempotent hit — take the fresh path", and
+	// it is the ONLY error that means that. Every other error used to take the
+	// fresh path too, inside a transaction the failed statement had already
+	// aborted, so the claim died at a later statement as an unclassifiable 500
+	// with the SQLSTATE gone (the aihub#334 shape). The UNIQUE
+	// (work_item_id, idempotency_key) index kept this from double-claiming; it
+	// could not keep the error honest.
+	if idemErr != nil && !errors.Is(idemErr, pgx.ErrNoRows) {
+		return nil, dbErrCause(idemErr, "failed to check claim idempotency")
+	}
 	if idemErr == nil {
 		// Re-query the locks held by the existing attempt.
 		existingLocks := []ResourceLock{}
 		lockRows, lockQErr := tx.Query(ctx,
 			`SELECT resource_type, resource_key, owner_attempt_id, claim_epoch
 			 FROM resource_locks WHERE owner_attempt_id=$1`, existingAttemptID)
-		if lockQErr == nil {
-			for lockRows.Next() {
-				var l ResourceLock
-				if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
-					existingLocks = append(existingLocks, l)
-				}
+		if lockQErr != nil {
+			// aihub#522: the send-time twin of the rows.Err() branch below. A
+			// swallowed failure here answered the idempotent re-claim with an
+			// empty AcquiredLocks slice — the exact phantom the G3 re-query
+			// above exists to remove — inside a transaction the failure had
+			// already doomed.
+			return nil, dbErrCause(lockQErr, "failed to load locks for idempotent claim")
+		}
+		for lockRows.Next() {
+			var l ResourceLock
+			if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
+				existingLocks = append(existingLocks, l)
 			}
-			lockRows.Close()
-			// aihub#334: this is the same shape as unblockDependentWI's sweep —
-			// a lazily-streamed result set whose error has no other exit. This
-			// transaction is SERIALIZABLE, so 40001 here is reachable, and
-			// without this the loop just looks empty and the caller is told 500
-			// at commit with no SQLSTATE left.
-			if err := lockRows.Err(); err != nil {
-				if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
-					return nil, aerr
-				}
+		}
+		lockRows.Close()
+		// aihub#334: this is the same shape as unblockDependentWI's sweep —
+		// a lazily-streamed result set whose error has no other exit. This
+		// transaction is SERIALIZABLE, so 40001 here is reachable, and
+		// without this the loop just looks empty and the caller is told 500
+		// at commit with no SQLSTATE left.
+		if err := lockRows.Err(); err != nil {
+			if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
+				return nil, aerr
 			}
 		}
 
@@ -457,6 +473,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		stepErr := tx.QueryRow(ctx, `
 			SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
 		).Scan(&idemStepStatus, &idemStepStartedAt)
+		// aihub#492 / aihub#522: the idempotent-path twin of the priorStepErr
+		// read on the fresh path below. The hint stays best-effort — ErrNoRows
+		// and any ordinary failure both mean "no hint" and the claim goes on —
+		// but a class-40 rollback has already killed this transaction, so
+		// reading past it only trades the retryable 409 for an unclassifiable
+		// 500 at tx.Commit.
+		if aerr := retryConflictErr(stepErr, "failed to read step state for idempotent claim"); aerr != nil {
+			return nil, aerr
+		}
 		if stepErr == nil && idemStepStatus == "in_progress" {
 			if idemStepStartedAt != nil && time.Since(*idemStepStartedAt) < 15*time.Second {
 				idemHint = "active_in_progress_conflict"
@@ -513,6 +538,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			`SELECT actor_user_id, claim_epoch, actor_display, last_active_at FROM run_attempts WHERE id=$1`,
 			*wi.CurrentAttemptID,
 		).Scan(&currentActorUserID, &currentEpoch, &currentActorDisplay, &currentLastActive)
+		// aihub#522: this read GATES the takeover-versus-409 decision, and every
+		// error used to skip the whole block — a foreign holder's claim check
+		// silently not run, inside a transaction the failed statement had
+		// already aborted. ErrNoRows alone keeps the skip: current_attempt_id
+		// is denormalized with no FK (migration 0002), so a dangling pointer
+		// must claim like "not running" rather than brick the work item.
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, dbErrCause(err, "failed to load the current attempt for claim")
+		}
 		if err == nil {
 			if currentActorUserID == callerUserID {
 				// Same user → implicit force_takeover

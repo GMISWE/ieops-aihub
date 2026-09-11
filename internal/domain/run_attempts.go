@@ -1882,7 +1882,21 @@ func VerifyAttemptCredentialPool(ctx context.Context, pool *pgxpool.Pool, wiID, 
 	if aihubErr = verifyAttemptCredential(ctx, tx, *wi, attemptID, claimEpoch, sessionSecret); aihubErr != nil {
 		return aihubErr
 	}
-	tx.Commit(ctx) //nolint:errcheck
+	// aihub#523: the commit stays best-effort — the only write this transaction
+	// carries is the last_active_at heartbeat, and losing that costs one
+	// stall-detection tick — except for the one class that is not a lost write
+	// but a lost race. This is a bare pool.Begin, so its isolation level is
+	// whatever the database, the role or the DSN dials in (aihub#546), and under
+	// SERIALIZABLE the commit is exactly where SSI reports that the snapshot the
+	// verification just answered from did not serialize. The old discarded
+	// `tx.Commit(ctx) //nolint:errcheck` reported success from that doomed read
+	// and threw the heartbeat away with it; the retryable 409 is the same answer
+	// every other commit on this path already gives (aihub#334).
+	if commitErr := tx.Commit(ctx); commitErr != nil {
+		if aerr := retryConflictErr(commitErr, "failed to commit credential verification"); aerr != nil {
+			return aerr
+		}
+	}
 	return nil
 }
 

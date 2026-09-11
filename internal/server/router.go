@@ -1274,12 +1274,40 @@ func handleUpdateUser(pool *pgxpool.Pool) echo.HandlerFunc {
 		// the parameter was withdrawn (see handleCreateUser), so a body
 		// carrying it behaves exactly as though it carried nothing, the same
 		// silent-drop verdict every other unbound field gets from c.Bind.
+		//
+		// aihub#530 (2026-09-11): user_type is bound ONLY to be refused. It
+		// used to be unbound, so a PATCH carrying it was silently dropped:
+		// alongside any bound field the caller got {"ok":true} for a write
+		// that never happened. Refusal rather than binding, for two reasons:
+		//   - the create-time email invariant hangs off it. handleCreateUser
+		//     generates a machine user's mailbox and requires a human's, and
+		//     this handler binds no email, so a flipped user_type would strand
+		//     the row on the wrong side of that pairing with nothing in the
+		//     same call able to repair it;
+		//   - pf_update_user deliberately does not publish the field (M40 in
+		//     user_admin_write_shape_test.go: publishing it reds K3), so
+		//     binding it here would be the aihub#419 BOUND_FIELD_UNPUBLISHED
+		//     shape — writable only by a caller who guesses a name no schema
+		//     mentions.
+		// JSON null still binds as nil and so counts as absent, the same
+		// verdict the other two *string fields give it.
 		var req struct {
 			DisplayName *string `json:"display_name"`
 			Role        *string `json:"role"`
+			UserType    *string `json:"user_type"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
+		}
+
+		// Placed before the SET-list build so the verdict is whole-request: a
+		// rename riding beside a user_type must not half-succeed, because the
+		// half the caller most likely cared about is the half that would be
+		// dropped.
+		if req.UserType != nil {
+			return writeError(c, domain.NewErrDetails(domain.ErrBadRequest,
+				"user_type cannot be updated: it is fixed when the user is created (POST /v1/admin/users)",
+				map[string]any{"field": "user_type", "got": *req.UserType}))
 		}
 
 		sets := []string{}

@@ -515,13 +515,87 @@ func TestRoutedSkillHook_PayloadFitsHarnessLimit(t *testing.T) {
 		}
 	}
 
-	// A budget entry for a skill that is no longer routed is dead weight that makes the map
-	// look like it covers more than it does.
+	// The reverse direction: a budget entry with no routed skill x branch behind it. Two very
+	// different states produce that observation, and they need OPPOSITE remedies, so the
+	// message must not collapse them (aihub#537). The pre-fix message said "delete it" for
+	// every orphan — but when the orphan exists because a skill was REMOVED from TARGETS,
+	// that instruction completes the de-routing: the budget rows are the ledger witnessing
+	// that the skill used to be routed, and for a skill not on routerFloor they are the ONLY
+	// witness (the floor deliberately does not track additions, so a post-floor skill that
+	// gets de-routed reds nowhere else). The aihub#513 reproduction had to delete exactly
+	// those two rows to reach a fully green tree, with this gate's own message telling it to.
+	routedSet := make(map[string]bool, len(skills))
+	for _, s := range skills {
+		routedSet[s] = true
+	}
+	branchSet := make(map[string]bool, len(routerBranches))
+	for _, br := range routerBranches {
+		branchSet[br.name] = true
+	}
 	for key := range routerBudget {
-		if !seen[key] {
-			t.Errorf("routerBudget has an entry for %q, which no longer corresponds to a "+
-				"routed skill x branch — delete it rather than leaving the map overstating "+
-				"its coverage", key)
+		if seen[key] {
+			continue
+		}
+		if skill, deRouted := orphanBudgetKeyLooksDeRouted(key, routedSet, branchSet); deRouted {
+			// A well-formed key over a real branch whose skill is not in TARGETS. The
+			// dangerous reading is de-routing, so the message leads with it and does NOT
+			// offer "delete this row" as the mechanical fix — deleting the last witness is
+			// how a silent de-route becomes green, not how it becomes reviewed.
+			t.Errorf("routerBudget[%q] carries a measured budget but %q is not in the hook's "+
+				"TARGETS — the router is INERT for it. If a TARGETS entry was removed, this "+
+				"row is the record that %q used to be routed: RESTORE the TARGETS entry, do "+
+				"not delete the budget rows to get green. If the de-routing is deliberate, "+
+				"remove the TARGETS entry, these budget rows and any routerFloor entry in one "+
+				"reviewed change that says so. (If instead this row was newly added for a "+
+				"skill that was never routed, add the skill to TARGETS or take the row out.)",
+				key, skill, skill)
+			continue
+		}
+		// Malformed key or unknown branch: this entry never corresponded to any routed
+		// skill x branch, so it is dead weight that makes the map look like it covers more
+		// than it does — here, and only here, deletion is the remedy.
+		t.Errorf("routerBudget has an entry for %q, which does not name a <skill>/<branch> "+
+			"this gate can ever measure (branches: superpowers, native) — fix the key or "+
+			"delete the entry rather than leaving the map overstating its coverage", key)
+	}
+}
+
+// orphanBudgetKeyLooksDeRouted classifies an unseen routerBudget key. A well-formed
+// "<skill>/<branch>" over a branch the gate really measures, whose skill is absent from
+// TARGETS, reads as de-routing (or an entry added ahead of routing — the message covers
+// both); anything else — malformed key, unknown branch — never corresponded to a measurable
+// skill x branch at all. The split exists because the two states need opposite remedies:
+// the first must be resisted, the second deleted. Extracted so the classification itself
+// can be pinned by TestOrphanBudgetKeyClassifierDiscriminates rather than trusted.
+func orphanBudgetKeyLooksDeRouted(key string, routedSet, branchSet map[string]bool) (string, bool) {
+	skill, branch, ok := strings.Cut(key, "/")
+	return skill, ok && branchSet[branch] && !routedSet[skill]
+}
+
+// TestOrphanBudgetKeyClassifierDiscriminates is the control for the orphan split above.
+// Both branches of the split call t.Errorf, so a wrong classification is invisible in the
+// red/green signal — it only swaps the remedy the message prescribes, and prescribing
+// deletion to a de-routed skill is exactly the aihub#537 defect. So the classification is
+// pinned here, on both sides.
+func TestOrphanBudgetKeyClassifierDiscriminates(t *testing.T) {
+	routed := map[string]bool{"pf-execute": true}
+	branches := map[string]bool{"native": true, "superpowers": true}
+	cases := []struct {
+		key      string
+		deRouted bool
+		why      string
+	}{
+		{"pf-spec/native", true, "valid branch, skill gone from TARGETS — the #513 shape"},
+		{"pf-spec/superpowers", true, "same, other branch"},
+		{"pf-execute/native", false, "skill still routed — not an orphan the split should resist"},
+		{"pf-execute/bogus", false, "unknown branch — a key this gate can never measure"},
+		{"pf-spec", false, "no branch separator — malformed"},
+		{"", false, "empty key — malformed"},
+	}
+	for _, tc := range cases {
+		if _, got := orphanBudgetKeyLooksDeRouted(tc.key, routed, branches); got != tc.deRouted {
+			t.Errorf("classifier(%q) = %v, want %v (%s) — the orphan loop would prescribe "+
+				"the wrong remedy for this key", tc.key, got, tc.deRouted, tc.why)
 		}
 	}
 }

@@ -245,6 +245,15 @@ type WorkflowScan struct {
 	Unasserted []string
 	// AssertionProblems holds `--- PASS:` lines that could not be read at all.
 	AssertionProblems []string
+	// ShellSuites, ShellWants and ShellFloors are the shell-suite side of the
+	// same audit (aihub#535): the `bash <suite>.test.sh | tee <log>` steps and
+	// the `PASS: <check>` want-lists and count floors they assert over those
+	// logs — a marker spelling the `--- PASS:` checks above cannot see.
+	ShellSuites []ShellSuiteInvocation
+	ShellWants  []ShellWant
+	ShellFloors []ShellFloor
+	// ShellProblems holds shell-suite assertions that could not be read.
+	ShellProblems []string
 }
 
 func main() {
@@ -364,6 +373,13 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 		return err
 	}
 
+	// aihub#535: the shell suites' `PASS:` want-lists and count floors, which
+	// use a marker the `--- PASS:` check above cannot see.
+	shellProblems, shellReport, err := checkShellSuites(scan, sourceRoot)
+	if err != nil {
+		return err
+	}
+
 	report(out, "dbtestcov: %s-gated test functions: %d (require only a DB: %d, need extra env: %d)\n",
 		dbEnvVar, len(gated), len(required), len(extraEnv))
 	report(out, "dbtestcov: %s go test invocations found in %s: %d\n", dbEnvVar, workflowPath, len(scan.Invocations))
@@ -374,6 +390,11 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 	report(out, "dbtestcov: covered by a CI step: %d/%d\n", len(required)-len(missing), len(required))
 	report(out, "dbtestcov: %q assertions checked against the source: %d\n",
 		strings.TrimSpace(passMarker), len(scan.Assertions))
+	report(out, "dbtestcov: shell-suite %q assertions checked against the suites: %d (over %d suite invocations, %d count floors)\n",
+		strings.TrimSpace(shellCheckMarker), len(scan.ShellWants), len(scan.ShellSuites), len(scan.ShellFloors))
+	for _, line := range shellReport {
+		report(out, "%s", line)
+	}
 
 	var problems []string
 	problems = append(problems, manifestProblems...)
@@ -443,6 +464,24 @@ func run(inventoryPath, workflowPath, gomodPath, sourceRoot, manifestPath string
 		fmt.Fprintf(&b, "%d line(s) assert on %q in a form dbtestcov cannot read, so the names they name are unchecked:",
 			len(scan.AssertionProblems), strings.TrimSpace(passMarker))
 		for _, s := range scan.AssertionProblems {
+			fmt.Fprintf(&b, "\n    %s", s)
+		}
+		problems = append(problems, b.String())
+	}
+	if len(shellProblems) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d shell-suite assertion(s) in %s name a check the suite cannot print (or keep a floor it cannot reach), "+
+			"so the step is red on the runner while everything is green here:", len(shellProblems), workflowPath)
+		for _, s := range shellProblems {
+			fmt.Fprintf(&b, "\n    %s", s)
+		}
+		problems = append(problems, b.String())
+	}
+	if len(scan.ShellProblems) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d line(s) assert on a shell-suite log in a form dbtestcov cannot read, so the checks they name are unchecked:",
+			len(scan.ShellProblems))
+		for _, s := range scan.ShellProblems {
 			fmt.Fprintf(&b, "\n    %s", s)
 		}
 		problems = append(problems, b.String())
@@ -2021,6 +2060,11 @@ func ParseWorkflow(data []byte, module string) (*WorkflowScan, error) {
 			assertions, assertProblems := collectPassAssertions(sc, stepName)
 			scan.Assertions = append(scan.Assertions, assertions...)
 			scan.AssertionProblems = append(scan.AssertionProblems, assertProblems...)
+
+			// The shell suites' `PASS:` assertions are the same rot surface
+			// under a different marker (aihub#535); they need no database
+			// either, so they are collected before the DB filter too.
+			collectShellSuiteData(sc, stepName, scan)
 
 			hasDB := hasKey(st.Env, dbEnvVar) || hasKey(job.Env, dbEnvVar) || hasKey(wf.Env, dbEnvVar) ||
 				anyLineMatches(lines, inlineDBEnv)

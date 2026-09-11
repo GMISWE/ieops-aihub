@@ -1661,6 +1661,29 @@ jobs:
       # which makes these reachable by CONFIGURATION of today's binary, the same
       # argument this step already accepted for the UpdateProject arm.
       #
+      # aihub#545 added three more, the sites the aihub#492/#497 sweep missed
+      # because it searched by spelling rather than by property — all three in
+      # run_attempts.go, all three discarding the error instead of wrapping it:
+      #
+      #   - the heartbeat arm loses at verifyAttemptCredential's
+      #     `UPDATE run_attempts SET last_active_at=...`, whose error was
+      #     `//nolint:errcheck` discarded inside four SERIALIZABLE
+      #     transactions, and before the fix reported `500 failed to update
+      #     run_attempt status` — the 25P02 second victim;
+      #   - the step-state-read arm loses at FnCompleteAttempt's own
+      #     wi_step_state read, the sibling of the two reads aihub#492/#497
+      #     already classified. A plain SELECT cannot lose a lock wait, so this
+      #     arm dooms it deterministically via SSI's read-time
+      #     dangerous-structure check (ssiDoomStepStateRead in the test file);
+      #   - the force-terminate arm calls fnForceTerminateStep directly on a
+      #     transaction doomed the same way: its opening current-step read
+      #     swallowed the 40001 into "no step to terminate" (nil), which is
+      #     what kept aihub#497's ErrConflictSerializationFailure guard arm at
+      #     the FnForceTakeover call site structurally unreachable. No external
+      #     interleaving can park a caller between the caller's step-state read
+      #     and this one — they are adjacent statements — so the arm asserts
+      #     the function-level contract both call sites consume.
+      #
       # The last name in the list is the control, not another instance: at READ
       # COMMITTED the same interleaving must still SUCCEED. Without it, "turn
       # every contended write into a 409" would satisfy every assertion above
@@ -1677,6 +1700,9 @@ jobs:
                       'TestSerializationFailureSurfacesAsRetryable409/memory_supersede_loser_gets_a_retryable_409,_not_a_500' \
                       'TestSerializationFailureSurfacesAsRetryable409/force_takeover_lock_upsert_gets_a_retryable_409,_not_a_500' \
                       'TestSerializationFailureSurfacesAsRetryable409/force_takeover_lock_release_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/complete_attempt_heartbeat_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/complete_attempt_step-state_read_gets_a_retryable_409,_not_a_500' \
+                      'TestSerializationFailureSurfacesAsRetryable409/force_terminate_current-step_read_is_classified,_not_swallowed_as_no_step' \
                       'TestSerializationFailureSurfacesAsRetryable409/read_committed_loser_still_succeeds'; do
             grep -q -- "--- PASS: $want" serialization_failure.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); an aihub#334 instance is unguarded"; exit 1; }

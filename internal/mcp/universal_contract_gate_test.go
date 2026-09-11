@@ -1851,6 +1851,18 @@ var serverNamesNoToolCanReach = map[string]string{
 		"reachable under the name pf_recall does publish, so this is compatibility surface " +
 		"rather than an unreachable knob.",
 
+	"handleUpdateUser.user_type": "bound ONLY to be refused (aihub#530): the field is " +
+		"identity, not profile — the create-time email invariant hangs off it and this " +
+		"handler binds no email — so handleUpdateUser answers a body carrying it with a 400 " +
+		"naming the field in details, where the unbound name used to be silently dropped by " +
+		"c.Bind. There is deliberately no capability behind the binding to publish: the " +
+		"refusal exists FOR the HTTP caller (nothing else sends the name — pf_update_user " +
+		"has never published it), and publishing a parameter whose only effect is its own " +
+		"rejection would advertise a switch that selects nothing, aihub#394's signature. " +
+		"The refusal and its no-write half are held by " +
+		"internal/server/update_user_user_type_test.go and the user_type_is_not_a_write leg " +
+		"of user_admin_write_shape_test.go.",
+
 	// ─── The two halves of the pause route's shared request struct (aihub#424) ──
 	//
 	// handlePauseAttempt binds domain.CompleteAttemptRequest, which /complete also

@@ -175,7 +175,13 @@ instead, matching what `items` and `running` already did —
 `internal/domain/ready_queue_segment_contract_test.go`
 (`TestEveryReadyQueueSegmentQueryErrorIsA500NamingThatSegment`) holds the code and the
 message segment by segment, distinctly, and reads the 500 off the error mapping rather
-than spelling it out.
+than spelling it out. The one exception is a class-40 rollback (`aihub#548`): every
+send-time guard consults `dbErr`, so SQLSTATE `40001`/`40P01` answers the retryable
+`409 CONFLICT_SERIALIZATION_FAILURE` instead of a 500 — the same classification the
+`rows.Err()` half of each segment already carried — and the classifier rule of
+`internal/domain/ready_queue_query_errors_test.go`
+(`TestReadyQueueAnswersEveryQueryError`) holds it for all seven guards; for every
+other error `dbErr`'s answer is byte-identical to the bare `NewErr` it replaced.
 
 That is an error-contract change, from silently-partial to failing, and it is the
 right direction here because each of those five already returned `dbErrCause` from

@@ -101,23 +101,28 @@ half held against a database by `internal/domain/memory_latest_test.go`
 
 ## hop 5 — what comes back
 
-`jsonResultCompact` marshals with no indentation, because this payload is read by
-the model and is reached precisely when the content is long, and both it and
-`jsonResult` are held indentation-free by
-`internal/mcp/get_memory_card_claims_test.go`
+`jsonResult` marshals with no indentation, because this payload is read by the
+model and is reached precisely when the content is long, and it is held
+indentation-free by `internal/mcp/get_memory_card_claims_test.go`
 (`TestGetMemoryAndItsIndentingSiblingAreBothCompact`), which drives this tool
-together with a `jsonResult` sibling and refuses a newline in either. Same
-rationale as `pf_recall`'s.
+together with a sibling on the same helper and refuses a newline in either.
+Same rationale as `pf_recall`'s.
 
-⚠️ **This line used to claim the two helpers differed, and they do not.**
-`34df071` changed `marshalJSON` from `json.MarshalIndent` to `json.Marshal` for
-every tool in the server, so `jsonResult` became compact too — the two are
-byte-identical today, pinned by `internal/mcp/json_result_identity_test.go`
-(`TestJSONResultAndCompactAreByteIdentical`), and `jsonResultCompact`'s own doc
-comment still measures itself against a `MarshalIndent` path that is gone. The behaviour was never the
-problem; the sentence was, because it told a reader this tool differed from its
-siblings in a way it does not and pointed the next token-saving change at a
-conversion that has already landed everywhere.
+⚠️ **This line used to claim this tool answered through a second helper,
+and the server no longer has one.** The history in two steps: `34df071` changed
+`marshalJSON` from `json.MarshalIndent` to `json.Marshal` for every tool in the
+server, which made `jsonResult` and the then-separate `jsonResultCompact`
+byte-identical — a difference this card asserted until aihub#592 measured it
+false — and aihub#598 then folded the redundant helper away entirely. There is
+now exactly ONE JSON result serializer, held as a census by
+`internal/mcp/json_result_identity_test.go`
+(`TestJSONResultIsTheOnlyJSONResultSerializer`): any second function that both
+marshals JSON and builds a tool result is red, whatever its name and even if
+its output is byte-identical, because a second marshal point is two sites of
+truth about one output shape. The behaviour was never the problem; the sentence
+was, because it told a reader this tool differed from its siblings in a way it
+does not and pointed the next token-saving change at a conversion that has
+already landed everywhere.
 
 No field projection: unlike recall, nothing is dropped here, which is the point of
 the tool.

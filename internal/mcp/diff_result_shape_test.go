@@ -444,7 +444,10 @@ func TestDiffAnswersRawTextAndIsTheOnlyToolThatDoes(t *testing.T) {
 	}
 
 	handlers, helpers := toolResultLiterals(t)
-	const floorResultLiterals = 3
+	// 2 = jsonResult + errResult: aihub#598 folded jsonResultCompact (the third
+	// entry this floor used to count) into jsonResult after aihub#592 measured
+	// them byte-identical since 34df071.
+	const floorResultLiterals = 2
 	if helpers < floorResultLiterals {
 		t.Errorf("the census found only %d marshalling-helper CallToolResult literal(s), floor is %d "+
 			"— a walk that finds too few has stopped seeing this package and the handler count below "+
@@ -474,7 +477,7 @@ func toolResultLiterals(t *testing.T) (handlers []string, helpers int) {
 	// handler. Named rather than pattern-matched so a fourth helper is a signed
 	// change to this list.
 	resultHelpers := map[string]bool{
-		"jsonResult": true, "errResult": true, "jsonResultCompact": true,
+		"jsonResult": true, "errResult": true,
 	}
 
 	entries, err := os.ReadDir(".")

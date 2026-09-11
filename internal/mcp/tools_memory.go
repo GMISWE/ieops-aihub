@@ -86,7 +86,7 @@ func (s *Server) registerMemoryTools() {
 		// This is the OPPOSITE error from aihub#287's 4_wrong_landing_point ("only
 		// building the 4th hop"): there domain was complete and the MCP hop missing;
 		// here the MCP hop is the only one that can implement the feature at all.
-		return jsonResultCompact(slimRecallResultMode(result, strArg(args, "fields") == "brief"))
+		return jsonResult(slimRecallResultMode(result, strArg(args, "fields") == "brief"))
 	})
 
 	// pf_get_memory — aihub#269. pf_recall truncates content to 800 runes and
@@ -112,7 +112,9 @@ func (s *Server) registerMemoryTools() {
 		}
 		// compact, not indented: this payload is read by the model, and it is
 		// reached precisely when the content is long (same rationale as pf_recall).
-		return jsonResultCompact(result)
+		// jsonResult is the server's ONE JSON result serializer — aihub#598 folded
+		// the byte-identical jsonResultCompact into it.
+		return jsonResult(result)
 	})
 
 	// pf_activate_memory

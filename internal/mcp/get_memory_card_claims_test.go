@@ -274,19 +274,24 @@ func TestGetMemoryMakesNoActivationRequestWhileActivateDoes(t *testing.T) {
 // sentence.
 //
 // It asserts the property worth keeping — no indentation in what reaches the
-// model — on both helpers at once, and refuses the stale contrast in the card's
-// prose. Two helpers rather than one because the claim after the correction is
-// that they AGREE: an arm on jsonResultCompact alone goes green the day
-// marshalJSON returns to MarshalIndent, which is the change that would make the
-// deleted sentence true again by making every other tool worse.
+// model — and refuses the stale contrast in the card's prose. It was written
+// against two helpers (jsonResultCompact drove this tool, jsonResult the
+// sibling) because the post-correction claim was that they AGREE; aihub#598
+// then folded jsonResultCompact into jsonResult, so both tools now answer
+// through the same helper and this arm holds the shared marshal point from two
+// tool surfaces at once. TestJSONResultIsTheOnlyJSONResultSerializer
+// (json_result_identity_test.go) holds that the fold stays folded.
 //
-// Mutants, all applied to the tree and run (2026-09-10):
+// Mutants, applied to the tree and run (2026-09-10, two-helper era; M2/M3
+// re-verified post-fold at aihub#598):
 //
 //	M1  jsonResultCompact marshals with MarshalIndent                  RED (this tool)
-//	M2  marshalJSON returns to MarshalIndent                           RED (the sibling)
+//	    (subject folded away by aihub#598 — kept as the record of what
+//	    the two-helper era measured)
+//	M2  marshalJSON returns to MarshalIndent                           RED (both tools now)
 //	M3  the card's stale "compact rather than indented" returns        RED (publication)
-//	M4  green control: reword the corrected sentence, keeping both
-//	    helper names and the claim                                     GREEN
+//	M4  green control: reword the corrected sentence, keeping the
+//	    claim                                                          GREEN
 func TestGetMemoryAndItsIndentingSiblingAreBothCompact(t *testing.T) {
 	card := getMemoryCard(t)
 	if strings.Contains(card, "compact rather than indented") {

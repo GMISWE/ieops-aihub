@@ -327,7 +327,7 @@ func TestSlimRecallResult_ForwardsAnExplicitNullUnmatchedTypes(t *testing.T) {
 // it, and the MCP surface forwards it. Hops 1-3 are gated elsewhere (memory_unmatched_test
 // and routes_memory_types_test). Hop 4 was NOT: slimRecallResult was tested, but nothing
 // asserted the slimmed map actually reaches a CallToolResult intact — and that is the
-// hop where the model finally reads it. Both the slimmer and jsonResultCompact are
+// hop where the model finally reads it. Both the slimmer and jsonResult are
 // exercised here in the order pf_recall calls them, so a marshalling change that dropped
 // or renamed the field cannot pass.
 func TestRecallResult_SurvivesIntoCallToolResult(t *testing.T) {
@@ -363,9 +363,9 @@ func TestRecallResult_SurvivesIntoCallToolResult(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := jsonResultCompact(slimRecallResult(tc.in))
+			res, err := jsonResult(slimRecallResult(tc.in))
 			if err != nil {
-				t.Fatalf("jsonResultCompact: %v", err)
+				t.Fatalf("jsonResult: %v", err)
 			}
 			if len(res.Content) != 1 {
 				t.Fatalf("expected exactly one content block, got %d", len(res.Content))

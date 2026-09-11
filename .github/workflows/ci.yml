@@ -159,6 +159,12 @@ jobs:
       # holes (it does not execute the step, and a subtest whose name is
       # computed at run time is reported as unverifiable rather than proven).
       #
+      # aihub#535 gave the shell suites the same treatment: the steps at the
+      # bottom of this job assert `PASS: <check>` want-lists and PASS-count
+      # floors over plugins/polyforge/tests/*.test.sh output — a marker the
+      # `--- PASS:` audit cannot see — and shellsuite.go (same package) checks
+      # every want and floor against the suite file it greps the output of.
+      #
       # `env -u` rather than merely omitting an env: block, so that adding a
       # job-level AIHUB_TEST_DB later cannot silently turn this into a green
       # no-op (with the variable set, nothing SKIPs, the inventory is empty and
@@ -4706,6 +4712,14 @@ jobs:
       # opposite mutation (route everything) is named too. The PASS-count floor
       # alone would not be enough: deleting a check and the routing it covers in
       # one change keeps the exit code green and only moves the count.
+      #
+      # UPDATE (aihub#535): the floor below and this want-list are no longer bare
+      # text nothing re-verifies — the aihub#320 failure shape, one file over.
+      # dbtestcov's shell-suite audit (internal/citest/dbtestcov/shellsuite.go)
+      # enumerates the suite's check names and emission sites, so a renamed shell
+      # check or a floor above what the suite can still print is red in
+      # `go test ./internal/citest/...` and in the aihub#303 gate step, instead
+      # of red only here on the runner.
       - name: aihub#513 skill-router gate
         run: |
           set -o pipefail

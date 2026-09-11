@@ -29,7 +29,9 @@ package domain
 //	   <- both uncommitted. This is a claim in flight: FnClaimWorkItem creates
 //	      the attempt row and takes its locks in ONE transaction, so between its
 //	      first insert and its commit this is exactly what the database holds.
-//	B: FnForceTakeover(wi B) opens pool.Begin (READ COMMITTED), probes for
+//	B: FnForceTakeover(wi B) opens pool.Begin (no isolation pinned — read
+//	   committed at the suite database's default; txn_isolation_probe_test.go
+//	   pins the split), probes for
 //	   foreign holders and sees none (A is uncommitted), supersedes B's prior
 //	   attempt, creates B's new one, reaches the upsert and BLOCKS on A's
 //	   uncommitted duplicate key

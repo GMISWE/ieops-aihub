@@ -19,8 +19,12 @@ runtime:
   and appear as `polyforge-pf_*` to hooks.
 
 - **pi coding agent**: installs with `plugins/polyforge/pi/install.sh [<project>]`. There is
-  no `Skill` tool and no plugin manifest — pi discovers skills from `<project>/.agents/skills/`
-  (the polyforge skills work there verbatim, no edits) and MCP tools through
+  no `Skill` tool and no plugin manifest — pi discovers skills by directory, and the installer
+  writes them to two. `~/.pi/agent/skills/` is user scope and is always read; it is the copy
+  that makes the skills available. `<project>/.agents/skills/` is read **only once the project
+  is trusted** — pi puts every ancestor `.agents/skills` behind its `/trust` gate, which is
+  default-off, so that copy on its own leaves all of them silently unavailable (aihub#606).
+  The polyforge skills work verbatim in either, no edits. MCP tools come through
   `pi-mcp-adapter`, which registers them individually as `polyforge_pf_*`. That is a FOURTH
   tool-name spelling: an underscore separator and no `__` at all, so any prefix handling
   written for the other three misses it. Hooks are bridged by a pi extension

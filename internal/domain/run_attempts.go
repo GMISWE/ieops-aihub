@@ -333,11 +333,16 @@ func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, proj
 		// reported the identical input as `info`, so the pre-claim gate
 		// had no predictive value at all.
 		lockType, lockKey, probe := derivedLockProbe(d, project)
-		// aihub#238: an empty key is possible from bad stored data (a
-		// `service`/`path` entry with no uri). Never insert it — the row is
-		// meaningless as a lock and would collide with every other empty-key
-		// row of the same type. Skipping keeps the wi claimable; the entry is
-		// reported via unrecognizedResources below rather than dropped silently.
+		// aihub#238: never insert a lock with an empty type or an empty key —
+		// the row would be meaningless as a lock and would collide with every
+		// other empty-key row of the same type. Skipping keeps the wi
+		// claimable; the entry is reported via unrecognizedResources below
+		// rather than dropped silently. On today's tree only the lockType
+		// clause can fire: unmappable entries, advisory repo/service
+		// (aihub#416) and a file uri naming nothing (aihub#524) all derive
+		// ("",""), and a derived file_scope key is non-empty by construction.
+		// The lockKey clause is belt-and-braces for the next lock type — see
+		// the ⚠️ on TestDerivationSkipsEmptyLockKey.
 		if lockType == "" || lockKey == "" {
 			continue
 		}
@@ -419,29 +424,45 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		`SELECT id, claim_epoch FROM run_attempts WHERE work_item_id=$1 AND idempotency_key=$2`,
 		wi.ID, req.IdempotencyKey,
 	).Scan(&existingAttemptID, &existingEpoch)
+	// aihub#522: ErrNoRows means "no idempotent hit — take the fresh path", and
+	// it is the ONLY error that means that. Every other error used to take the
+	// fresh path too, inside a transaction the failed statement had already
+	// aborted, so the claim died at a later statement as an unclassifiable 500
+	// with the SQLSTATE gone (the aihub#334 shape). The UNIQUE
+	// (work_item_id, idempotency_key) index kept this from double-claiming; it
+	// could not keep the error honest.
+	if idemErr != nil && !errors.Is(idemErr, pgx.ErrNoRows) {
+		return nil, dbErrCause(idemErr, "failed to check claim idempotency")
+	}
 	if idemErr == nil {
 		// Re-query the locks held by the existing attempt.
 		existingLocks := []ResourceLock{}
 		lockRows, lockQErr := tx.Query(ctx,
 			`SELECT resource_type, resource_key, owner_attempt_id, claim_epoch
 			 FROM resource_locks WHERE owner_attempt_id=$1`, existingAttemptID)
-		if lockQErr == nil {
-			for lockRows.Next() {
-				var l ResourceLock
-				if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
-					existingLocks = append(existingLocks, l)
-				}
+		if lockQErr != nil {
+			// aihub#522: the send-time twin of the rows.Err() branch below. A
+			// swallowed failure here answered the idempotent re-claim with an
+			// empty AcquiredLocks slice — the exact phantom the G3 re-query
+			// above exists to remove — inside a transaction the failure had
+			// already doomed.
+			return nil, dbErrCause(lockQErr, "failed to load locks for idempotent claim")
+		}
+		for lockRows.Next() {
+			var l ResourceLock
+			if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
+				existingLocks = append(existingLocks, l)
 			}
-			lockRows.Close()
-			// aihub#334: this is the same shape as unblockDependentWI's sweep —
-			// a lazily-streamed result set whose error has no other exit. This
-			// transaction is SERIALIZABLE, so 40001 here is reachable, and
-			// without this the loop just looks empty and the caller is told 500
-			// at commit with no SQLSTATE left.
-			if err := lockRows.Err(); err != nil {
-				if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
-					return nil, aerr
-				}
+		}
+		lockRows.Close()
+		// aihub#334: this is the same shape as unblockDependentWI's sweep —
+		// a lazily-streamed result set whose error has no other exit. This
+		// transaction is SERIALIZABLE, so 40001 here is reachable, and
+		// without this the loop just looks empty and the caller is told 500
+		// at commit with no SQLSTATE left.
+		if err := lockRows.Err(); err != nil {
+			if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
+				return nil, aerr
 			}
 		}
 
@@ -452,6 +473,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		stepErr := tx.QueryRow(ctx, `
 			SELECT current_step_status, step_started_at FROM wi_step_state WHERE work_item_id=$1`, wi.ID,
 		).Scan(&idemStepStatus, &idemStepStartedAt)
+		// aihub#492 / aihub#522: the idempotent-path twin of the priorStepErr
+		// read on the fresh path below. The hint stays best-effort — ErrNoRows
+		// and any ordinary failure both mean "no hint" and the claim goes on —
+		// but a class-40 rollback has already killed this transaction, so
+		// reading past it only trades the retryable 409 for an unclassifiable
+		// 500 at tx.Commit.
+		if aerr := retryConflictErr(stepErr, "failed to read step state for idempotent claim"); aerr != nil {
+			return nil, aerr
+		}
 		if stepErr == nil && idemStepStatus == "in_progress" {
 			if idemStepStartedAt != nil && time.Since(*idemStepStartedAt) < 15*time.Second {
 				idemHint = "active_in_progress_conflict"
@@ -508,6 +538,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			`SELECT actor_user_id, claim_epoch, actor_display, last_active_at FROM run_attempts WHERE id=$1`,
 			*wi.CurrentAttemptID,
 		).Scan(&currentActorUserID, &currentEpoch, &currentActorDisplay, &currentLastActive)
+		// aihub#522: this read GATES the takeover-versus-409 decision, and every
+		// error used to skip the whole block — a foreign holder's claim check
+		// silently not run, inside a transaction the failed statement had
+		// already aborted. ErrNoRows alone keeps the skip: current_attempt_id
+		// is denormalized with no FK (migration 0002), so a dangling pointer
+		// must claim like "not running" rather than brick the work item.
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, dbErrCause(err, "failed to load the current attempt for claim")
+		}
 		if err == nil {
 			if currentActorUserID == callerUserID {
 				// Same user → implicit force_takeover
@@ -556,12 +595,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// aihub#238: validate the CLIENT-SUPPLIED locks, before the derivation block
 	// below can append server-derived entries to the same slice.
 	//
-	// Ordering is load-bearing. Validating the merged slice instead would apply
-	// input rules to server-derived entries, and derivation can legitimately
-	// produce a well-typed lock with an empty key from bad stored data — e.g. a
-	// stored {"type":"service"} with no uri maps to ("deploy_env", ""). That would
-	// 400 the claim and make an existing work item unclaimable, which is exactly
-	// the outcome this change exists to avoid.
+	// Ordering is load-bearing as a structural rule: input rules must never
+	// apply to server-derived entries. The failure was concrete when this was
+	// written — a stored {"type":"service"} with no uri derived ("deploy_env",""),
+	// whose empty resource_key would 400 the claim and make an existing work
+	// item unclaimable. Since aihub#416 (repo/service derive nothing) and
+	// aihub#524 (a file uri naming nothing derives nothing) every entry the
+	// derivation can still produce passes the input rules, so there is no
+	// constructible counterexample today; the order is kept because the next
+	// derived lock type reintroduces one the moment it flips.
 	if aihubErr := ValidateRequestedLocks(req.RequestedLocks); aihubErr != nil {
 		return nil, aihubErr
 	}

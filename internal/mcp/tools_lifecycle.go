@@ -912,20 +912,22 @@ func (s *Server) registerLifecycleTools() {
 			//	409 CONFLICT_SERIALIZATION_FAILURE (SQLSTATE 40001), row unchanged
 			//
 			// because FnClaimWorkItem opens SERIALIZABLE (run_attempts.go) while
-			// FnForceTakeover opens pool.Begin, i.e. READ COMMITTED. At SERIALIZABLE
+			// FnForceTakeover opens a bare pool.Begin — no isolation pinned, the
+			// pool/DSN default, read committed as deployed
+			// (txn_isolation_probe_test.go pins the split). At SERIALIZABLE
 			// a stale read is REPORTED, so the two ways this statement could move a
 			// foreign row are: the aihub#393 predicate passes, which means the owner
 			// has ended and the displacement is the point, or the read was stale,
 			// which is a 40001 the caller is told to retry. Neither is silent.
 			//
 			// ⚠️ The qualifier therefore stays on pf_force_takeover's own
-			// description, whose path is the READ COMMITTED one, and this site must
-			// NOT copy it back: the guarantee differs because the isolation level
-			// differs, and one sentence cannot be true of both. What that test does
-			// NOT claim is that no interleaving whatsoever can displace a row on
+			// description, whose path is the unpinned pool.Begin one, and this site
+			// must NOT copy it back: the guarantee differs because the transaction
+			// shape differs, and one sentence cannot be true of both. What that test
+			// does NOT claim is that no interleaving whatsoever can displace a row on
 			// this path — it measures the one the qualifier described. The full
-			// analysis of the READ COMMITTED gap is still in
-			// internal/domain/resource_events.go above lockUpsertSQL.
+			// analysis of the commit-window gap the unpinned default leaves open is
+			// still in internal/domain/resource_events.go above lockUpsertSQL.
 			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
 				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
 				"DIFFERENT work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands "+
@@ -1521,9 +1523,11 @@ func (s *Server) registerLifecycleTools() {
 		// aihub#410's commit-window qualifier lives HERE and only here (aihub#430).
 		// It used to be on pf_claim_work_item's force_takeover prop as well, on the
 		// argument that "these are two published statements of one guarantee" —
-		// which was wrong: the two tools reach lockUpsertSQL at different isolation
-		// levels, so it is one statement about two different guarantees. This
-		// handler's path is FnForceTakeover's pool.Begin (READ COMMITTED), where
+		// which was wrong: the two tools reach lockUpsertSQL through different
+		// transaction shapes — one pinned SERIALIZABLE, one unpinned — so it is
+		// one statement about two different guarantees. This
+		// handler's path is FnForceTakeover's bare pool.Begin (no isolation
+		// pinned — the pool/DSN default, read committed as deployed), where
 		// the gap resource_events.go documents is reachable; the claim tool's is
 		// SERIALIZABLE, where aihub#430 measured the same interleaving coming back
 		// as a retryable 409 with the row untouched. Do not re-add it there.

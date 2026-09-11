@@ -5,31 +5,39 @@ import (
 	"testing"
 )
 
-// aihub#591 — the isolation-level pair, pinned.
+// aihub#591 — the isolation-level split, pinned. aihub#546 renamed it to what
+// the source actually says.
 //
-// Two cards state the same two-sided claim: pf_claim_work_item's path opens
-// SERIALIZABLE while pf_force_takeover's opens READ COMMITTED, which is why the
-// same commit-window interleaving comes back 409 CONFLICT_SERIALIZATION_FAILURE
-// with the row unchanged on the claim path (aihub#430) and comes back as a
-// SILENT DISPLACEMENT on the takeover path (aihub#451,
-// force_takeover_commit_window_db_test.go). One sentence cannot be true of both
-// isolation levels — the cards say so in as many words — so the split itself is
-// load-bearing, and until 2026-09-10 nothing pinned it: aihub#543's wave-1
-// checkpoint rated this the cheapest high-value unheld claim in the scoped set
-// (spec §1.4.2), and a test-file comment asserting FnForceTakeover "is
-// SERIALIZABLE" had already been through review while being false.
+// Two cards state the same two-sided claim: pf_claim_work_item's path pins
+// SERIALIZABLE while pf_force_takeover's opens a bare pool.Begin — no isolation
+// pinned at all — which is why the same commit-window interleaving comes back
+// 409 CONFLICT_SERIALIZATION_FAILURE with the row unchanged on the claim path
+// (aihub#430) and comes back as a SILENT DISPLACEMENT on the takeover path
+// (aihub#451, force_takeover_commit_window_db_test.go). One sentence cannot be
+// true of both sides of that split — the cards say so in as many words — so the
+// split itself is load-bearing, and until 2026-09-10 nothing pinned it:
+// aihub#543's wave-1 checkpoint rated this the cheapest high-value unheld claim
+// in the scoped set (spec §1.4.2), and a test-file comment asserting
+// FnForceTakeover "is SERIALIZABLE" had already been through review while being
+// false.
 //
 // The pin is on the SOURCE, deliberately. A live-DB reading of
 // current_setting('transaction_isolation') inside each path would need a hook in
 // both functions; the BeginTx options ARE the behaviour (pgx serialises IsoLevel
 // straight into the BEGIN statement), and the comment-stripped source is the
 // same instrument this package already trusts for the aihub#359 dead-branch ban.
-// READ COMMITTED is pinned as pool.Begin plus the ABSENCE of any BeginTx /
-// Serializable in the takeover body: pgx.TxOptions{} serialises to a bare BEGIN,
-// so the default is PostgreSQL's default_transaction_isolation, read committed
-// everywhere this repo deploys — the same reading
-// force_takeover_commit_window_db_test.go documents for its interleaving.
-func TestClaimOpensSerializableAndTakeoverOpensReadCommitted(t *testing.T) {
+// What is pinned for the takeover is the ABSENCE of a pin: pool.Begin plus no
+// BeginTx / Serializable anywhere in the body. pgx.TxOptions{} serialises to a
+// bare BEGIN, which carries no isolation clause, so the transaction runs at
+// default_transaction_isolation — decided by the database, the role or the DSN,
+// not by this repo's code (aihub#497 measured that internal/db/db.go's
+// pgxpool.New pins nothing either). That is read committed at the deployed
+// defaults — the reading force_takeover_commit_window_db_test.go documents for
+// its interleaving — but it is a configuration fact, not a code fact, and
+// callers must not assume the takeover path cannot answer a class-40 rollback:
+// 40P01 arrives at any isolation level, 40001 wherever configuration raises the
+// default, both surfaced as the retryable 409 since aihub#497.
+func TestClaimOpensSerializableAndTakeoverOpensBareBegin(t *testing.T) {
 	code := stripComments(t, sourceOf(t, claimSourceFile))
 
 	const serializableOpen = "pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})"
@@ -60,18 +68,19 @@ func TestClaimOpensSerializableAndTakeoverOpensReadCommitted(t *testing.T) {
 
 	if !strings.Contains(takeoverBody, "pool.Begin(ctx)") {
 		t.Errorf("FnForceTakeover no longer opens its transaction with pool.Begin(ctx). Its " +
-			"card publishes READ COMMITTED — the default a bare BEGIN gets — and " +
+			"card publishes that no isolation level is pinned here — a bare BEGIN runs at " +
+			"default_transaction_isolation, whatever the database, role or DSN sets — and " +
 			"force_takeover_commit_window_db_test.go measured the displacement window that " +
-			"only exists at that level. If the open moved, re-measure the window and move " +
-			"both cards' sentences with it.")
+			"only exists at the read committed default. If the open moved, re-measure the " +
+			"window and move both cards' sentences with it.")
 	}
 	if strings.Contains(takeoverBody, "BeginTx") || strings.Contains(takeoverBody, "Serializable") {
 		t.Errorf("FnForceTakeover now carries BeginTx/Serializable. Its card publishes the " +
-			"OPPOSITE — 'that path opens SERIALIZABLE while this one opens READ COMMITTED' — " +
-			"and aihub#451's measured displacement semantics depend on it. Raising the " +
-			"takeover's isolation is a behaviour change the card set has to move with, not a " +
-			"drive-by: see force_takeover_commit_window_db_test.go before pinning anything " +
-			"new here.")
+			"OPPOSITE — 'that path pins SERIALIZABLE while this one opens a bare pool.Begin, " +
+			"no isolation pinned' — and aihub#451's measured displacement semantics depend " +
+			"on the unpinned default. Raising the takeover's isolation is a behaviour change " +
+			"the card set has to move with, not a drive-by: see " +
+			"force_takeover_commit_window_db_test.go before pinning anything new here.")
 	}
 }
 

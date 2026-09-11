@@ -47,9 +47,15 @@ that sweeps every description and schema string the live toolset publishes and
 requires exactly one carrier: this tool's description.
 `aihub#430` measured the same interleaving on the
 claim path and found it comes back as a retryable 409 with the row untouched,
-because that path opens SERIALIZABLE while this one opens READ COMMITTED — the pair
-pinned at the source by `internal/domain/txn_isolation_probe_test.go`
-(`TestClaimOpensSerializableAndTakeoverOpensReadCommitted`). It is one
+because that path pins SERIALIZABLE while this one opens a bare `pool.Begin` — no
+isolation level pinned, it runs at whatever `default_transaction_isolation` the
+database, the role or the DSN sets (`aihub#497`; read committed at the deployed
+defaults), and a takeover can still lose a class-40 race — 40P01 at any isolation
+level, 40001 wherever configuration raises the default — coming back as the same
+retryable 409, so a caller must not assume this tool cannot answer
+`CONFLICT_SERIALIZATION_FAILURE` — the split pinned at the source by
+`internal/domain/txn_isolation_probe_test.go`
+(`TestClaimOpensSerializableAndTakeoverOpensBareBegin`). It is one
 statement about two different guarantees, so it must not be copied back.
 
 `aihub#451` then measured the exception itself on THIS path, in

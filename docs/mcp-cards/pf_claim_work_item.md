@@ -174,11 +174,13 @@ true; `scenario_ref` only when non-empty — every one of those driven BOTH ways
   (`TestPublishedForeignHolderStatusesAreTheEnforcedOnes`). `aihub#430` measured the
   commit-window interleaving that qualifier used to describe: it comes back as 409
   `CONFLICT_SERIALIZATION_FAILURE` with the row unchanged. That refusal exists because
-  this path opens SERIALIZABLE while `pf_force_takeover`'s opens READ COMMITTED — the
-  pair is pinned at the source by `internal/domain/txn_isolation_probe_test.go`
-  (`TestClaimOpensSerializableAndTakeoverOpensReadCommitted`). **The qualifier
+  this path pins SERIALIZABLE while `pf_force_takeover`'s opens a bare `pool.Begin` —
+  no isolation level pinned there; it follows the `default_transaction_isolation` the
+  database, the role or the DSN sets (`aihub#497`) — the split pinned at the source by
+  `internal/domain/txn_isolation_probe_test.go`
+  (`TestClaimOpensSerializableAndTakeoverOpensBareBegin`). **The qualifier
   therefore belongs on that tool's card and not this one** — one sentence cannot be
-  true of both isolation levels.
+  true of both sides of that split.
 - **A failed local state write is NOT a no-op.** The claim already committed
   server-side, so the error message says so and names the recovery: replay THIS SAME
   `idempotency_key`, because that costs no epoch bump and no superseded attempt —

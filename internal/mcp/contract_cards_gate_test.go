@@ -824,32 +824,16 @@ func TestContractCardsAreNotVacuous(t *testing.T) {
 		}
 
 		hop4, _ := cardSectionBody(secs, "## hop 4")
-		switch c.block.Hop4Coverage {
-		case "written":
-			if len(strings.TrimSpace(hop4)) < minHop4Body {
-				t.Errorf("K4 HOP4_VACUOUS: %s is marked hop4_coverage=\"written\" but its "+
-					"hop-4 section is %d characters (minimum %d). A machine block with no "+
-					"prose behind it satisfies every other arm here and asserts nothing.",
-					c.path, len(strings.TrimSpace(hop4)), minHop4Body)
-			}
-		case "pending":
+		if c.block.Hop4Coverage == "pending" {
 			pending++
-			if len(strings.TrimSpace(hop4)) >= minHop4Body {
-				t.Errorf("K5 PENDING_STALE: %s carries a full hop-4 section and is still "+
-					"marked hop4_coverage=\"pending\". An exemption that outlives its gap is "+
-					"one nobody removes, and it silently excuses the next one. Flip it to "+
-					"\"written\" and lower maxPendingCards in the same change.", c.path)
-			}
-		default:
-			t.Errorf("K4 COVERAGE_UNKNOWN: %s has hop4_coverage=%q; the only values are "+
-				"\"written\" and \"pending\".", c.path, c.block.Hop4Coverage)
+		}
+		for _, problem := range hop4CoverageProblems(c.path, c.block.Hop4Coverage, hop4) {
+			t.Error(problem)
 		}
 	}
 
-	if pending > maxPendingCards {
-		t.Errorf("K5 PENDING_CEILING: %d card(s) are pending, ceiling is %d. Raising the "+
-			"ceiling is a deliberate decision somebody signs off on; lowering it is free.",
-			pending, maxPendingCards)
+	for _, problem := range pendingCeilingProblems(pending, maxPendingCards) {
+		t.Error(problem)
 	}
 	if sections < floorCardSections {
 		t.Errorf("K8 FLOOR_SECTIONS: only %d required section(s) were found and measured, floor "+
@@ -858,6 +842,251 @@ func TestContractCardsAreNotVacuous(t *testing.T) {
 	}
 	t.Logf("K4/K5: %d cards checked, %d sections measured, %d pending (ceiling %d)",
 		len(cards), sections, pending, maxPendingCards)
+}
+
+// hop4CoverageProblems is the whole hop4_coverage half of K4/K5 for ONE card,
+// returned as plain strings.
+//
+// 🔴 It is a function rather than inline arm code for the reason openWaiverProblems
+// is (aihub#533 applies that shape here): maxPendingCards is 0 and every card in
+// the set is "written" with a full hop-4 body, so the "pending" branch — the
+// escape hatch that excuses a card from minHop4Body — is unreachable from today's
+// card set, and so is the unknown-value refusal. Measured before the extraction:
+// the K4/K5 line printed "0 pending (ceiling 0)", which is precisely the reading
+// under which neither branch had ever run. The branches are exercised against
+// fixtures in TestHop4CoverageIsCheckedAgainstFixtures instead, and
+// TestPendingEscapeHatchIsWiredIntoTheArm pins that the arm still consumes this
+// function.
+func hop4CoverageProblems(cardPath, coverage, hop4 string) []string {
+	var problems []string
+	body := len(strings.TrimSpace(hop4))
+	switch coverage {
+	case "written":
+		if body < minHop4Body {
+			problems = append(problems, fmt.Sprintf(
+				"K4 HOP4_VACUOUS: %s is marked hop4_coverage=\"written\" but its "+
+					"hop-4 section is %d characters (minimum %d). A machine block with no "+
+					"prose behind it satisfies every other arm here and asserts nothing.",
+				cardPath, body, minHop4Body))
+		}
+	case "pending":
+		if body >= minHop4Body {
+			problems = append(problems, fmt.Sprintf(
+				"K5 PENDING_STALE: %s carries a full hop-4 section and is still "+
+					"marked hop4_coverage=\"pending\". An exemption that outlives its gap is "+
+					"one nobody removes, and it silently excuses the next one. Flip it to "+
+					"\"written\" and lower maxPendingCards in the same change.", cardPath))
+		}
+	default:
+		problems = append(problems, fmt.Sprintf(
+			"K4 COVERAGE_UNKNOWN: %s has hop4_coverage=%q; the only values are "+
+				"\"written\" and \"pending\".", cardPath, coverage))
+	}
+	return problems
+}
+
+// pendingCeilingProblems is K5's ceiling on the count that hop4CoverageProblems'
+// "pending" branch excuses, extracted for the same reason: with the ceiling at
+// its measured 0 the red branch compares 0 against 0 forever and cannot be
+// entered from the card set. The ceiling arrives as a parameter for exactly that
+// purpose — the arm passes maxPendingCards, and the fixtures in
+// TestPendingCeilingIsCheckedAgainstFixtures pass counts on both sides of it, so
+// the operator is pinned in the direction the live gate cannot pin: `>=` would
+// red a healthy tree and be caught in CI, but a reversed or deleted comparison
+// fails OPEN, silently, on the day the hatch is first used.
+func pendingCeilingProblems(pending, ceiling int) []string {
+	if pending <= ceiling {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"K5 PENDING_CEILING: %d card(s) are pending, ceiling is %d. Raising the "+
+			"ceiling is a deliberate decision somebody signs off on; lowering it is free.",
+		pending, ceiling)}
+}
+
+// TestHop4CoverageIsCheckedAgainstFixtures drives the hop4_coverage half of
+// K4/K5 directly, against fixtures rather than against the card set — the
+// TestOpenCitationWaiverIsCheckedAgainstItsOwnCount shape, because the gap has
+// the same anatomy: an escape hatch nothing in docs/mcp-cards/ uses, whose
+// checks are therefore green whether they work or not.
+func TestHop4CoverageIsCheckedAgainstFixtures(t *testing.T) {
+	full := strings.Repeat("x", minHop4Body)
+
+	cases := []struct {
+		name     string
+		coverage string
+		hop4     string
+		// want is the failure NAME of each expected problem, in order; contains
+		// pins the load-bearing values inside the message. Same reading as the
+		// K11 fixture table.
+		want     []string
+		contains []string
+	}{
+		{
+			name:     "written with a full body",
+			coverage: "written",
+			hop4:     full + " and then some prose past the minimum.",
+		},
+		{
+			// Pins the boundary at < rather than <=: exactly the minimum is a
+			// full body, consistent with "exactly the minimum is stale" below.
+			name:     "written with exactly the minimum",
+			coverage: "written",
+			hop4:     full,
+		},
+		{
+			name:     "written with a thin body",
+			coverage: "written",
+			hop4:     "TODO",
+			want:     []string{"K4 HOP4_VACUOUS"},
+			contains: []string{"is 4 characters"},
+		},
+		{
+			// Pins the TrimSpace: padding is not prose, so a body inflated past
+			// the minimum with whitespace is still vacuous.
+			name:     "written with a body padded past the minimum by whitespace",
+			coverage: "written",
+			hop4:     "TODO" + strings.Repeat(" ", minHop4Body),
+			want:     []string{"K4 HOP4_VACUOUS"},
+			contains: []string{"is 4 characters"},
+		},
+		{
+			// The hatch working as designed: a pending card owes no hop-4 body,
+			// and that is the whole point of the marker.
+			name:     "pending with no body",
+			coverage: "pending",
+			hop4:     "",
+		},
+		{
+			name:     "pending with a partial draft",
+			coverage: "pending",
+			hop4:     "- What hop 4 will say here is not yet written.",
+		},
+		{
+			name:     "pending with a full body",
+			coverage: "pending",
+			hop4:     full,
+			want:     []string{"K5 PENDING_STALE"},
+			contains: []string{"lower maxPendingCards in the same change"},
+		},
+		{
+			name:     "unknown coverage value",
+			coverage: "reviewed",
+			hop4:     full,
+			want:     []string{"K4 COVERAGE_UNKNOWN"},
+			contains: []string{`hop4_coverage="reviewed"`},
+		},
+		{
+			name:     "empty coverage value",
+			coverage: "",
+			hop4:     full,
+			want:     []string{"K4 COVERAGE_UNKNOWN"},
+			contains: []string{`hop4_coverage=""`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hop4CoverageProblems("docs/mcp-cards/fixture.md", tc.coverage, tc.hop4)
+			assertProblemNames(t, got, tc.want, tc.contains)
+		})
+	}
+}
+
+// TestPendingCeilingIsCheckedAgainstFixtures enters K5's ceiling branch with
+// fixture counts, which is the only way it has ever been entered: the live tally
+// is 0 against a ceiling of 0.
+func TestPendingCeilingIsCheckedAgainstFixtures(t *testing.T) {
+	cases := []struct {
+		name             string
+		pending, ceiling int
+		want             []string
+		contains         []string
+	}{
+		{name: "today's tree: none pending, ceiling zero", pending: 0, ceiling: 0},
+		{
+			name:     "one pending over a ceiling of zero",
+			pending:  1,
+			ceiling:  0,
+			want:     []string{"K5 PENDING_CEILING"},
+			contains: []string{"1 card(s) are pending, ceiling is 0"},
+		},
+		{
+			// Pins > rather than >=: AT the ceiling is what a ceiling allows, and
+			// >= would red the healthy tree above.
+			name:    "at a nonzero ceiling",
+			pending: 2,
+			ceiling: 2,
+		},
+		{
+			name:     "over a nonzero ceiling",
+			pending:  3,
+			ceiling:  2,
+			want:     []string{"K5 PENDING_CEILING"},
+			contains: []string{"3 card(s) are pending, ceiling is 2"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertProblemNames(t, pendingCeilingProblems(tc.pending, tc.ceiling),
+				tc.want, tc.contains)
+		})
+	}
+}
+
+// TestPendingEscapeHatchIsWiredIntoTheArm pins the one thing the two fixture
+// tables above structurally cannot, on the K11/K12 pins' reasoning.
+//
+// 🔴 Every card is "written" and the pending tally is 0, so deleting either call
+// from TestContractCardsAreNotVacuous changes NOTHING that runs today: the arm
+// stays green over every card, the fixtures stay green against functions the arm
+// no longer consults, and both halves of the escape hatch are dead code from the
+// gate's side. Checked to the hardened shape (aihub#565): the result must be
+// CONSUMED — the call the range expression of a loop whose body fails the test —
+// because `_ = hop4CoverageProblems(…)` is the one-character nerve cut the
+// pre-#565 K11 pin accepted.
+//
+// MUTANTS (each applied to this tree on 2026-09-11, tree change proven by
+// `git diff --stat`, reverted from a cp backup after the run):
+//
+//	P1 replace the arm's `for _, problem := range hop4CoverageProblems(…) {
+//	   t.Error(problem) }` with `_ = hop4CoverageProblems(…)`
+//	                                           RED  this pin (does not range over)
+//	P2 keep that range, body `_ = problem`     RED  this pin (never reach t.Error)
+//	P3 delete the pendingCeilingProblems loop  RED  this pin (does not range over)
+//	P4 in hop4CoverageProblems, delete the PENDING_STALE append
+//	                                           RED  fixtures (pending with a full body)
+//	P5 in hop4CoverageProblems, `<` -> `<=` on the written check
+//	                                           RED  fixtures (written with exactly the minimum)
+//	P6 in hop4CoverageProblems, delete the default arm
+//	                                           RED  fixtures (unknown/empty coverage value)
+//	P7 in pendingCeilingProblems, `<=` -> `<`  RED  fixtures (at a nonzero ceiling)
+//	P8 in pendingCeilingProblems, return nil unconditionally
+//	                                           RED  fixtures (one pending over a ceiling of zero)
+func TestPendingEscapeHatchIsWiredIntoTheArm(t *testing.T) {
+	const (
+		gateFile = "contract_cards_gate_test.go"
+		armName  = "TestContractCardsAreNotVacuous"
+	)
+
+	arm := parseGateArm(t, gateFile, armName, "K4/K5")
+	for _, callName := range []string{"hop4CoverageProblems", "pendingCeilingProblems"} {
+		called, consumed := rangeConsumption(arm, callName)
+		if !called {
+			t.Errorf("%s does not range over %s, so that half of the pending escape hatch "+
+				"is dead code from the gate's side: every card is \"written\", so nothing "+
+				"about the cut shows up as a failing card, and the fixtures above go on "+
+				"passing against a function the arm no longer consults. Restore the "+
+				"consuming range — a call whose result is discarded (`_ = %s(…)`) is the "+
+				"nerve cut this pin exists to refuse.", armName, callName, callName)
+		} else if !consumed {
+			t.Errorf("%s ranges over %s but its findings never reach t.Error or t.Fatal, "+
+				"so every problem is computed and thrown away. That is worse than no call "+
+				"at all: the wiring reads as present to anyone grepping for it, and the arm "+
+				"is green on a card set the checks disagree with.", armName, callName)
+		}
+	}
 }
 
 // ────────────────────────────────── K6 ───────────────────────────────────────
@@ -1164,38 +1393,18 @@ func TestContractCardQuotesAreVerbatim(t *testing.T) {
 				quoted := m[1]
 				if exempt {
 					historical++
-					if strings.Contains(haystack, quoted) {
-						t.Errorf("K9 HISTORICAL_STILL_LIVE: %s marks a row %s and quotes %q, "+
-							"which %s still publishes. The marker says this text is history; "+
-							"while it is current the exemption hides a live quote from the arm "+
-							"that checks it, and an exemption that outlives its gap is one "+
-							"nobody removes. Drop the marker.",
-							c.path, cardHistoricalMarker, quoted, name)
-					}
-					continue
+				} else {
+					checked++
 				}
-				checked++
-				if !strings.Contains(haystack, quoted) {
-					t.Errorf("K9 QUOTE_NOT_VERBATIM: %s quotes %q as a whole hop 0-1 table cell, "+
-						"and no text %s publishes contains it — not the tool description, not "+
-						"any string in the live InputSchema. A whole-cell quote is a claim to be "+
-						"verbatim, so this card is telling a caller the tool promises something "+
-						"it does not. Re-read the live description and fix the QUOTE; "+
-						"regenerating the machine block does not touch it, which is the hole "+
-						"this arm closes. If the withdrawn text is being documented on purpose, "+
-						"mark that row %s and raise maxHistoricalQuoteRows in the same change.",
-						c.path, quoted, name, cardHistoricalMarker)
+				for _, problem := range hop01QuoteProblems(c.path, name, haystack, quoted, exempt) {
+					t.Error(problem)
 				}
 			}
 		}
 	}
 
-	if historical > maxHistoricalQuoteRows {
-		t.Errorf("K9 HISTORICAL_CEILING: %d quote(s) are exempted by %s, ceiling is %d. The "+
-			"marker is an escape hatch and this is the price of using it: raising the ceiling is "+
-			"an edit to this file somebody signs, which is the only thing that keeps the hatch "+
-			"from being cheaper than reading the schema.",
-			historical, cardHistoricalMarker, maxHistoricalQuoteRows)
+	for _, problem := range historicalCeilingProblems(historical, maxHistoricalQuoteRows) {
+		t.Error(problem)
 	}
 	if checked < floorCardQuotes {
 		t.Errorf("K9 FLOOR_QUOTES: only %d verbatim quote(s) were checked, floor is %d — a card "+
@@ -1204,6 +1413,224 @@ func TestContractCardQuotesAreVerbatim(t *testing.T) {
 	}
 	t.Logf("K9: %d verbatim hop 0-1 quotes checked against the live schema, %d exempted",
 		checked, historical)
+}
+
+// hop01QuoteProblems is the whole per-quote half of K9 for ONE leading-quote
+// cell, returned as plain strings: the verbatim requirement on an unmarked row,
+// and the still-live refusal on a row carrying cardHistoricalMarker.
+//
+// 🔴 It is a function rather than inline arm code for the openWaiverProblems
+// reason (aihub#533 applies that shape here): zero rows in the card set carry the
+// marker — the K9 line prints "0 exempted" — so the exempt branch was unreachable
+// from docs/mcp-cards/ and had never executed until the fixtures in
+// TestHop01QuoteExemptionIsCheckedAgainstFixtures. The liveness check itself
+// (does the published surface still contain the quote) lives HERE and not in the
+// arm, so the fixtures exercise the real substring semantics rather than a
+// boolean the arm was trusted to have computed correctly.
+func hop01QuoteProblems(cardPath, name, haystack, quoted string, exempt bool) []string {
+	live := strings.Contains(haystack, quoted)
+	switch {
+	case exempt && live:
+		return []string{fmt.Sprintf(
+			"K9 HISTORICAL_STILL_LIVE: %s marks a row %s and quotes %q, "+
+				"which %s still publishes. The marker says this text is history; "+
+				"while it is current the exemption hides a live quote from the arm "+
+				"that checks it, and an exemption that outlives its gap is one "+
+				"nobody removes. Drop the marker.",
+			cardPath, cardHistoricalMarker, quoted, name)}
+	case !exempt && !live:
+		return []string{fmt.Sprintf(
+			"K9 QUOTE_NOT_VERBATIM: %s quotes %q as a whole hop 0-1 table cell, "+
+				"and no text %s publishes contains it — not the tool description, not "+
+				"any string in the live InputSchema. A whole-cell quote is a claim to be "+
+				"verbatim, so this card is telling a caller the tool promises something "+
+				"it does not. Re-read the live description and fix the QUOTE; "+
+				"regenerating the machine block does not touch it, which is the hole "+
+				"this arm closes. If the withdrawn text is being documented on purpose, "+
+				"mark that row %s and raise maxHistoricalQuoteRows in the same change.",
+			cardPath, quoted, name, cardHistoricalMarker)}
+	}
+	return nil
+}
+
+// historicalCeilingProblems is K9's ceiling on the count of marker-exempted
+// quotes, extracted for the pendingCeilingProblems reason: the live tally is 0
+// against a ceiling of 0, so the red branch cannot be entered from the card set
+// and a reversed or deleted comparison fails OPEN on the day the marker is first
+// used. TestHistoricalCeilingIsCheckedAgainstFixtures enters it from both sides.
+func historicalCeilingProblems(historical, ceiling int) []string {
+	if historical <= ceiling {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"K9 HISTORICAL_CEILING: %d quote(s) are exempted by %s, ceiling is %d. The "+
+			"marker is an escape hatch and this is the price of using it: raising the ceiling is "+
+			"an edit to this file somebody signs, which is the only thing that keeps the hatch "+
+			"from being cheaper than reading the schema.",
+		historical, cardHistoricalMarker, ceiling)}
+}
+
+// TestHop01QuoteExemptionIsCheckedAgainstFixtures drives K9's per-quote decision
+// directly, against fixtures rather than against the card set — the
+// TestOpenCitationWaiverIsCheckedAgainstItsOwnCount shape again. The verbatim
+// half does run live (22 quotes on the measured tree), so what the fixtures add
+// there is the RED direction; the exempt half has never run live at all.
+func TestHop01QuoteExemptionIsCheckedAgainstFixtures(t *testing.T) {
+	// A stand-in for liveSchemaProse's concatenation of a tool's description and
+	// schema strings. The pipe-carrying value is real published text (the access
+	// enum), kept because K9's own header records that quotes containing pipes are
+	// a false red waiting to happen.
+	const haystack = "Work item ID — a slug like `aihub#12` or a canonical id. " +
+		"Access is one of private|project|team|admin."
+
+	cases := []struct {
+		name     string
+		quoted   string
+		exempt   bool
+		want     []string
+		contains []string
+	}{
+		{
+			name:   "an unmarked quote the tool still publishes",
+			quoted: "a slug like `aihub#12`",
+		},
+		{
+			// Pins Contains rather than equality: a verbatim FRAGMENT of a longer
+			// published sentence is a true claim, and the real card set quotes
+			// fragments far more often than whole descriptions.
+			name:   "an unmarked quote that is a fragment of a published sentence",
+			quoted: "private|project|team|admin",
+		},
+		{
+			name:     "an unmarked quote nothing publishes",
+			quoted:   "Work item slug (deprecated)",
+			want:     []string{"K9 QUOTE_NOT_VERBATIM"},
+			contains: []string{`"Work item slug (deprecated)"`, cardHistoricalMarker},
+		},
+		{
+			// Verbatim means verbatim: casing is part of the claim.
+			name:   "an unmarked quote differing only in case",
+			quoted: "work item id",
+			want:   []string{"K9 QUOTE_NOT_VERBATIM"},
+		},
+		{
+			// The hatch working as designed: a marked row documenting withdrawn
+			// text is exactly what the marker exists for, and it must be silent.
+			name:   "a marked quote nothing publishes",
+			quoted: "Work item slug (deprecated)",
+			exempt: true,
+		},
+		{
+			name:     "a marked quote the tool still publishes",
+			quoted:   "a slug like `aihub#12`",
+			exempt:   true,
+			want:     []string{"K9 HISTORICAL_STILL_LIVE"},
+			contains: []string{"Drop the marker"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hop01QuoteProblems("docs/mcp-cards/fixture.md", "pf_fixture",
+				haystack, tc.quoted, tc.exempt)
+			assertProblemNames(t, got, tc.want, tc.contains)
+		})
+	}
+}
+
+// TestHistoricalCeilingIsCheckedAgainstFixtures enters K9's ceiling branch with
+// fixture counts, which is the only way it has ever been entered: the live tally
+// is 0 against a ceiling of 0.
+func TestHistoricalCeilingIsCheckedAgainstFixtures(t *testing.T) {
+	cases := []struct {
+		name                string
+		historical, ceiling int
+		want                []string
+		contains            []string
+	}{
+		{name: "today's tree: none exempted, ceiling zero", historical: 0, ceiling: 0},
+		{
+			name:       "one exempted over a ceiling of zero",
+			historical: 1,
+			ceiling:    0,
+			want:       []string{"K9 HISTORICAL_CEILING"},
+			contains:   []string{"1 quote(s) are exempted", "ceiling is 0"},
+		},
+		{
+			// Pins > rather than >=: AT the ceiling is what a ceiling allows.
+			name:       "at a nonzero ceiling",
+			historical: 2,
+			ceiling:    2,
+		},
+		{
+			name:       "over a nonzero ceiling",
+			historical: 3,
+			ceiling:    2,
+			want:       []string{"K9 HISTORICAL_CEILING"},
+			contains:   []string{"3 quote(s) are exempted", "ceiling is 2"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertProblemNames(t, historicalCeilingProblems(tc.historical, tc.ceiling),
+				tc.want, tc.contains)
+		})
+	}
+}
+
+// TestHistoricalEscapeHatchIsWiredIntoTheArm pins the wiring the fixture tables
+// above structurally cannot, on the K11/K12 pins' reasoning.
+//
+// 🔴 No row in the card set carries cardHistoricalMarker and the exempt tally is
+// 0, so deleting either call from TestContractCardQuotesAreVerbatim leaves the
+// verbatim half's GREEN direction intact — every live quote still found in the
+// haystack — while the RED direction and the whole exempt half go dead. That is
+// the live-looking green over a disconnected check, and reading the source is
+// the only instrument that can see it. Checked to the hardened aihub#565 shape:
+// the result must be the range expression of a loop whose body fails the test.
+//
+// MUTANTS (each applied to this tree on 2026-09-11, tree change proven by
+// `git diff --stat`, reverted from a cp backup after the run):
+//
+//	Q1 replace the arm's `for _, problem := range hop01QuoteProblems(…) {
+//	   t.Error(problem) }` with `_ = hop01QuoteProblems(…)`
+//	                                           RED  this pin (does not range over)
+//	Q2 keep that range, body `_ = problem`     RED  this pin (never reach t.Error)
+//	Q3 delete the historicalCeilingProblems loop
+//	                                           RED  this pin (does not range over)
+//	Q4 in hop01QuoteProblems, delete the `exempt && live` arm
+//	                                           RED  fixtures (a marked quote the tool still publishes)
+//	Q5 in hop01QuoteProblems, swap the two arms' conditions
+//	                                           RED  fixtures (3 of 6: both unmarked
+//	                                                dead-quote cases, and the marked
+//	                                                live one)
+//	Q6 in historicalCeilingProblems, return nil unconditionally
+//	                                           RED  fixtures (one exempted over a ceiling of zero)
+func TestHistoricalEscapeHatchIsWiredIntoTheArm(t *testing.T) {
+	const (
+		gateFile = "contract_cards_gate_test.go"
+		armName  = "TestContractCardQuotesAreVerbatim"
+	)
+
+	arm := parseGateArm(t, gateFile, armName, "K9")
+	for _, callName := range []string{"hop01QuoteProblems", "historicalCeilingProblems"} {
+		called, consumed := rangeConsumption(arm, callName)
+		if !called {
+			t.Errorf("%s does not range over %s, so that half of the historical-quote "+
+				"escape hatch is dead code from the gate's side: no card row carries the "+
+				"marker, so nothing about the cut shows up as a failing card, and the "+
+				"fixtures above go on passing against a function the arm no longer "+
+				"consults. Restore the consuming range — a call whose result is discarded "+
+				"(`_ = %s(…)`) is the nerve cut this pin exists to refuse.",
+				armName, callName, callName)
+		} else if !consumed {
+			t.Errorf("%s ranges over %s but its findings never reach t.Error or t.Fatal, "+
+				"so every problem is computed and thrown away. That is worse than no call "+
+				"at all: the wiring reads as present to anyone grepping for it, and the arm "+
+				"is green on a card set the checks disagree with.", armName, callName)
+		}
+	}
 }
 
 // ─────────────────────────────────── K11 ─────────────────────────────────────
@@ -1806,28 +2233,7 @@ func TestOpenCitationWaiverIsCheckedAgainstItsOwnCount(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := openWaiverProblems("docs/mcp-cards/fixture.md", tc.reason, tc.undated)
-
-			names := make([]string, 0, len(got))
-			for _, g := range got {
-				name, _, ok := strings.Cut(g, ":")
-				if !ok {
-					t.Fatalf("problem carries no `NAME:` prefix, so no reader can tell "+
-						"which check produced it:\n    %s", g)
-				}
-				names = append(names, name)
-			}
-			if !equalStrings(names, tc.want) {
-				t.Errorf("problem names = %v, want %v\nfull output:\n%s",
-					names, tc.want, strings.Join(got, "\n\n"))
-			}
-
-			joined := strings.Join(got, "\n")
-			for _, want := range tc.contains {
-				if !strings.Contains(joined, want) {
-					t.Errorf("message does not contain %q, so it does not tell the reader "+
-						"what it measured:\n%s", want, joined)
-				}
-			}
+			assertProblemNames(t, got, tc.want, tc.contains)
 		})
 	}
 }
@@ -2546,7 +2952,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_update_memory":           {Candidates: 17, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
 	"pf_update_project":          {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_update_step":             {Candidates: 21, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_user":             {Candidates: 22, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_update_user":             {Candidates: 23, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_update_work_item":        {Candidates: 66, Cited: 54, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
 	"pf_whoami":                  {Candidates: 13, Cited: 11, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
@@ -3049,4 +3455,41 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// assertProblemNames checks a problems slice from one of the extracted decision
+// functions against the failure NAMES it should carry, in order, plus any
+// load-bearing values the messages must state. Names rather than whole messages
+// so rewording a message does not red a fixture, while dropping or confusing a
+// check still does; `contains` pins the numbers a name alone cannot — a mismatch
+// report naming the wrong two numbers is useless and would otherwise pass.
+//
+// Extracted (aihub#533) because TestOpenCitationWaiverIsCheckedAgainstItsOwnCount
+// held the only copy and four more fixture tables were about to copy it byte for
+// byte — the parseGateArm lesson (aihub#565): a copy is a drift surface, and the
+// next hardening lands in one and not the others.
+func assertProblemNames(t *testing.T, got, wantNames, contains []string) {
+	t.Helper()
+
+	names := make([]string, 0, len(got))
+	for _, g := range got {
+		name, _, ok := strings.Cut(g, ":")
+		if !ok {
+			t.Fatalf("problem carries no `NAME:` prefix, so no reader can tell "+
+				"which check produced it:\n    %s", g)
+		}
+		names = append(names, name)
+	}
+	if !equalStrings(names, wantNames) {
+		t.Errorf("problem names = %v, want %v\nfull output:\n%s",
+			names, wantNames, strings.Join(got, "\n\n"))
+	}
+
+	joined := strings.Join(got, "\n")
+	for _, want := range contains {
+		if !strings.Contains(joined, want) {
+			t.Errorf("message does not contain %q, so it does not tell the reader "+
+				"what it measured:\n%s", want, joined)
+		}
+	}
 }

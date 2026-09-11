@@ -219,8 +219,9 @@ func TestPublishedTakeoverRaceQualifierIsAbsentFromTheClaimFlag(t *testing.T) {
 		if strings.Contains(flagDesc, clause) {
 			t.Errorf("pf_claim_work_item's `force_takeover` description carries %q.\nPublished: "+
 				"%q\nThe clause was deleted from there by aihub#430 and must not be copied back: "+
-				"the claim path opens SERIALIZABLE and this one opens READ COMMITTED, so it is "+
-				"one sentence about two different guarantees and it is false on that side.",
+				"the claim path pins SERIALIZABLE and this one opens a bare pool.Begin with no "+
+				"isolation pinned, so it is one sentence about two different guarantees and it "+
+				"is false on that side.",
 				clause, flagDesc)
 		}
 	})

@@ -96,6 +96,36 @@ var dbGatedFloorFilesOutOfScope = map[string]string{
 	"card_response_keys_live_git_e2e_db_test.go": "K10's git half — same database, and it declares no floors of its own",
 }
 
+// prodFilesWithGovernedConsts records the PRODUCTION files known to carry
+// value-restating prose of this gate's class, and why they cannot simply be
+// added to gatedFloorFiles. aihub#549 adjudicated tools_lifecycle.go — the
+// wi's claim was "its budget comment is exactly the target shape but out of
+// range", and the adjudication came out in three parts, each verified on this
+// tree:
+//
+//   - It CANNOT go into gatedFloorFiles. Its one governed-shaped constant
+//     (maxBatchWorkItems) is a chosen cap, not a measured floor — no [KG]n arm
+//     prints it, so NAMES_ARM would red a correct tree; NO_RECIPE would demand
+//     a go-test recipe in a production file's header; and the coverage arm
+//     counts only *_test.go files, so a non-test entry in either list reds
+//     DETECTOR_BLIND by construction.
+//   - Its IN-FUNCTION prose cannot be swept with measuredValueInComment. That
+//     file's dated change-records ("Measured: 325 -> 427 characters") match
+//     the pattern and are correct as written — the history-vs-current line the
+//     scope section draws. A blanket sweep is a false-positive gate, and the
+//     cheap repair for that is deleting the gate (aihub#361).
+//   - What CAN be governed is governed: the file's floor-shaped file-scope
+//     constants get the NO_VALUE check (TestMeasuredFloorProdConstsCarryNoValue
+//     below), so the next `Measured …: N` written beside one reds here. The
+//     current-value halves of the in-function budget notes are owned by the
+//     budget tests' printed lines instead (the aihub#550 conversion:
+//     tools_list_payload_budget_test.go's "tools/list:" log line, and
+//     TestListWorkItemsSchemaStaysWithinItsWireBudget).
+var prodFilesWithGovernedConsts = map[string]string{
+	"tools_lifecycle.go": "in-function budget prose is dated history the pattern cannot split from " +
+		"current values; its floor-shaped consts get NO_VALUE, current values live in the budget tests' log lines",
+}
+
 // floorConstName matches the constants this gate governs: a floor on a
 // measurement or a ceiling on debt. Both are set FROM a measurement, which is
 // what makes restating it next door redundant.
@@ -173,6 +203,15 @@ func collectFloorComments(t *testing.T, dir, base string) ([]floorComment, strin
 			continue
 		}
 		blockDoc := commentText(gd.Doc)
+		// A standalone `const x = 1` attaches its doc comment to the GenDecl,
+		// not the ValueSpec, so before aihub#549 that doc landed in .block —
+		// which NO_VALUE never reads. maxPendingCards and maxHistoricalQuoteRows
+		// are exactly that shape, so a `Measured …: N` written beside either of
+		// them passed the gate; a probe mutation on tools_lifecycle.go's
+		// maxBatchWorkItems (also standalone) is how the hole was found. For a
+		// standalone decl the GenDecl doc IS the constant's own comment, so it
+		// is judged as one.
+		standalone := !gd.Lparen.IsValid()
 		for _, spec := range gd.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
 			if !ok {
@@ -182,11 +221,17 @@ func collectFloorComments(t *testing.T, dir, base string) ([]floorComment, strin
 				if !floorConstName.MatchString(id.Name) {
 					continue
 				}
+				doc := strings.TrimSpace(commentText(vs.Doc) + " " + commentText(vs.Comment))
+				block := blockDoc
+				if standalone {
+					doc = strings.TrimSpace(blockDoc + " " + doc)
+					block = ""
+				}
 				out = append(out, floorComment{
 					file:  base,
 					name:  id.Name,
-					doc:   strings.TrimSpace(commentText(vs.Doc) + " " + commentText(vs.Comment)),
-					block: blockDoc,
+					doc:   doc,
+					block: block,
 				})
 			}
 		}
@@ -266,6 +311,47 @@ func TestMeasuredFloorCommentsCarryNoValue(t *testing.T) {
 	}
 	t.Logf("measured-floor comments: %d governed constant(s) checked across %d file(s), %d file(s) "+
 		"exempt", checked, len(gatedFloorFiles), len(dbGatedFloorFilesOutOfScope))
+}
+
+// TestMeasuredFloorProdConstsCarryNoValue is the enforceable slice of the gate
+// for the recorded production files: their floor-shaped file-scope constants
+// (the same ^(floor|max|ceiling)[A-Z] population the main arm reads) may not
+// restate a measured value beside themselves. NAMES_ARM and NO_RECIPE are
+// deliberately NOT applied — see prodFilesWithGovernedConsts for why demanding
+// an arm label from a design cap reds a correct tree. The record itself is
+// checked the same way dbGatedFloorFilesOutOfScope is: the file must exist, and
+// must not simultaneously sit in a list that claims the full discipline.
+func TestMeasuredFloorProdConstsCarryNoValue(t *testing.T) {
+	dir := "."
+	for base, reason := range prodFilesWithGovernedConsts {
+		if _, gated := gatedFloorFiles[base]; gated {
+			t.Errorf("MEASURED_FLOOR SCOPE_CONTRADICTION: %s is in prodFilesWithGovernedConsts AND in "+
+				"gatedFloorFiles (%s). The record says the full discipline cannot apply; the list says "+
+				"it does. One of them is wrong.", base, reason)
+		}
+		if _, exempt := dbGatedFloorFilesOutOfScope[base]; exempt {
+			t.Errorf("MEASURED_FLOOR SCOPE_CONTRADICTION: %s is in prodFilesWithGovernedConsts AND in "+
+				"dbGatedFloorFilesOutOfScope (%s) — the second list is for labelled DB gate files, "+
+				"which a production file is not.", base, reason)
+		}
+		if _, err := os.Stat(filepath.Join(dir, base)); err != nil {
+			t.Errorf("MEASURED_FLOOR EXEMPT_GONE: prodFilesWithGovernedConsts names %s (%s) and the "+
+				"file does not exist. A record about a file nobody can find is a record nobody will "+
+				"notice rotting.", base, reason)
+			continue
+		}
+		consts, _ := collectFloorComments(t, dir, base)
+		for _, c := range consts {
+			if m := measuredValueInComment.FindString(c.doc); m != "" {
+				t.Errorf("MEASURED_FLOOR PROD_NO_VALUE: %s's comment on %s restates a measured value "+
+					"(%q). The constant is compiled into every build and the sentence is checked by "+
+					"nothing — the same split lifetime aihub#493 measured at 11 stale of 19 in one day. "+
+					"State the history if it is history, or point at the printed line that carries the "+
+					"current value (the aihub#550 form).", c.file, c.name, strings.TrimSpace(m))
+			}
+		}
+		t.Logf("prod-file floor consts: %d governed-shaped constant(s) checked in %s", len(consts), base)
+	}
 }
 
 // TestMeasuredFloorGateCoversEveryLabelledGate is the wiring half: gatedFloorFiles

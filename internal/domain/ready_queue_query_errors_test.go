@@ -157,6 +157,17 @@ func scanQueryErrorHandling(fn *ast.FuncDecl, fset *token.FileSet) (sites int, v
 					"the `" + errIdent.Name + " != nil` branch does not return, so the failure falls through"})
 				continue
 			}
+			// aihub#549: the return must carry the failure out. A `…, nil`
+			// return (or a bare one) inside the branch publishes success for a
+			// failed query, and endsInReturn alone accepted it.
+			if nilErrorReturn(ifs.Body.List) {
+				violations = append(violations, queryErrViolation{line, rowsName,
+					"a return inside the `" + errIdent.Name + " != nil` branch publishes success — its error " +
+						"slot is nil (or the return is bare) — so the failed query leaves the guard as a normal " +
+						"answer, the same silent-empty lie one statement further in. Return the classified " +
+						"error explicitly: `return nil, dbErr(" + errIdent.Name + ", …)`"})
+				continue
+			}
 			// aihub#548: the branch must also consult a class-40 classifier.
 			// callsClassifier and conflictClassifiers live in
 			// retryable_conflict_guard_test.go, same package.
@@ -178,6 +189,57 @@ func endsInReturn(stmts []ast.Stmt) bool {
 	}
 	_, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
 	return ok
+}
+
+// nilErrorReturn reports whether any return inside the error branch publishes
+// SUCCESS instead of the failure: a return whose last result is the `nil`
+// identifier, or a return with no results at all.
+//
+// aihub#549: endsInReturn alone accepted ANY return, so
+// `if err != nil { return result, nil }` satisfied the #500 rule — the branch
+// "answered" the failure by republishing it as a normal response, the exact
+// silent-empty lie the rule exists to refuse, one statement further in. And
+// because callsClassifier accepts a classifier call ANYWHERE in the branch,
+// `err = dbErr(err, …); return result, nil` satisfied the #548 rule too. The
+// failure must leave the branch as a non-nil error, which the scanner can only
+// see when the return says so explicitly.
+//
+// A bare `return` is refused for the same reason from the other side: with
+// named results it can be genuine propagation (`err = dbErr(err, …); return`),
+// but the scanner cannot see a named result's value, and every governed
+// function already uses the explicit shape — so the explicit shape is the
+// compliant one, and a site that wants the named-result form should be
+// rewritten rather than exempted. FuncLit subtrees are skipped: a closure's
+// returns leave the closure, not the guard.
+func nilErrorReturn(stmts []ast.Stmt) bool {
+	found := false
+	for _, s := range stmts {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			if len(ret.Results) == 0 {
+				found = true
+				return false
+			}
+			if id, ok := ret.Results[len(ret.Results)-1].(*ast.Ident); ok && id.Name == "nil" {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // TestReadyQueueAnswersEveryQueryError is the gate.
@@ -288,6 +350,51 @@ func TestQueryErrorScannerRejectsTheShapeItWasWrittenFor(t *testing.T) {
 			}
 		}`,
 		want: "class-40 classifier",
+	}, {
+		// aihub#549: endsInReturn accepted ANY return, so a branch that returned
+		// the RESULT with a nil error satisfied it — the failure left the guard
+		// as a success.
+		name: "guarded, but the err-branch returns the result with a nil error",
+		src: `func f() {
+			rows, err := pool.Query(ctx, "SELECT 1")
+			if err != nil {
+				return result, nil
+			}
+			for rows.Next() {
+			}
+		}`,
+		want: "publishes success",
+	}, {
+		// aihub#549's load-bearing evasion: one classifier call anywhere in the
+		// branch satisfied the #548 rule, and any return satisfied the #500 rule,
+		// so this shape — classified, returning, and still swallowing — was green.
+		name: "classifier consulted, but the return still publishes success",
+		src: `func f() {
+			rows, err := pool.Query(ctx, "SELECT 1")
+			if err != nil {
+				err = dbErr(err, "failed to query things")
+				return result, nil
+			}
+			for rows.Next() {
+			}
+		}`,
+		want: "publishes success",
+	}, {
+		// A bare return can smuggle a nil error through named results, and the
+		// scanner cannot see named-result assignment — the explicit shape is the
+		// compliant one.
+		name: "classifier consulted, but the branch ends in a bare return",
+		src: `func f() (result int, err error) {
+			rows, err := pool.Query(ctx, "SELECT 1")
+			if err != nil {
+				err = dbErr(err, "failed to query things")
+				return
+			}
+			for rows.Next() {
+			}
+			return
+		}`,
+		want: "publishes success",
 	}}
 
 	for _, tc := range cases {

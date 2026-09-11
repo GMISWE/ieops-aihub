@@ -185,6 +185,15 @@ func scanQueryRowErrorHandling(fn *ast.FuncDecl, fset *token.FileSet) (sites int
 					"the guard's branch does not return, so the failure falls through"})
 				continue
 			}
+			// aihub#549: same rule as the two-value scanner — the return must
+			// carry the failure out, or the guard republishes it as success.
+			if nilErrorReturn(ifs.Body.List) {
+				violations = append(violations, queryRowSite{line, errIdent.Name,
+					"a return inside the guard's branch publishes success — its error slot is nil (or the " +
+						"return is bare) — so the failed Scan leaves the guard as a normal answer. Return the " +
+						"classified error explicitly: `return nil, dbErrCause(" + errIdent.Name + ", …)`"})
+				continue
+			}
 			if !callsClassifier(ifs) {
 				violations = append(violations, queryRowSite{line, errIdent.Name,
 					"the guard returns without consulting a class-40 classifier " +
@@ -345,6 +354,20 @@ func TestQueryRowScannerRejectsTheShapeItWasWrittenFor(t *testing.T) {
 			}
 		}`,
 		want: "class-40 classifier",
+	}, {
+		// aihub#549: the twin carried the same soft spot as the two-value scanner
+		// — endsInReturn accepted any return, callsClassifier accepted a call
+		// anywhere in the branch, so a classified branch that still returned a
+		// nil error was green while republishing the failure as success.
+		name: "classifier consulted, but the return still publishes success",
+		src: `func f() {
+			err := pool.QueryRow(ctx, "SELECT 1").Scan(&x)
+			if err != nil {
+				err = dbErrCause(err, "failed")
+				return nil, nil
+			}
+		}`,
+		want: "publishes success",
 	}}
 
 	for _, tc := range cases {

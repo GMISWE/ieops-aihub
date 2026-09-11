@@ -648,40 +648,55 @@ func TestLockEventsDB_EveryMutationSiteEmits(t *testing.T) {
 			WHERE ra.work_item_id = $1`, wi.ID).Scan(&orphanCount); err != nil {
 			t.Fatalf("count orphans: %v", err)
 		}
+		if orphanCount < 2 {
+			t.Fatalf("fixture produced %d orphan locks; need >1 or the count assertions "+
+				"below cannot discriminate", orphanCount)
+		}
 		res := RunOrphanLockSweep(ctx, pool)
 		if res.Error != "" {
 			t.Fatalf("sweep: %s", res.Error)
 		}
-		// 🔴 EXACT count, three locks not one. GCResult.Affected used to be the
-		// DELETE's own RowsAffected and is now len(the reporting query's rows), and
-		// those are only equal because both LEFT JOINs are on a primary key. An
-		// off-by-N here would misreport how much the GC tick did while every event
-		// still looked right, so the number is pinned rather than tested for
-		// non-zero — and with more than one row, since 1 == 1 would hold under any
-		// duplication or truncation bug.
-		if res.Affected != orphanCount {
-			t.Fatalf("sweep reported Affected=%d but %d orphan locks existed; the reporting "+
-				"wrapper is not returning exactly the rows the DELETE removed",
+		// LOWER BOUND, not equality. The sweep is GLOBAL — its DELETE has no wi
+		// filter — so any orphan row another test left behind is legitimately in
+		// Affected, and pinning the global number to this one work item's count
+		// was a latent flake: it held only while this arm's orphans happened to
+		// be the whole table's (aihub#538; aihub#497's cleanup exists to dodge
+		// exactly this). The EXACT accounting this used to buy moves below, onto
+		// this project's own event stream, which no other test can reach.
+		if res.Affected < orphanCount {
+			t.Fatalf("sweep reported Affected=%d but this work item alone had %d orphan "+
+				"locks; the reporting wrapper is dropping rows the DELETE removed",
 				res.Affected, orphanCount)
 		}
-		if orphanCount < 2 {
-			t.Fatalf("fixture produced %d orphan locks; need >1 or the count assertion "+
-				"above cannot discriminate", orphanCount)
-		}
+		// 🔴 EXACT count within this test's own scope, three locks not one.
+		// GCResult.Affected is len(the reporting query's rows) and the emission
+		// walks that same slice, so a duplication or truncation bug in the
+		// wrapper replays into the events — and here, in a project only this
+		// subtest writes to, every cause=orphan_sweep release is attributable.
+		// The number is pinned rather than tested for non-zero, and with more
+		// than one row, since 1 == 1 would hold under any duplication or
+		// truncation bug.
 		events := projectEvents(t, pool, proj)
 		got := lockEventsOfCause(events, EventLockReleased, lockCauseOrphanSweep)
-		if len(got) < 1 {
-			t.Fatalf("sweep emitted no lock_released; it removed %d rows", res.Affected)
+		if int64(len(got)) != orphanCount {
+			t.Fatalf("sweep emitted %d lock_released events on this project, want exactly %d "+
+				"— one per orphan row it removed here: %+v", len(got), orphanCount, got)
 		}
-		found := false
+		seen := map[string]bool{}
 		for _, f := range got {
-			if f.ResourceKey == proj+":swept.go" && f.AttemptID == claim.AttemptID {
-				found = true
+			if f.AttemptID != claim.AttemptID {
+				t.Errorf("sweep event for %q names attempt %q, want the dead attempt %q",
+					f.ResourceKey, f.AttemptID, claim.AttemptID)
 			}
+			if seen[f.ResourceKey] {
+				t.Errorf("sweep emitted two releases for %q; one row must emit one event", f.ResourceKey)
+			}
+			seen[f.ResourceKey] = true
 		}
-		if !found {
-			t.Errorf("sweep events %+v do not include %q held by %q",
-				got, proj+":swept.go", claim.AttemptID)
+		for _, want := range []string{proj + ":swept.go", proj + ":swept2.go", proj + ":swept3.go"} {
+			if !seen[want] {
+				t.Errorf("sweep events %+v do not include %q held by %q", got, want, claim.AttemptID)
+			}
 		}
 		v := lockVerdictFromEvents(events, "file_scope", proj+":swept.go")
 		if !v.Decidable || v.Held {

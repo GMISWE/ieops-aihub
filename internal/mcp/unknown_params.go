@@ -5,9 +5,15 @@ package mcp
 //
 // ─── The defect, measured ─────────────────────────────────────────────────
 //
-// `objectSchema` emits `type`, `properties` and an optional `required`, and
-// JSON Schema's default for a missing `additionalProperties` is *allowed*. So
-// go-sdk's pre-handler validation passes anything, the handler forwards it, and
+// go-sdk runs NO per-call validation on the path this server registers
+// through: every tool goes in via the untyped `(*mcp.Server).AddTool`, and
+// `Server.callTool` hands the request straight to the handler with no schema
+// step — `applySchema -> resolved.Validate` is wired only into the generic
+// `AddTool[In, Out]`, which this repo does not use (aihub#463, measured on
+// go-sdk v1.6.0, 2026-09-08). An earlier version of this header attributed
+// the pass-through to JSON Schema's `additionalProperties` default, i.e. to a
+// pre-handler validation step that does not exist — corrected by aihub#547.
+// So the handler receives whatever was sent, forwards it, and
 // echo's `c.Bind` ignores unknown JSON fields. Measured live on 2026-09-07
 // (aihub#383): `pf_update_work_item(work_item_id="aihub#383", brief=true,
 // bogus_probe_383="never-published-parameter")` returned 200 with the work item
@@ -22,18 +28,34 @@ package mcp
 //
 // ─── Report, do NOT reject — and why that is not the weak option ──────────
 //
-// `additionalProperties:false` would be enforced by the SDK with no server
-// change, and it is the right END state. Flipping it today would 400 roughly
-// one `pf_update_step` call in five, i.e. break pf-execute for every agent mid
+// Rejection is the right END state. Rejecting today would 400 roughly one
+// `pf_update_step` call in five, i.e. break pf-execute for every agent mid
 // run. So phase 1 makes every unknown parameter VISIBLE in the same response,
 // which does two things a silent drop cannot: the caller can self-correct
-// within the session, and the corpus re-measure that licenses the flip becomes
-// possible. Phase 2 (a separate work item) sets
-// `additionalProperties:false` once that number is under 0.1%.
+// within the session, and the corpus re-measure that licenses rejection
+// becomes possible. Phase 2 (a separate work item, aihub#431) rejects once
+// that number is under 0.1% — by a mechanism that actually runs; see below.
 //
-// 🔴 Do NOT "simplify" this by adding `additionalProperties:false` here. It is
-// not an improvement on this file, it is phase 2, and the whole point of the
-// two-phase split is that the number licensing it does not exist yet.
+// 🔴 Do NOT "simplify" this by adding `additionalProperties:false` here — and
+// not for the reason this header used to give. An earlier version said the
+// flag "would be enforced by the SDK with no server change"; that is false
+// for this codebase (aihub#463, measured on go-sdk v1.6.0, 2026-09-08: the
+// untyped AddTool path above runs no per-call validation, so the flag would
+// change the published schema bytes and refuse nothing — a server-side no-op;
+// corrected by aihub#547). Setting it today would not even break the 1-in-5
+// callers: it would publish a refusal this server does not perform, which is
+// this file's defect pointed the other way.
+//
+// That falsifies phase 2 AS WRITTEN, not the two-phase split. A real phase 2
+// needs a mechanism the aihub#463 measurement leaves standing — what the code
+// shows today: per-call refusal in this server's own dispatch path (the
+// addTool wrapper already computes the exact unknown set this file
+// discloses), or migration to the generic AddTool[In, Out] registration,
+// where toolForErr wires resolved.Validate in front of the handler. aihub#431
+// carries the phase-2 plan and was written on the falsified sentence; its
+// plan must be re-derived from this measurement (aihub#547), not patched.
+// The gate is unchanged either way: no rejection until the
+// unpublished-argument share re-measures under 0.1%.
 //
 // ─── Shape: an entry in the EXISTING request_adjusted list ────────────────
 //

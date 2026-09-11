@@ -363,16 +363,20 @@ func TestAcquireLocksReportsEveryHeldLock(t *testing.T) {
 		// Plus a healthy path entry, as the control that "report everything"
 		// is not satisfied by reporting everything.
 		//
-		// ⚠️ `{"type":"path"}` with no uri would ALSO be reported, and is
-		// deliberately not the fixture used here. Measured on this tree:
-		// deriveClaimLocks turns it into file_scope `"<project>:"` — a real lock
-		// on a junk key — because fileScopeLockKey always emits the project
-		// prefix, so the `lockKey == ""` skip never fires for it. The report's
-		// wording ("acquires no lock") is therefore inaccurate for exactly that
-		// shape. That is a pre-existing property of UnrecognizedDeclaredResources
-		// and not aihub#509's to change — aihub#509 mirrors the claim path's
-		// report, it does not redefine it — but building this arm on it would
-		// pin the inaccuracy.
+		// ⚠️ `{"type":"path"}` with no uri would ALSO be reported. When this
+		// arm was written it was deliberately not the fixture, because the
+		// report then LIED about it — measured on that tree, deriveClaimLocks
+		// turned it into file_scope `"<project>:"`, a real lock on a junk key
+		// (fileScopeLockKey always emits the project prefix, so the
+		// `lockKey == ""` skip never fired), while the report's wording said
+		// "acquires no lock". aihub#509 mirrored the claim path's report rather
+		// than redefine it, so building this arm on that shape would have
+		// pinned the inaccuracy. aihub#524 closed it: resourceToLock now
+		// derives nothing from a uri that names no file, and the report says
+		// so. The fixture stays on `service` because this arm tests the two
+		// report shapes (unknown type, missing uri), not the #524 fix — that
+		// has its own pins, TestDerivationSkipsDegenerateFileKey and
+		// TestUnrecognizedDeclaredResources_ReportsSchemeOnlyURI.
 		const healthy = "internal/domain/healthy509.go"
 		_, err := pool.Exec(ctx,
 			`UPDATE work_items SET declared_resources = $1::jsonb WHERE id = $2`,

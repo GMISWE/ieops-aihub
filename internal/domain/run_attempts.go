@@ -333,11 +333,16 @@ func deriveClaimLocks(req *ClaimRequest, declaredResources json.RawMessage, proj
 		// reported the identical input as `info`, so the pre-claim gate
 		// had no predictive value at all.
 		lockType, lockKey, probe := derivedLockProbe(d, project)
-		// aihub#238: an empty key is possible from bad stored data (a
-		// `service`/`path` entry with no uri). Never insert it — the row is
-		// meaningless as a lock and would collide with every other empty-key
-		// row of the same type. Skipping keeps the wi claimable; the entry is
-		// reported via unrecognizedResources below rather than dropped silently.
+		// aihub#238: never insert a lock with an empty type or an empty key —
+		// the row would be meaningless as a lock and would collide with every
+		// other empty-key row of the same type. Skipping keeps the wi
+		// claimable; the entry is reported via unrecognizedResources below
+		// rather than dropped silently. On today's tree only the lockType
+		// clause can fire: unmappable entries, advisory repo/service
+		// (aihub#416) and a file uri naming nothing (aihub#524) all derive
+		// ("",""), and a derived file_scope key is non-empty by construction.
+		// The lockKey clause is belt-and-braces for the next lock type — see
+		// the ⚠️ on TestDerivationSkipsEmptyLockKey.
 		if lockType == "" || lockKey == "" {
 			continue
 		}
@@ -590,12 +595,15 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 	// aihub#238: validate the CLIENT-SUPPLIED locks, before the derivation block
 	// below can append server-derived entries to the same slice.
 	//
-	// Ordering is load-bearing. Validating the merged slice instead would apply
-	// input rules to server-derived entries, and derivation can legitimately
-	// produce a well-typed lock with an empty key from bad stored data — e.g. a
-	// stored {"type":"service"} with no uri maps to ("deploy_env", ""). That would
-	// 400 the claim and make an existing work item unclaimable, which is exactly
-	// the outcome this change exists to avoid.
+	// Ordering is load-bearing as a structural rule: input rules must never
+	// apply to server-derived entries. The failure was concrete when this was
+	// written — a stored {"type":"service"} with no uri derived ("deploy_env",""),
+	// whose empty resource_key would 400 the claim and make an existing work
+	// item unclaimable. Since aihub#416 (repo/service derive nothing) and
+	// aihub#524 (a file uri naming nothing derives nothing) every entry the
+	// derivation can still produce passes the input rules, so there is no
+	// constructible counterexample today; the order is kept because the next
+	// derived lock type reintroduces one the moment it flips.
 	if aihubErr := ValidateRequestedLocks(req.RequestedLocks); aihubErr != nil {
 		return nil, aihubErr
 	}

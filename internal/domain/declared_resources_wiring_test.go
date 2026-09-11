@@ -146,10 +146,18 @@ func TestClaimValidatesRequestedLocksAndReportsUnrecognized(t *testing.T) {
 // that derives locks from stored declared_resources, so input rules never apply
 // to server-derived entries.
 //
-// Concrete failure if the order flips: a stored {"type":"service"} with no uri
-// derives ("deploy_env", ""), the empty resource_key fails validation, and the
-// claim returns 400 — an existing work item becomes unclaimable, the exact
-// outcome this change exists to prevent.
+// The concrete failure that motivated the ordering is HISTORY, and is framed as
+// such here for the same reason the aihub#416 note further down frames its
+// example: pre-#416, a stored {"type":"service"} with no uri derived
+// ("deploy_env", ""), the empty resource_key failed validation, and the claim
+// returned 400 — an existing work item became unclaimable, the exact outcome
+// aihub#238 exists to prevent. On today's tree that shape is not constructible:
+// repo/service derive nothing at all (aihub#416), a file uri naming nothing
+// derives nothing either (aihub#524), and the only derivation left emits
+// file_scope keys that always pass the input rules. The ordering stays guarded
+// anyway, because "input rules never apply to server-derived entries" is
+// structural — the next derived lock type reintroduces the failure the moment
+// the order flips.
 //
 // aihub#356 moved the derivation loop out of FnClaimWorkItem into
 // deriveClaimLocks so it could be tested without a pool, so the second anchor is
@@ -188,9 +196,11 @@ func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 }
 
 // The derivation loop must skip an empty lock key as well as an empty lock type.
-// resourceToLock({Type:"service"}, p) returns ("deploy_env", "") — a well-typed
-// lock with a meaningless key that would collide with every other empty-key row
-// of the same type.
+// resourceToLock({Type:"service"}, p) returned ("deploy_env", "") until
+// aihub#416 — a well-typed lock with a meaningless key that would have collided
+// with every other empty-key row of the same type. (Today it returns ("", "");
+// the ⚠️ below records how #416 moved this case between the guard's two
+// clauses, and the fixture keeps the service entry so the outcome stays pinned.)
 //
 // This was a source scan while the loop was inline in FnClaimWorkItem and only
 // reachable through a *pgxpool.Pool. aihub#356 extracted deriveClaimLocks, so it
@@ -228,6 +238,11 @@ func TestRequestedLocksValidatedBeforeServerSideDerivation(t *testing.T) {
 // least "<project>:", so a derived key cannot be empty. That clause is now
 // belt-and-braces — do not delete it (a future lock type could reintroduce the
 // case), but do not read this test as covering it either.
+//
+// ⚠️ That "<project>:" minimum had a second edge, closed by aihub#524: a file
+// uri naming nothing used to derive a REAL lock on exactly that floor, because
+// the non-empty prefix defeated the empty-key skip. resourceToLock now refuses
+// it — TestDerivationSkipsDegenerateFileKey below is the pin.
 func TestDerivationSkipsEmptyLockKey(t *testing.T) {
 	req := &ClaimRequest{}
 	probes := deriveClaimLocks(req,
@@ -246,6 +261,40 @@ func TestDerivationSkipsEmptyLockKey(t *testing.T) {
 	// still has to derive, or "skips empty keys" is satisfied by deriving nothing.
 	if len(locks) != 1 || locks[0].ResourceKey != "aihub:internal/a.go" {
 		t.Fatalf("locks = %+v, want exactly the one well-formed file_scope entry", locks)
+	}
+	if len(probes) != len(locks) {
+		t.Errorf("probes (%d) and locks (%d) went out of step — lockProbes[i] no longer pairs with RequestedLocks[i] (aihub#261)", len(probes), len(locks))
+	}
+}
+
+// A file-type declaration whose uri names no file — absent entirely, or a bare
+// "file:" scheme with nothing after it — must derive NO lock. Until aihub#524 it
+// derived a real one: fileScopeLockKey prefixes the project unconditionally, so
+// the empty path became the non-empty key "aihub:", slipped past the
+// lockKey == "" skip in deriveClaimLocks, was inserted, listed in
+// acquired_locks, and hard-blocked every other degenerate declaration in the
+// project — while UnrecognizedDeclaredResources reported the same entry as
+// acquiring no lock. This is the behavioural pin on the fix: reverting the
+// degenerate-uri guard in resourceToLock turns it red on both shapes.
+func TestDerivationSkipsDegenerateFileKey(t *testing.T) {
+	req := &ClaimRequest{}
+	probes := deriveClaimLocks(req,
+		json.RawMessage(`[{"type":"path","intent":"write"},
+		                  {"type":"document","uri":"file:","intent":"write"},
+		                  {"type":"path","uri":"file:internal/a.go","intent":"write"}]`),
+		"aihub")
+	locks := req.RequestedLocks
+	for _, l := range locks {
+		if l.ResourceKey == "aihub:" {
+			t.Errorf("a file-type declaration naming no file derived the degenerate key %q (type %q) — "+
+				"a real row that guards nothing, collides with every other no-uri declaration in the "+
+				"project, and contradicts the unrecognized_resources report for the same entry (aihub#524)",
+				l.ResourceKey, l.ResourceType)
+		}
+	}
+	if len(locks) != 1 || locks[0].ResourceKey != "aihub:internal/a.go" {
+		t.Fatalf("locks = %+v, want exactly the one well-formed file_scope entry — the degenerate skip "+
+			"must not become a blanket refusal", locks)
 	}
 	if len(probes) != len(locks) {
 		t.Errorf("probes (%d) and locks (%d) went out of step — lockProbes[i] no longer pairs with RequestedLocks[i] (aihub#261)", len(probes), len(locks))

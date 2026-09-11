@@ -180,7 +180,7 @@ Admin only.
 
 | tool | purpose |
 |---|---|
-| `pf_list_users` | List all users. |
+| `pf_list_users` | List the 100 newest users by creation time; no cursor, no total. |
 | `pf_create_user` | Create a user (human or machine). |
 | `pf_update_user` | Update a user's display name or role. |
 | `pf_create_api_key` | Create an API key for a user (returned once). |

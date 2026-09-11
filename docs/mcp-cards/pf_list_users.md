@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_list_users",
-  "description_sha256": "d8564a746756c623768dd2d6908a689083aa77434ffe236548bfaaacbf521f6e",
+  "description_sha256": "3619e515bb88562311dd225c2f1874286333aeb92e6b99a846ec89ab45e0b50a",
   "input_schema_sha256": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
   "params": {},
   "response_keys_observed": [
@@ -15,7 +15,15 @@
 
 ## hop 0-1 — what the caller is told
 
-Zero parameters — `emptyObjectSchema()`. "List all users (**admin only**)."
+Zero parameters — `emptyObjectSchema()`. "List the 100 newest users by creation
+time (**admin only**). No pagination: no cursor, no total, rows past the cap are
+silently omitted."
+
+Until 2026-09-11 the description said "List all users" — measured false past a
+hundred users, since the query is capped and unpaginated (aihub#596; the cap, the
+ordering and the absence of a cursor are the hop-4 facts below, held by
+`internal/server/list_users_response_shape_test.go`). The description now carries
+the cap and the ordering itself instead of promising totality.
 
 There is no parameter table because there is nothing to tabulate, so every property
 of this tool is at hops 3-5.

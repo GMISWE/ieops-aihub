@@ -315,6 +315,39 @@ func TestDiffWithoutTheClaimMapNeedsWorkspaceRootAndProjectAndSlug(t *testing.T)
 //	M36 GitDiff always diffs origin/HEAD...HEAD              RED
 //	M37 the handler stops forwarding vs_base                 RED
 //	M38 green control: reword the parameter description       GREEN
+//
+// ─── Known flake, unreproduced (recorded 2026-09-11, aihub#593) ─────────────
+//
+// This test failed EXACTLY ONCE, in CI run 34497662093 attempt 1 (2026-09-10,
+// PR #477, a diff with zero overlap with pf_diff): the aihub#303 coverage
+// gate's DB-free inventory rerun reported `"Action":"fail" ... "Elapsed":0.07`
+// while the Unit tests step of the SAME run (same test set — AIHUB_TEST_DB is
+// unset in both — plus -race) passed, and `gh run rerun --failed` was green.
+// The step discarded the test's own output with the rest of the inventory, so
+// the failing line is unknown; the ci.yml failure branch now prints failing
+// tests' output (aihub#593) so a recurrence will carry its message.
+//
+// What was measured while trying to reproduce it (2026-09-11): 0 failures in
+// over 280 runs — 20 isolated, 200 under a saturated 12-core machine with the
+// prebuilt test binary, and 60+ full `go test ./... -count=1 -json` suite runs
+// in the exact inventory shape (half DB-free, half with a database). The only
+// signal left is the elapsed time: a passing run takes ~0.2s on an UNLOADED
+// fast machine (12 git subprocesses before the two MCP calls), so 0.07s on a
+// loaded 4-core CI runner means the test died EARLY — in newDiffRepo's first
+// git commands or newResolveWorkspace, i.e. an environmental fixture failure,
+// not one of the assertion arms. That is an inference from timing, not a
+// confirmed cause.
+//
+// Rerun criterion (explicit, instead of a silent rerun habit): a failure of
+// this test may be cleared with `gh run rerun --failed` ONLY when all three
+// hold — (1) the same run's Unit tests step passed, (2) the PR's diff touches
+// neither internal/mcp, internal/coding, nor docs/mcp-cards/pf_diff.md, and
+// (3) the output the coverage-gate step now prints shows a fixture/environment
+// failure (a `git ...` t.Fatalf from newDiffRepo/runGit, a TempDir or connect
+// error) rather than an assertion arm. Capture that printed output on the wi
+// that owns the change BEFORE rerunning; if the output shows an assertion arm,
+// or the flake recurs even once more, do not rerun — reopen the aihub#593
+// investigation with the new artifact.
 func TestDiffVsBaseComparesTheBaseBranchAndTheDefaultComparesHead(t *testing.T) {
 	newResolveWorkspace(t)
 	r := newDiffRepo(t, "wt")

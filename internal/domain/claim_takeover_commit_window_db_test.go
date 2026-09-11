@@ -103,7 +103,19 @@ import (
 // on its way in would leave the race testing nothing.
 func cwRunningAttemptWithoutLocks(t *testing.T, pool *pgxpool.Pool, uid, wiID, idem string) string {
 	t.Helper()
-	resp, aerr := ftsClaim(t, pool, uid, wiID, idem, false)
+	// aihub#593 (2026-09-11): through retryOnSerializationConflict, like the
+	// fixture claims aihub#492 already converted. Measured before the wrap, on
+	// the full-suite-with-database shape that wrapper's header describes (another
+	// package's DB-gated binary against the same database): 2 of 60 runs of
+	// TestForceTakeoverCommitWindowDisplacesALiveForeignLock lost THIS claim to
+	// an SSI race (SQLSTATE 40001, "failed to insert run_attempt" / "failed to
+	// upsert wi_step_state") and died on the require below. Production callers
+	// of this exact 409 are told {retryable:true} — a fixture that treats it as
+	// fatal holds the test to a weaker standard than the contract it drives.
+	resp, aerr := retryOnSerializationConflict(t, "fixture claim of "+wiID,
+		func() (*ClaimResponse, *AihubError) {
+			return ftsClaim(t, pool, uid, wiID, idem, false)
+		})
 	require.Nil(t, aerr, "fixture claim of %s must succeed", wiID)
 	require.Empty(t, fileScopeKeys(resp.AcquiredLocks),
 		"the fixture needs this attempt holding no file_scope lock; it took %v",

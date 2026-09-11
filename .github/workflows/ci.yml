@@ -1356,6 +1356,29 @@ jobs:
             # no-match grep under `set -e -o pipefail` would abort here and
             # swallow the explicit exit below.
             grep -F -e '"Action":"fail"' -e '"Action":"build-fail"' "$inventory" | head -20 || true
+            # aihub#593: the fail lines above carry the test's NAME and elapsed
+            # but not its FAILURE MESSAGE — the output actions stay in $inventory,
+            # which this branch used to discard. On 2026-09-10 that made the one
+            # observed flake here (TestDiffVsBaseComparesTheBaseBranchAndThe
+            # DefaultComparesHead, 0.07s, rerun green) unattributable: nothing
+            # recorded WHICH line failed. Print the failing tests' own output so
+            # the next one carries its message. One jq program rather than a
+            # shell loop, because dbtestcov's asserted-names audit fail-closes on
+            # a `for … in $(…)` whose word list it cannot read
+            # (TestCheckAssertedNames_RealCIWorkflow), and it audits this file.
+            # Bounded (first 5 failing tests, last 500 lines) and `|| true` for
+            # the same reason as the grep above. The rerun criterion for that
+            # known flake lives on the test's doc comment in
+            # internal/mcp/diff_result_shape_test.go — read it before reaching
+            # for `gh run rerun --failed`.
+            jq -rs '
+              ([ .[] | select(.Action=="fail" and .Test != null)
+                 | .Package + "." + .Test ] | unique | .[0:5]) as $bad
+              | .[]
+              | select(.Action=="output" and .Test != null)
+              | (.Package + "." + .Test) as $k
+              | select($bad | index($k))
+              | .Output' "$inventory" | tail -500 || true
             exit 1
           fi
           go run ./internal/citest/dbtestcov \

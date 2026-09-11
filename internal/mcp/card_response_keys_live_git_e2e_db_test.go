@@ -272,18 +272,28 @@ func (fx *liveGitFixture) remoteSHA(t *testing.T, branch string) string {
 // in. Nothing about the tools' behaviour is faked by it — the attempt id, claim
 // epoch and session secret the lock gate and complete_attempt authenticate with
 // are the ones the server minted.
-func adoptLiveGitWorktree(t *testing.T, wiID, repo, wt string) {
+func adoptLiveGitWorktree(t *testing.T, w *liveKeyWalk, wiID, repo, wt string) {
 	t.Helper()
 	sf, err := config.ResolveStateFile(wiID)
 	if err != nil {
 		t.Fatalf("resolve the state file pf_claim_work_item wrote for %s: %v — without it none of "+
-			"the six git tools can resolve a worktree and K10 reports on 39 of 45 tools", wiID, err)
+			"the six git tools can resolve a worktree and K10 reports on 39 of 45 tools. "+
+			"pf_claim_work_item refusals this run: %v", wiID, err, w.failed["pf_claim_work_item"])
 	}
 	if sf.AttemptID == "" || sf.SessionSecret == "" {
+		// aihub#593 (2026-09-11): the refusal list is in this message because the
+		// one time this fired in the wild (2026-09-10, aihub#587's lane) it read
+		// as a state-file defect and had to be root-caused from scratch. What it
+		// actually means is that the claim drive above did not succeed — the
+		// stub keyed by wiID, with a secret and no attempt_id, is what
+		// pf_claim_work_item writes BEFORE the server answers — and the refusal
+		// the walk recorded is the answer to why (measured cause that day: a
+		// retryable serialization 409, since retried by driveResult).
 		t.Fatalf("the state file for %s carries no attempt credentials (attempt_id=%q, secret set=%v); "+
 			"pf_commit's lock gate and pf_wrap's complete_attempt authenticate with them, so a walk "+
-			"past this point would be measuring the failure path",
-			wiID, sf.AttemptID, sf.SessionSecret != "")
+			"past this point would be measuring the failure path. The claim drive above must have "+
+			"been refused — pf_claim_work_item refusals this run: %v",
+			wiID, sf.AttemptID, sf.SessionSecret != "", w.failed["pf_claim_work_item"])
 	}
 	sf.Worktrees = map[string]string{repo: wt}
 	if err := config.WriteStateFile(sf); err != nil {
@@ -330,7 +340,7 @@ func runLiveGitKeyWalk(t *testing.T, w *liveKeyWalk) {
 	w.drive(t, "pf_claim_work_item", map[string]any{
 		"work_item_id": wiID, "idempotency_key": fmt.Sprintf("livekeys-git-%d", stamp),
 	})
-	adoptLiveGitWorktree(t, wiID, liveGitRepoName, fx.wt)
+	adoptLiveGitWorktree(t, w, wiID, liveGitRepoName, fx.wt)
 
 	base := map[string]any{"work_item_id": wiID, "repo": liveGitRepoName}
 	args := func(extra map[string]any) map[string]any {

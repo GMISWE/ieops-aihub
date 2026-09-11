@@ -3421,6 +3421,19 @@ HTTP 409
   CONFLICT_SERIALIZATION_FAILURE  Postgres class 40 事务回滚（40001 序列化失败 / 40P01 死锁）：
                                   服务端正常、请求合法，只是这个事务输掉了并发竞争，重试即可
                                   （aihub#334；此前漏成 500 INTERNAL_ERROR）
+                                  -- 出处链（同类「吞掉 40001」站点的后续扫荡，按合入日期）：
+                                  --   2026-09-09 aihub#492（PR #436）：claim / complete-attempt
+                                  --     事务内六处 fire-and-forget 语句吞掉 class-40 回滚，让
+                                  --     tx.Commit 只能报不可分类的 500；internal/domain/pgx_err.go
+                                  --     新增 bestEffortExec 收编六处，另给 FnClaimWorkItem 两处
+                                  --     read-past 站点加 retryConflictErr 前置过滤
+                                  --   2026-09-11 aihub#545（PR #497）：此前按写法（而非按性质）
+                                  --     扫荡漏掉的 internal/domain/run_attempts.go 三站点 ——
+                                  --     fnForceTerminateStep 开头的当前 step 读、FnCompleteAttempt
+                                  --     的 wi_step_state 读、verifyAttemptCredential 的心跳 UPDATE
+                                  --   2026-09-11 aihub#548（PR #496）：GetReadyQueue 七个段的
+                                  --     send-time（pool.Query）错误守卫由裸 NewErr 改走 dbErr；
+                                  --     该路径不开事务，#334 的守卫够不到它
                                   details: {retryable: true, sqlstate: "40001"|"40P01"}
 
 HTTP 412

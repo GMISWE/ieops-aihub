@@ -241,7 +241,7 @@ func TestTakeoverRaceQualifierIsUniqueAcrossThePublishedSurface(t *testing.T) {
 				"card's quote — force_takeover_published_word_test.go reddens the same day, and "+
 				"the two must be fixed together. TWO or more means \"lives here and only here\" "+
 				"is false as published: aihub#430 measured why the same sentence is untrue on "+
-				"the claim path (SERIALIZABLE there, READ COMMITTED here), so a copy is not a "+
+				"the claim path (SERIALIZABLE there, an unpinned bare pool.Begin here), so a copy is not a "+
 				"clarification, it is a wrong guarantee on whichever tool now carries it. "+
 				"Delete the copy rather than re-pinning this census.",
 				clause, len(hits), strings.Join(lines, "\n"))

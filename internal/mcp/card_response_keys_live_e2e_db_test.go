@@ -254,6 +254,28 @@ func (w *liveKeyWalk) drive(t *testing.T, tool string, args map[string]any) map[
 func (w *liveKeyWalk) driveResult(t *testing.T, tool string, args map[string]any) (string, map[string]any) {
 	t.Helper()
 	text, isErr := w.s.callAllowingError(t, tool, args)
+	// aihub#593 (2026-09-11): a refusal whose code is the typed retryable
+	// serialization 409 is not fixture drift — it is the server keeping its own
+	// contract ("the transaction was rolled back ... retry the request") after
+	// losing an SSI race to another DB-gated test binary on the same database,
+	// the cross-package shape internal/domain's serialization_retry_test.go
+	// header documents. Measured across 40 walk runs under that load: 5 died
+	// this way, at four different legs — pf_claim_work_item (the state file
+	// then carries no attempt credentials and adoptLiveGitWorktree fails),
+	// pf_complete_attempt and pf_wrap (K10 then reports REACH_GAP /
+	// GIT_WALK_GAP for a tool the server refused once), and pf_ship (the
+	// in-band `ok:false` shape e2eRetryableSerializationRefusal documents).
+	// Retrying on the CODE, bounded like serializationRetryAttempts, is what
+	// every production caller of these tools is told to do; recording the
+	// refusal as final held this walk to a weaker standard. Nothing observable
+	// is weakened: a 40001 means the transaction rolled back, so the retried
+	// call is the same request against the same state.
+	for attempt := 1; e2eRetryableSerializationRefusal(text, isErr) &&
+		attempt < e2eSerializationRetries; attempt++ {
+		t.Logf("%s: attempt %d lost an SSI race, retrying: %s", tool, attempt, liveKeysAbbrev(text))
+		time.Sleep(time.Duration(attempt) * 2 * time.Millisecond)
+		text, isErr = w.s.callAllowingError(t, tool, args)
+	}
 	if isErr {
 		w.failed[tool] = append(w.failed[tool], liveKeysAbbrev(text))
 		return text, nil

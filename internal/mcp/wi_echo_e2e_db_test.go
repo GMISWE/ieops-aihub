@@ -43,15 +43,19 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/auth"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 	"github.com/GMISWE/ieops-aihub/internal/mcp"
 	"github.com/GMISWE/ieops-aihub/internal/server"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
@@ -62,6 +66,47 @@ import (
 // regression hide inside the fixed part of the record.
 var e2eContent = "## Spec\n\n" + strings.Repeat(
 	"A paragraph of the sort a spec or plan artifact carries, long enough to matter. ", 50)
+
+// e2eSerializationRetries bounds the retries below on the typed retryable
+// serialization 409 — same value and same reason as internal/domain's
+// serializationRetryAttempts (aihub#492): the contender is another test
+// binary's short-lived transaction, so a handful of attempts is plenty, and
+// the bound keeps a PERMANENT 40001 visible as the refusal it is instead of
+// looping on it.
+const e2eSerializationRetries = 8
+
+// e2eRetryableSerializationRefusal reports whether one call's result is the
+// typed retryable serialization refusal, in EITHER of the two shapes the tools
+// answer it with — both measured under cross-binary DB load (aihub#593,
+// 2026-09-11):
+//
+//   - an MCP error result carrying the 409 (most tools; pf_claim_work_item,
+//     pf_complete_attempt and pf_wrap were each caught answering this way);
+//   - a SUCCESSFUL JSON result from a chain tool that stopped fail-closed with
+//     the 409 embedded — pf_ship was caught answering `ok:false, stage:commit,
+//     lock_gate:could_not_run` with "failed to list held locks: ... SQLSTATE
+//     40001" inside, and its own advice field says "retry pf_ship with the
+//     same arguments" because the files are still staged.
+//
+// Both mean the same thing: the transaction rolled back, nothing was
+// committed, and the identical request is safe to resend. The `ok:false`
+// requirement on the non-error shape is what keeps a tool that merely ECHOES
+// this string in caller-supplied content (a memory body, a goal) from being
+// re-driven for no reason.
+func e2eRetryableSerializationRefusal(text string, isErr bool) bool {
+	if !strings.Contains(text, string(domain.ErrConflictSerializationFailure)) {
+		return false
+	}
+	if isErr {
+		return true
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return false
+	}
+	okVal, present := decoded["ok"].(bool)
+	return present && !okVal
+}
 
 // e2eStack is one wired-up copy of the real thing: migrated DB, real router,
 // real client, real MCP server.
@@ -120,16 +165,59 @@ func newE2EStack(t *testing.T) *e2eStack {
 	// CreateWorkItem runs goal-similarity dedup against live work items in the
 	// project, so a previous run's rows would reject this run's create. Clear
 	// child-to-parent, the order seedStepTestWI uses.
+	//
+	// resource_locks goes before run_attempts, explicitly, for the reason
+	// internal/domain's resetTestProject states: its FK to run_attempts is ON
+	// DELETE RESTRICT, so a leftover lock BLOCKS the cleanup of the attempt that
+	// owns it. This project is SHARED by every test on this stack, and the
+	// live-keys walk really does take file_scope locks in it (pf_commit's lock
+	// gate). Measured 2026-09-11 (aihub#593): one walk run that died mid-way
+	// left its running attempt holding two locks, and every later run of every
+	// test on this stack then failed HERE with SQLSTATE 23001 — 15+ failures per
+	// full-suite run, durable until someone deleted the rows by hand.
 	for _, q := range []string{
 		`DELETE FROM wi_step_completions WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
 		`DELETE FROM agent_events WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
 		`DELETE FROM wi_step_state WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
 		`UPDATE work_items SET current_attempt_id=NULL WHERE project=$1`,
+		`DELETE FROM resource_locks WHERE owner_attempt_id IN (SELECT id FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1))`,
 		`DELETE FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
 		`DELETE FROM memories WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`,
 		`DELETE FROM work_items WHERE project=$1`,
 	} {
-		if _, err := pool.Exec(ctx, q, project); err != nil {
+		// Two retryable interference classes from OTHER test binaries sharing
+		// this database, both measured during aihub#593 (2026-09-11), each
+		// killing every test on this stack for that run:
+		//
+		//   - class 40 (40001 above READ COMMITTED, 40P01 — a deadlock victim —
+		//     at any level): Postgres rolled the statement's transaction back
+		//     precisely so it can be re-run. 1 of 20 full-suite-with-database
+		//     runs lost the work_items delete to a 40P01.
+		//   - 55000 "cannot delete from view resource_locks" / 42P01 "relation
+		//     resource_locks does not exist": internal/domain's
+		//     TestClaimProbeFailureReachesTheCallerAsARetryable409 swaps that
+		//     TABLE for a poison view for the duration of its run (≤0.23s
+		//     measured) and restores it; 42P01 is the instant between its
+		//     RENAME and its CREATE VIEW. 2 of 10 full-suite runs landed the
+		//     resource_locks delete inside that window.
+		//
+		// The backoff is sized to OUTLAST the poison window, not just a commit:
+		// 50ms × attempt over 8 attempts sleeps up to 1.4s against a ≤0.23s
+		// window. A permanent error of any of these codes still surfaces
+		// through the Fatalf below when the bound runs out.
+		var err error
+		for attempt := 1; attempt <= e2eSerializationRetries; attempt++ {
+			_, err = pool.Exec(ctx, q, project)
+			var pgErr *pgconn.PgError
+			if err == nil || !errors.As(err, &pgErr) ||
+				(pgErr.Code != "40001" && pgErr.Code != "40P01" &&
+					pgErr.Code != "55000" && pgErr.Code != "42P01") {
+				break
+			}
+			t.Logf("clean fixture (%s): attempt %d lost a cross-binary race (%s), retrying", q, attempt, pgErr.Code)
+			time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+		}
+		if err != nil {
 			t.Fatalf("clean fixture (%s): %v", q, err)
 		}
 	}
@@ -162,22 +250,30 @@ func newE2EStack(t *testing.T) *e2eStack {
 // call invokes a tool and returns the response text and its decoded form.
 func (s *e2eStack) call(t *testing.T, tool string, args map[string]any) (string, map[string]any) {
 	t.Helper()
-	res, err := s.session.CallTool(context.Background(), &sdkmcp.CallToolParams{Name: tool, Arguments: args})
-	if err != nil {
-		t.Fatalf("call %s: %v", tool, err)
+	text, isErr := s.callAllowingError(t, tool, args)
+	// aihub#593 (2026-09-11): the typed retryable serialization 409 is retried
+	// before the Fatalf below, for the reason e2eRetryableSerializationRefusal
+	// states — the server answers it BECAUSE the identical request is safe to
+	// resend, and every production caller is told to. Measured under
+	// cross-binary DB load: 1 of 20 full-suite-with-database runs lost
+	// pf_claim_work_item in TestE2EClaimWithANewKeyMintsAFreshSecret to it and
+	// this function reported the retryable refusal as a fatal harness failure.
+	// A PERMANENT refusal still surfaces: the bound runs out and the Fatalf
+	// below carries the same message it always did.
+	for attempt := 1; e2eRetryableSerializationRefusal(text, isErr) &&
+		attempt < e2eSerializationRetries; attempt++ {
+		t.Logf("%s: attempt %d lost an SSI race, retrying: %s", tool, attempt, text)
+		time.Sleep(time.Duration(attempt) * 2 * time.Millisecond)
+		text, isErr = s.callAllowingError(t, tool, args)
 	}
-	text, ok := res.Content[0].(*sdkmcp.TextContent)
-	if !ok {
-		t.Fatalf("call %s returned %T, want TextContent", tool, res.Content[0])
-	}
-	if res.IsError {
-		t.Fatalf("call %s failed: %s", tool, text.Text)
+	if isErr {
+		t.Fatalf("call %s failed: %s", tool, text)
 	}
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(text.Text), &decoded); err != nil {
-		t.Fatalf("call %s output is not JSON: %v (%q)", tool, err, text.Text)
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatalf("call %s output is not JSON: %v (%q)", tool, err, text)
 	}
-	return text.Text, decoded
+	return text, decoded
 }
 
 // TestE2EWorkItemContentEchoAgainstARealServer walks a real create and a real

@@ -55,6 +55,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 // callAllowingError invokes a tool and returns its text plus whether the tool
@@ -107,13 +108,29 @@ func claimedWorkItem(t *testing.T, s *e2eStack) string {
 	}
 	secret := hex.EncodeToString(secretBytes)
 
-	claimed, err := s.client.ClaimWorkItem(ctx, wiID, map[string]any{
-		"idempotency_key": fmt.Sprintf("idem-%d", time.Now().UnixNano()),
-		"session_info": map[string]any{
-			"machine_id":     "m_reinforce_e2e",
-			"session_secret": secret,
-		},
-	})
+	// aihub#593 (2026-09-11): the typed retryable serialization 409 is retried,
+	// for the reason e2eRetryableSerializationRefusal states. Measured under
+	// cross-binary DB load: 1 of 20 full-suite-with-database runs lost THIS
+	// claim to it (SQLSTATE 40001, "failed to read prior step state") and
+	// Fatal'd. The idempotency key is hoisted so every retry replays the SAME
+	// claim rather than minting a second attempt.
+	idem := fmt.Sprintf("idem-%d", time.Now().UnixNano())
+	var claimed map[string]any
+	for attempt := 1; ; attempt++ {
+		claimed, err = s.client.ClaimWorkItem(ctx, wiID, map[string]any{
+			"idempotency_key": idem,
+			"session_info": map[string]any{
+				"machine_id":     "m_reinforce_e2e",
+				"session_secret": secret,
+			},
+		})
+		if err == nil || attempt == e2eSerializationRetries ||
+			!strings.Contains(err.Error(), string(domain.ErrConflictSerializationFailure)) {
+			break
+		}
+		t.Logf("claim work item: attempt %d lost an SSI race, retrying: %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * 2 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("claim work item: %v", err)
 	}

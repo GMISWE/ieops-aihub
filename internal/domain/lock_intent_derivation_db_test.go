@@ -137,14 +137,23 @@ func claimFresh(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string) 
 // that the row is created the way production creates it.
 func claimFreshWithLocks(t *testing.T, pool *pgxpool.Pool, wiID, userID, idemKey string, locks []ResourceLockReq) *ClaimResponse {
 	t.Helper()
-	resp, aerr := FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
-		IdempotencyKey: idemKey,
-		RequestedLocks: locks,
-		SessionInfo: SessionInfo{
-			MachineID:     "m_locktest",
-			SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
-		},
-	}, userID, "", "tester")
+	// aihub#593 (2026-09-11): through retryOnSerializationConflict, for
+	// aihub#492's reason. Measured during that wi's stress runs: 1 of 10
+	// full-suite-with-database runs lost this fixture claim to an SSI race
+	// (SQLSTATE 40001, "failed to emit attempt_started event") while another
+	// package's DB-gated binary ran against the same database, and
+	// TestReadIntentTakesNoWriteLock died on the require below.
+	resp, aerr := retryOnSerializationConflict(t, "fixture claim of "+wiID,
+		func() (*ClaimResponse, *AihubError) {
+			return FnClaimWorkItem(context.Background(), pool, wiID, &ClaimRequest{
+				IdempotencyKey: idemKey,
+				RequestedLocks: locks,
+				SessionInfo: SessionInfo{
+					MachineID:     "m_locktest",
+					SessionSecret: "locktest-secret-0123456789abcdef0123456789abcdef0123456789ab",
+				},
+			}, userID, "", "tester")
+		})
 	require.Nil(t, aerr, "claim failed: %+v", aerr)
 	return resp
 }

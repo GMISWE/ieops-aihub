@@ -23,6 +23,18 @@ package domain
 // count itself is owned by internal/mcp/ready_queue_section_count_test.go; the
 // number appears here only as a floor for the scanner, not as a second authority
 // on how many segments exist.
+//
+// aihub#548 added one rule to the same scanner: the answer must CLASSIFY, not
+// just return. #500's five new guards were written as bare
+// NewErr(ErrInternalError, …) while the rows.Err() branch of the same segment
+// returns dbErrCause — so a class-40 rollback (SQLSTATE 40001/40P01) was a
+// retryable 409 on one error path and a 500 on the other, for the same
+// underlying condition. That is #500's own defect one axis over: the segment
+// disagreed WITH ITSELF about what a rollback means. The rule reuses the
+// conflictClassifiers set from retryable_conflict_guard_test.go rather than
+// naming dbErr here, so a classifier added there is accepted here without an
+// edit — the aihub#334 guard itself cannot cover this function, because it is
+// scoped to transactional functions and GetReadyQueue opens no transaction.
 
 import (
 	"fmt"
@@ -41,7 +53,7 @@ type queryErrViolation struct {
 }
 
 // scanQueryErrorHandling reports every `X, e := <recv>.Query(…)` in fn whose
-// error is not immediately checked with `e != nil` and returned.
+// error is not immediately checked with `e != nil`, returned, and classified.
 //
 // "Immediately" is the whole rule and is stricter than "eventually checked". A
 // checker that accepted the error being consulted anywhere later in the function
@@ -49,6 +61,12 @@ type queryErrViolation struct {
 // because that also consults it. The compliant shape puts the guard in the
 // statement directly after the call, which is what both untouched segments
 // (items[], running[]) already did.
+//
+// "Classified" (aihub#548) means the branch consults one of the class-40
+// classifiers (dbErr/dbErrCause/retryConflictErr/pgxErr — the
+// conflictClassifiers set), the same question the segment's own rows.Err()
+// branch already asks via dbErrCause. A bare NewErr(ErrInternalError, …) here
+// answers a lost concurrency race with "the server is broken".
 func scanQueryErrorHandling(fn *ast.FuncDecl, fset *token.FileSet) (sites int, violations []queryErrViolation) {
 	var walk func(stmts []ast.Stmt)
 	walk = func(stmts []ast.Stmt) {
@@ -137,6 +155,16 @@ func scanQueryErrorHandling(fn *ast.FuncDecl, fset *token.FileSet) (sites int, v
 			if !endsInReturn(ifs.Body.List) {
 				violations = append(violations, queryErrViolation{line, rowsName,
 					"the `" + errIdent.Name + " != nil` branch does not return, so the failure falls through"})
+				continue
+			}
+			// aihub#548: the branch must also consult a class-40 classifier.
+			// callsClassifier and conflictClassifiers live in
+			// retryable_conflict_guard_test.go, same package.
+			if !callsClassifier(ifs) {
+				violations = append(violations, queryErrViolation{line, rowsName,
+					"the `" + errIdent.Name + " != nil` branch returns without consulting a class-40 classifier " +
+						"(dbErr/dbErrCause/retryConflictErr), so a serialization rollback answers 500 while the " +
+						"same segment's rows.Err() branch answers the retryable 409 for the same condition"})
 			}
 		}
 	}
@@ -161,16 +189,20 @@ func TestReadyQueueAnswersEveryQueryError(t *testing.T) {
 
 	for _, v := range violations {
 		t.Errorf("work_items.go:%d GetReadyQueue: rows %q — %s\n"+
-			"    Every segment's pool.Query error must be answered by the statement right after it:\n"+
+			"    Every segment's pool.Query error must be answered by the statement right after it,\n"+
+			"    through the class-40 classifier (aihub#548):\n"+
 			"        rows, err := pool.Query(ctx, `…`, project)\n"+
 			"        if err != nil {\n"+
-			"            return nil, NewErr(ErrInternalError, \"failed to query <segment> items\")\n"+
+			"            return nil, dbErr(err, \"failed to query <segment> items\")\n"+
 			"        }\n"+
 			"    Swallowing it renders that segment as an empty list inside an HTTP 200, which is\n"+
 			"    indistinguishable from the segment genuinely being empty — the same silent-empty\n"+
 			"    shape aihub#449 removed from this response when it dropped stale_running's\n"+
-			"    `omitempty`. If some segment ever really should be best-effort, that also has to\n"+
-			"    downgrade its rows.Err() branch twelve lines below, and internal/citest/rowserr\n"+
+			"    `omitempty`. And answering with a bare NewErr(ErrInternalError, …) reports a\n"+
+			"    class-40 rollback as \"the server is broken\" while the same segment's rows.Err()\n"+
+			"    branch answers the retryable 409 — dbErr is byte-identical to the bare NewErr for\n"+
+			"    every other error. If some segment ever really should be best-effort, that also has\n"+
+			"    to downgrade its rows.Err() branch twelve lines below, and internal/citest/rowserr\n"+
 			"    exists to stop exactly that — so bring a ruling, not an exemption.",
 			v.Line, v.Rows, v.Why)
 	}
@@ -243,6 +275,19 @@ func TestQueryErrorScannerRejectsTheShapeItWasWrittenFor(t *testing.T) {
 			}
 		}`,
 		want: "not an `if`",
+	}, {
+		// The exact shape aihub#500 left behind and aihub#548 exists to reject:
+		// guarded, returning, and reporting a class-40 rollback as a 500.
+		name: "guarded and returns, but bare NewErr instead of the classifier",
+		src: `func f() {
+			rows, err := pool.Query(ctx, "SELECT 1")
+			if err != nil {
+				return nil, NewErr(ErrInternalError, "failed to query things")
+			}
+			for rows.Next() {
+			}
+		}`,
+		want: "class-40 classifier",
 	}}
 
 	for _, tc := range cases {
@@ -271,7 +316,7 @@ func TestQueryErrorScannerAcceptsTheFixedShape(t *testing.T) {
 	fset, fn := parseFuncFixture(t, `func f() {
 		rows, err := pool.Query(ctx, "SELECT 1")
 		if err != nil {
-			return nil, NewErr(ErrInternalError, "failed to query things")
+			return nil, dbErr(err, "failed to query things")
 		}
 		defer rows.Close()
 		for rows.Next() {

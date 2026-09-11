@@ -7,6 +7,12 @@
 # aihub#211 modification: the ENUM_VIOLATION rule also skips @@ROUTER_TOKEN@@
 # substitution placeholders (the skill router injects them into _common/*.md),
 # so an enum param whose value is a template token is not a false positive.
+# aihub#599 modification (2026-09-11): Rule C (SEGMENT_COUNT_DRIFT) compares
+# ready-queue segment counts stated in plugin prose (word-numbers like "seven"
+# as well as digits) against the "(N-section)" phrase in the published
+# pf_get_ready_queue description — the copy the repo's Go gate
+# (internal/mcp/ready_queue_section_count_test.go) pins to the ReadyQueue
+# struct, the marshalling authority. Re-apply on refresh.
 #
 # Rules
 # -----
@@ -20,6 +26,14 @@
 # B. Silent failure (in ```bash blocks):
 #    Line matching || (true|echo) without trailing "# lint-allow: silent <reason>"
 #    -> SILENT_FAILURE
+#
+# C. Ready-queue segment-count parity (against --schemas):
+#    A word-number or digit immediately modifying "segment(s)", on a line within
+#    a few lines of a ready-queue/LCRS mention, that disagrees with the
+#    "(N-section)" count in the pf_get_ready_queue description
+#    -> SEGMENT_COUNT_DRIFT
+#    A schema from which no count can be read makes this rule vacuous, so main()
+#    refuses it up front — an absent check is not a passing one.
 #
 # Baseline
 # --------
@@ -258,6 +272,117 @@ def lint_rule_b(file_path: str, lines: list) -> list[Violation]:
 
 
 # ---------------------------------------------------------------------------
+# Rule C: Ready-queue segment-count parity (aihub#599)
+# ---------------------------------------------------------------------------
+#
+# The ready queue's section count is ONE number. The repo side already keeps
+# three copies of it aligned (struct / schema description / design doc) through
+# internal/mcp/ready_queue_section_count_test.go, with the ReadyQueue struct as
+# the authority. The plugins copy (pf-status/SKILL.md says "seven segments")
+# was the last surface nothing compared, and it spells the count as a WORD,
+# which is why this rule parses word-numbers and not only digits.
+#
+# Why this lives here and not in a Go test: a Go test pinning a plugins/ file
+# couples any future segment change to a forced plugin release in the same PR.
+# This lint has the baseline mechanism — a drift can be demoted to a
+# wi-referenced NOTICE that stays visible on every run until the next plugin
+# release fixes the prose — so the coupling is soft where a test's would be
+# hard (aihub#599, recorded by aihub#595's design follow-up).
+#
+# The count is read from the same "(N-section)" phrase the Go gate pins against
+# the struct, so struct -> description -> this rule move together: a segment
+# change forces the description in the same PR (the Go gate is red otherwise),
+# and the fresh in-repo schema dump brings the new count here.
+#
+# Scope discipline (measured on the 2026-09-11 tree): the recognizer matches
+# exactly the two live pf-status claims and nothing else in plugins/.
+# Hyphenated compounds ("three-segment format", the output-format name used
+# throughout the skills) do not match — the \s+ requires a spaced modifier —
+# and an intervening noun breaks the match ("two path segments" of a URL).
+# The queue-context window keeps a future unrelated "N segments" out of scope
+# unless it is written next to a ready-queue/LCRS mention.
+
+_WORD_NUMBERS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20,
+}
+
+# Longest-first so "seventeen" is not consumed as "seven" + leftovers.
+_SEGMENT_COUNT_RE = re.compile(
+    r'\b(' + "|".join(sorted(_WORD_NUMBERS, key=len, reverse=True)) + r'|\d{1,2})\s+segments?\b',
+    re.IGNORECASE,
+)
+_QUEUE_CONTEXT_RE = re.compile(r'ready[ _-]?queue|LCRS', re.IGNORECASE)
+_QUEUE_CONTEXT_WINDOW = 5  # lines either side of the claim
+_SECTION_COUNT_RE = re.compile(r'\((\d+)-section\)')
+
+
+def ready_queue_section_count(schema: dict) -> Optional[int]:
+    """Return the section count pf_get_ready_queue publishes, or None.
+
+    Read from the "(N-section)" phrase in the tool description — the copy
+    internal/mcp/ready_queue_section_count_test.go pins against the ReadyQueue
+    struct, so the number here is transitively the struct's."""
+    desc = schema.get("tools", {}).get("pf_get_ready_queue", {}).get("description") or ""
+    m = _SECTION_COUNT_RE.search(desc)
+    return int(m.group(1)) if m else None
+
+
+def lint_rule_c(file_path: str, lines: list, schema: dict) -> list[Violation]:
+    """Apply Rule C: ready-queue segment counts in prose match the schema."""
+    violations = []
+    expected = ready_queue_section_count(schema)
+
+    for lineno, ln in enumerate(lines, 1):
+        for m in _SEGMENT_COUNT_RE.finditer(ln):
+            # Only claims written in ready-queue context are segment-count
+            # claims; "segments" elsewhere (URL paths, display formats) are not.
+            lo = max(0, lineno - 1 - _QUEUE_CONTEXT_WINDOW)
+            hi = min(len(lines), lineno + _QUEUE_CONTEXT_WINDOW)
+            if not _QUEUE_CONTEXT_RE.search("\n".join(lines[lo:hi])):
+                continue
+            token = m.group(1).lower()
+            said = _WORD_NUMBERS.get(token)
+            if said is None:
+                said = int(token)
+            if expected is None:
+                # Unreachable through main(), which refuses a schema with no
+                # count before linting; kept so a claim is never skipped
+                # silently if this function is reached some other way.
+                violations.append(Violation(
+                    file=file_path, line=lineno,
+                    rule="SEGMENT_COUNT_DRIFT",
+                    message=(
+                        f"claims '{m.group(0)}' for the ready queue, and the schema "
+                        "publishes no '(N-section)' count on pf_get_ready_queue to "
+                        "check it against — cannot verify"
+                    ),
+                    match=m.group(0),
+                ))
+                continue
+            if said != expected:
+                violations.append(Violation(
+                    file=file_path, line=lineno,
+                    rule="SEGMENT_COUNT_DRIFT",
+                    message=(
+                        f"claims '{m.group(0)}' (= {said}) ready-queue segments; the "
+                        f"published pf_get_ready_queue description says ({expected}-section). "
+                        "That description is pinned to the ReadyQueue struct by "
+                        "internal/mcp/ready_queue_section_count_test.go, so the queue "
+                        "moved and this prose did not (or vice versa). Fix the prose in "
+                        "the next plugin release, or baseline this drift with a wi "
+                        "reference until then."
+                    ),
+                    match=m.group(0),
+                ))
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # Baseline matching
 # ---------------------------------------------------------------------------
 
@@ -317,6 +442,7 @@ def lint_file(file_path: str, schema: dict) -> list[Violation]:
     violations = []
     violations.extend(lint_rule_a(file_path, lines, schema))
     violations.extend(lint_rule_b(file_path, lines))
+    violations.extend(lint_rule_c(file_path, lines, schema))
     return violations
 
 
@@ -376,6 +502,46 @@ _FIXTURES = {
         '`pf_save_artifact(type="@@ARTIFACT_TYPE@@", work_item_id="x", content="y")`\n',
         [],  # @@...@@ router substitution token is skipped, not an enum violation (aihub#211)
     ),
+    # ── Rule C calibration (aihub#599). The positives prove the rule fires on a
+    # wrong count in BOTH spellings; the negatives are lifted from the live
+    # plugins corpus so that the shapes the rule must NOT fire on are pinned
+    # here rather than only observed once on one tree.
+    "segment_count_drift.md": (
+        "# Test\n"
+        "Inspect the project-wide ready queue (LCRS six segments).\n",
+        [("SEGMENT_COUNT_DRIFT", "six segments")],  # word-number, wrong count
+    ),
+    "segment_count_digit_drift.md": (
+        "# Test\n"
+        "The LCRS ready queue returns 9 segments in one call.\n",
+        [("SEGMENT_COUNT_DRIFT", "9 segments")],  # digit spelling, wrong count
+    ),
+    "segment_count_match.md": (
+        "# Test\n"
+        "Inspect the project-wide ready queue (LCRS seven segments).\n"
+        "Returns all seven segments in one call.\n",
+        [],  # the live pf-status claims: word "seven" == (7-section), no violation
+    ),
+    "segment_count_unrelated.md": (
+        "# Test\n"
+        "pf_get_ready_queue is discussed near here, so the window is live.\n"
+        "Output three-segment format.\n"          # hyphenated format name, not a claim
+        "Do not invent a source value; use one of the seven.\n"  # no "segments"
+        "owner, repo = the last two path segments of the URL.\n",  # intervening noun
+        [],
+    ),
+    "segment_count_no_context.md": (
+        "# Test\n"
+        "The report has four segments.\n",  # no ready-queue/LCRS context in window
+        [],
+    ),
+    "segment_count_unverifiable.md": (
+        "# Test\n"
+        "The ready queue has seven segments.\n",
+        # Linted against a schema with NO "(N-section)" count (special-cased in
+        # run_self_test): the claim must be reported, not skipped.
+        [("SEGMENT_COUNT_DRIFT", "cannot verify")],
+    ),
     # fmt: on
 }
 
@@ -424,6 +590,15 @@ _MINIMAL_SCHEMA = {
                 "content": {"type": "string", "required": False},
             },
         },
+        # aihub#599: the "(7-section)" phrase is what Rule C reads; the live
+        # description carries it and the repo's Go gate keeps it equal to the
+        # ReadyQueue struct's segment count.
+        "pf_get_ready_queue": {
+            "description": "Get the LCRS (7-section) ready queue for a project.",
+            "params": {
+                "project": {"type": "string", "required": True},
+            },
+        },
     },
 }
 
@@ -445,7 +620,16 @@ def run_self_test():
             with open(fpath, "w") as f:
                 f.write(content)
 
-            viols = lint_file(fpath, _MINIMAL_SCHEMA)
+            # The unverifiable fixture is the one case linted against a schema
+            # that publishes NO section count (main() refuses such a schema for
+            # a real run; this proves the rule itself would still report the
+            # claim rather than skip it).
+            schema = _MINIMAL_SCHEMA
+            if fixture_name == "segment_count_unverifiable.md":
+                schema = json.loads(json.dumps(_MINIMAL_SCHEMA))
+                del schema["tools"]["pf_get_ready_queue"]
+
+            viols = lint_file(fpath, schema)
 
             # Apply baseline for the baseline_demotion fixture.
             if fixture_name == "baseline_demotion.md":
@@ -519,6 +703,21 @@ def main():
         schema = load_schema(args.schemas)
     except Exception as e:
         print(f"ERROR: failed to load schemas from {args.schemas!r}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Rule C is vacuous against a schema that publishes no section count, and a
+    # vacuous rule reads as a passing one. Refuse the run instead (aihub#599).
+    if ready_queue_section_count(schema) is None:
+        print(
+            "ERROR: the schema publishes no '(N-section)' count in the "
+            "pf_get_ready_queue description, so the SEGMENT_COUNT_DRIFT rule has "
+            "nothing to check prose against. The count has been in that "
+            "description since the tool was added and the repo's Go gate "
+            "(internal/mcp/ready_queue_section_count_test.go) pins it to the "
+            "ReadyQueue struct — a dump without it is stale or truncated. Do not "
+            "skip this silently; an absent check is not a passing one.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Load baseline.

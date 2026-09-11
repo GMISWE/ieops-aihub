@@ -287,10 +287,11 @@ func (s *Server) registerStepTools() {
 // Left unchecked the failure is silent AND corrupting, not merely inert. A
 // pre-aihub#290 server binds nothing for next_step, so echo drops it, the
 // completion commits, and the call answers 200 {"status":"completed"} while the
-// successor never starts. current_step therefore never advances, and because the
-// server derives each completion row's step_id from current_step, EVERY
-// subsequent completion in the walk is filed under the first step's name, with
-// no error anywhere.
+// successor never starts. current_step therefore never advances, and because a
+// server of that era derived each completion row's step_id from current_step
+// (only since aihub#398 does the row carry the request's own step — see
+// internal/server/routes_step.go), EVERY subsequent completion in the walk is
+// filed under the first step's name, with no error anywhere.
 //
 // The server confirms a fused advance by echoing next_step in its response
 // (internal/server/routes_step.go); its absence alongside a next_step request is
@@ -370,19 +371,28 @@ func validateTerminalStepArgs(status, stepAttemptID string) error {
 }
 
 // updateStepBody renders pf_update_step's arguments into the PATCH
-// /v1/work_items/:id/step body.
+// /v1/work_items/:id/step body. It is the ONE place the MCP argument names are
+// mapped onto the server's json tags, which is why comments on both sides —
+// internal/server/routes_step.go and the step mutants in
+// step_wire_shape_test.go — point at it by name.
 //
-// Extracted from the tool handler so a test can hold it against the struct that
-// actually binds on the other side (server.UpdateStepRequest). That comparison is
-// the whole point: the aihub#290 defect was a key this function emitted for which
-// no bound field existed, which costs nothing at the wire and everything at the
-// contract — the caller is told the parameter works, and it is discarded on
-// arrival with no error anywhere. A key added here without a matching json tag
-// over there now fails a test instead of going quiet in production.
+// This doc used to say it was "extracted from the tool handler so a test can
+// hold it against server.UpdateStepRequest". No test has ever called it; the
+// handler above is its only caller. The aihub#290 defect that sentence was
+// about — a key emitted here for which no bound field exists over there, told
+// to the caller as working and discarded on arrival with no error anywhere —
+// is held elsewhere: tools_step_contract_test.go compares the server's struct
+// against its own hand-written map of these names (stepBodyFieldFor), and
+// step_wire_shape_test.go asserts on bodies a fake aihub actually RECEIVED,
+// which covers every hop between tool argument and wire, not just this one.
 //
-// The optional keys are forwarded only when non-empty, so that omitting one stays
-// distinguishable from sending "" — the server binds them as *string, and an
-// explicit empty string is not the same fact as an absent field.
+// The optional keys are forwarded only when non-empty. What that buys is that a
+// key which arrives always carries a real value — NOT that the server can tell
+// an omission from an explicit "": strArg has collapsed the two onto "" before
+// this function runs, so both leave this process as the same absent field.
+// Measured by TestUpdateStepForwardsOptionalKeysOnlyWhenSet
+// (step_wire_shape_test.go), which corrected this doc's earlier claim of the
+// opposite.
 func updateStepBody(args map[string]any, attemptID string, claimEpoch int64, sessionSecret string) map[string]any {
 	body := map[string]any{
 		"step":           strArg(args, "step_id"), // server reads json:"step"

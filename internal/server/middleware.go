@@ -192,31 +192,38 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 					WHERE members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
 					uc.UserID,
 				)
-				if perr == nil {
-					for prows.Next() {
-						var projName string
-						var membersRaw []byte
-						if perr := prows.Scan(&projName, &membersRaw); perr != nil {
-							continue
-						}
-						role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
-						if decodeErr != nil {
-							warnMalformedMembersOnce(projName, decodeErr)
-						}
-						if !found {
-							continue
-						}
-						// Respect project_scope on the API key if set.
-						if projectScope == nil || *projectScope == projName {
-							uc.ProjectRoles[projName] = role
-						}
-					}
-					// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-					if err := prows.Err(); err != nil {
-						fmt.Fprintf(os.Stderr, "bearer auth: project membership rows: %v\n", err)
-					}
-					prows.Close()
+				if perr != nil {
+					// aihub#522: a swallowed failure here authenticated the caller
+					// with ZERO ProjectRoles, so every project answered the
+					// membership 404 (errNotVisible) — an availability fault
+					// dressed up as a visibility verdict, the exact "second lie"
+					// hideNotFound's comment forbids. The key-hash query above
+					// already answers this same failure with this same 500.
+					return c.JSON(http.StatusInternalServerError, errorResponse(domain.NewErr(domain.ErrInternalError, "database error during auth")))
 				}
+				for prows.Next() {
+					var projName string
+					var membersRaw []byte
+					if perr := prows.Scan(&projName, &membersRaw); perr != nil {
+						continue
+					}
+					role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+					if decodeErr != nil {
+						warnMalformedMembersOnce(projName, decodeErr)
+					}
+					if !found {
+						continue
+					}
+					// Respect project_scope on the API key if set.
+					if projectScope == nil || *projectScope == projName {
+						uc.ProjectRoles[projName] = role
+					}
+				}
+				// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+				if err := prows.Err(); err != nil {
+					fmt.Fprintf(os.Stderr, "bearer auth: project membership rows: %v\n", err)
+				}
+				prows.Close()
 			}
 
 			c.Set(string(ctxUser), &uc)

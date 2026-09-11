@@ -220,7 +220,11 @@ const declaresIntentContainmentSQL = notCallersOwnWISQL +
 // predict keeps its pre-aihub#564 answer exactly.
 const notCallersOwnLockHolderSQL = ` AND ra.work_item_id <> `
 
-// PredictConflicts applies the 5 conflict rules and returns predictions.
+// PredictConflicts applies the conflict rules below and returns predictions.
+// The numbered `// Rule N:` blocks in this function are the roster and carry
+// the count — this line is deliberately count-free, having said "the 5
+// conflict rules" from aihub#416's addition of rule 6 until aihub#550 caught
+// it: a count held in prose is checked by nothing.
 // Implements §23 of the design doc.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
 	// aihub#238: validate BEFORE any database access. This is the call pf-work

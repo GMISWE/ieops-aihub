@@ -697,9 +697,18 @@ func (s *Server) registerLifecycleTools() {
 	// description goes 58 -> 1,058 bytes. Measured 2026-09-09 against the
 	// aihub#419 budget in tools_list_payload_budget_test.go, which is a ceiling on
 	// the whole tools/list payload plus a per-tool share: this tool was already
-	// the largest at 6,796 B / 9% of 70,495 B and is 7,839 B / 10% of 71,900 B
-	// after this change (the wi_type note below is the other +55), still well
-	// under the 15% share. Bought deliberately, and the alternative was worse —
+	// the payload's largest, the change moved it 6,796 B -> 7,839 B (the wi_type
+	// note below is the other +55) and its share roughly 9% -> 10%, still well
+	// under the 15% ceiling. The payload TOTAL those shares were taken against
+	// is deliberately not restated here: it moves on every other tool's diff,
+	// and the value this sentence used to pin had been moved twice by unrelated
+	// wis when aihub#550 re-measured it — the aihub#493 class, where the only
+	// thing a restated number can do is be wrong. The budget test prints the
+	// current total and this tool's current share on its "tools/list:" log line:
+	//
+	//	GOWORK=off go test ./internal/mcp/ -run TestToolsListPayload -count=1 -v
+	//
+	// Bought deliberately, and the alternative was worse —
 	// the same disclosure spread over five parameter descriptions repeats the
 	// status classes five times and still cannot state the mixed-patch rule,
 	// which is about the patch rather than about any one field.

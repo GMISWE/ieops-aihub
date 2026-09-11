@@ -10,8 +10,26 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$here/.."
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 unavailable"; exit 0; }
 fails=0
-ok()  { echo "  PASS: $1"; }
-bad() { echo "  FAIL: $1" >&2; fails=$((fails+1)); }
+ok()   { echo "  PASS: $1"; }
+bad()  { echo "  FAIL: $1" >&2; fails=$((fails+1)); }
+# A check that cannot run here says so out loud. It must never be reported as a PASS: the
+# defects this suite was extended for (aihub#606) both shipped because something that was
+# not actually verified read as verified.
+skip() { echo "  SKIP: $1"; }
+# Reader for the PASS|/FAIL|/SKIP|<msg> lines the python blocks emit.
+# 🔴 Feed it with a here-string — `verdicts <<< "$out"` — never a pipe. A pipeline runs its
+# right-hand side in a SUBSHELL, so `fails` is incremented in a process that then exits: the
+# FAIL lines still print and the suite still exits 0. Measured while building this file.
+verdicts() {
+  while IFS='|' read -r verdict msg; do
+    [ -n "${verdict:-}" ] || continue
+    case "$verdict" in
+      PASS) ok "$msg" ;;
+      SKIP) skip "$msg" ;;
+      *)    bad "$msg" ;;
+    esac
+  done
+}
 
 # ---------------------------------------------------------------------------
 echo "== .mcp.json template closes both IR1 bypass doors =="
@@ -206,6 +224,145 @@ done <<< "$agent_out"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "== pf-explore is restricted to read-only tools =="
+# An agent file with NO `tools:` field is not read-only, it is unrestricted: pi's subagent
+# extension pushes --tools only when one is declared (examples/extensions/subagent/
+# index.ts:307), so pf-explore shipped holding write, edit and subagent (aihub#606). The IR1
+# hook does not close that gap — its matcher names neither `edit` nor `write`.
+#
+# `bash` is excluded on purpose, following pi's own read-only example agent (`planner`:
+# read, grep, find, ls) rather than `scout`/`reviewer`, which get a shell because they are
+# allowed side effects. A shell is a write vector no name-keyed gate can police.
+#
+# pf-execute.md is EXEMPT by design — it is the write-capable agent, mirroring pi's own
+# `worker`, which also declares nothing. Nothing here asserts anything about its tools.
+#
+# The three couplings below are the reason this is a cross-file check and not a lint:
+#   - the allowlist is an exact-match Set (dist/core/agent-session.js:149, :2110), no globs;
+#   - it filters extension-registered tools too (:2111), and the polyforge tools are
+#     extension-registered, so a builtin-only allowlist silently removes pf-explore's own
+#     documented read tools;
+#   - the `polyforge_` spelling is a function of pi/mcp.json's toolPrefix.
+pi_tools_dir=""
+for cand in \
+  "${POLYFORGE_PI_TOOLS:-}" \
+  "$(npm root -g 2>/dev/null || true)/@earendil-works/pi-coding-agent/dist/core/tools" \
+  "$HOME/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/core/tools"; do
+  [ -d "$cand" ] && { pi_tools_dir="$cand"; break; }
+done
+explore_out="$(python3 - "$root" "$pi_tools_dir" <<'PY'
+import json, os, re, sys
+root, pi_tools_dir = sys.argv[1], sys.argv[2]
+
+path = os.path.join(root, "pi", "agents", "pf-explore.md")
+if not os.path.isfile(path):
+    print("FAIL|pi/agents/pf-explore.md is missing"); raise SystemExit
+text = open(path).read()
+m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+if not m:
+    print("FAIL|pf-explore.md has no frontmatter block"); raise SystemExit
+fm, body = m.group(1), text[m.end():]
+
+tm = re.search(r"^tools:[ \t]*(\S.*)$", fm, re.M)
+if not tm:
+    print("FAIL|pf-explore.md declares no tools: — pi reads that as inherit-everything, so "
+          "the read-only agent holds write, edit and subagent")
+    raise SystemExit
+# pi accepts both spellings: `tools: read, bash` and `tools: [read, bash]` (agents.ts).
+raw = tm.group(1).strip()
+if raw.startswith("[") and raw.endswith("]"):
+    raw = raw[1:-1]
+tools = [t.strip().strip("'\"") for t in raw.split(",") if t.strip()]
+if not tools:
+    print("FAIL|pf-explore.md's tools: is empty, which pi treats as no allowlist at all")
+    raise SystemExit
+print("PASS|pf-explore declares a tools: allowlist (%d entries)" % len(tools))
+
+# --- 1. nothing in it can write -------------------------------------------------------
+WRITE_BUILTINS = {"write", "edit", "bash", "powershell", "subagent", "apply_patch"}
+granted = sorted(t for t in tools if t in WRITE_BUILTINS)
+print(("FAIL|allowlist grants write-capable tool(s): %s" % ", ".join(granted)) if granted
+      else "PASS|allowlist grants no write-capable built-in (no write/edit/bash/subagent)")
+
+# Fail CLOSED on polyforge tools: anything that is not on the known read-only list counts as
+# a write, so a pf_* tool added here later is caught even though this file never heard of it.
+READ_PF = {"get_work_item", "get_step", "list_work_items", "list_projects", "list_users",
+           "list_dependencies", "recall", "get_memory", "read_events", "get_ready_queue",
+           "whoami", "diff", "predict_conflicts"}
+pf_tools = [t for t in tools if "pf_" in t]
+nonread = sorted(t for t in pf_tools if t.split("pf_", 1)[1] not in READ_PF)
+print(("FAIL|allowlist grants polyforge tool(s) that are not on the read-only list: %s"
+       % ", ".join(nonread)) if nonread
+      else "PASS|every polyforge tool in the allowlist is a read-only one (%d)" % len(pf_tools))
+
+# --- 2. it still grants what the agent's own body says it uses ------------------------
+# The prompt tells the agent to read polyforge state. Because the allowlist also filters
+# extension-registered tools, dropping these would not error — it would silently leave the
+# agent unable to read any polyforge state at all.
+reading = re.search(r"Reading\s*—(.*?)—\s*is fine", body, re.S)
+if not reading:
+    print("FAIL|pf-explore.md's body no longer carries the 'Reading — ... — is fine' list, "
+          "so the allowlist cannot be checked against what the prompt promises")
+else:
+    named = re.findall(r"`(\w*pf_\w+)`", reading.group(1))
+    if not named:
+        print("FAIL|the 'Reading — ... — is fine' sentence names no pf_* tool")
+    else:
+        absent = [n for n in named if not any(t.endswith(n) for t in tools)]
+        print(("FAIL|the body tells the agent to use %s, which the allowlist does not grant"
+               % ", ".join(absent)) if absent
+              else "PASS|every read tool the prompt names is in the allowlist (%d)" % len(named))
+
+# --- 3. the pf_* spelling matches pi/mcp.json's toolPrefix ----------------------------
+mcp_path = os.path.join(root, "pi", "mcp.json")
+try:
+    mcp = json.load(open(mcp_path))
+except Exception as e:
+    print("FAIL|pi/mcp.json is unreadable (%s)" % e); mcp = None
+if mcp is not None:
+    server = next(iter((mcp.get("mcpServers") or {})), None)
+    mode = (mcp.get("settings") or {}).get("toolPrefix", "server")
+    expected = {"server": "%s_" % server, "short": "%s_" % server,
+                "none": "", "mcp": "mcp__%s_" % server}.get(mode)
+    if server is None:
+        print("FAIL|pi/mcp.json declares no MCP server to derive a tool prefix from")
+    elif expected is None:
+        print("FAIL|pi/mcp.json sets an unrecognised toolPrefix %r — cannot tell what the "
+              "polyforge tools will be called" % mode)
+    else:
+        wrong = sorted(t for t in pf_tools if not t.startswith(expected + "pf_"))
+        print(("FAIL|toolPrefix is %r so polyforge tools are named %spf_*, but the allowlist "
+               "spells them: %s" % (mode, expected, ", ".join(wrong))) if wrong
+              else "PASS|pf_* spelling matches pi/mcp.json toolPrefix=%r (%spf_*)" % (mode, expected))
+
+# --- 4. every built-in named actually exists in pi ------------------------------------
+# Opportunistic, like the event-name cross-check below. A misspelled built-in is silent —
+# the allowlist is exact-match, so `list` instead of `ls` removes the tool rather than
+# erroring, which is the same silent-capability-loss failure as the skills defect.
+builtin_candidates = [t for t in tools if "pf_" not in t]
+if not pi_tools_dir:
+    print("SKIP|pi not installed here — built-in tool names in the allowlist not cross-checked")
+else:
+    known = set()
+    for fn in sorted(os.listdir(pi_tools_dir)):
+        if not fn.endswith(".js"):
+            continue
+        for name in re.findall(r'name:\s*"([a-z_]+)"', open(os.path.join(pi_tools_dir, fn)).read()):
+            known.add(name)
+    if not known:
+        print("FAIL|found pi's tools directory at %s but could not read any tool name out of "
+              "it — the cross-check would be vacuous" % pi_tools_dir)
+    else:
+        unknown = sorted(t for t in builtin_candidates if t not in known)
+        print(("FAIL|allowlist names built-in(s) pi does not define: %s (pi defines: %s)"
+               % (", ".join(unknown), ", ".join(sorted(known)))) if unknown
+              else "PASS|all %d built-ins in the allowlist exist in this pi" % len(builtin_candidates))
+PY
+)"
+verdicts <<< "$explore_out"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "== subscribed event names still exist in pi's own type definitions =="
 # Opportunistic: only runs where pi is installed. This is the check that catches a pi
 # upgrade renaming an event out from under the bridge — the failure mode that version
@@ -224,6 +381,121 @@ else
     grep -q "on(event: \"$evt\"" "$types" && ok "pi still defines the $evt event" \
       || bad "pi no longer defines a \"$evt\" event — the bridge subscribes to nothing"
   done
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== pi actually LOADS the skills install.sh installs =="
+# THE ASSERTION IS "pi loaded it", NOT "the directory exists" — that distinction is the
+# whole defect (aihub#606). install.sh used to write the skills only to
+# <project>/.agents/skills, and pi reads that path only when the project is TRUSTED:
+# dist/core/package-manager.js gates projectAgentsSkillDirs on isProjectTrusted(), and
+# trust-manager.js lists .agents/skills as a trust-requiring project resource. Trust is
+# default-off, so all 17 skills were silently unavailable while every file sat exactly where
+# the installer said it put it. A file-existence check passes on the broken tree; this one
+# does not.
+#
+# Measured on pi 0.85.1, this sandbox, trust the only variable: 0 skills loaded by default,
+# 17 with --approve. After the fix the user-scope copy loads with no --approve at all.
+#
+# LLM-free: `--mode rpc` + get_commands needs no API key and makes no model call, so this
+# runs anywhere pi is installed. Opportunistic like the event-name cross-check above — where
+# pi is absent (CI) it SKIPs loudly rather than passing.
+pi_bin="$(command -v pi || true)"
+if [ -z "$pi_bin" ]; then
+  skip "pi not installed here — skill loading not probed"
+elif ! command -v timeout >/dev/null 2>&1; then
+  skip "coreutils timeout unavailable — not running pi unbounded"
+else
+  sandbox="$(mktemp -d 2>/dev/null || true)"
+  if [ -z "$sandbox" ] || [ ! -d "$sandbox" ]; then
+    bad "could not create a temp dir for the skill-loading probe"
+  else
+    trap 'rm -rf "$sandbox"' EXIT
+    mkdir -p "$sandbox/agent/npm/node_modules/pi-mcp-adapter" "$sandbox/proj"
+    # Stub the adapter so install.sh takes its "already installed" branch. Without this the
+    # test would run `pi install npm:pi-mcp-adapter` — a network fetch, in a test.
+    printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+      > "$sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
+    # Everything the installer writes is redirected into the sandbox: PI_AGENT_DIR is its
+    # own knob for the user scope, and the project dir is its argument. It must not touch
+    # the developer's real ~/.pi/agent.
+    if PI_AGENT_DIR="$sandbox/agent" bash "$root/pi/install.sh" "$sandbox/proj" \
+         > "$sandbox/install.log" 2>&1; then
+      ok "install.sh ran into a throwaway PI_AGENT_DIR"
+    else
+      bad "install.sh failed in a throwaway dir:"
+      sed 's/^/      /' "$sandbox/install.log" >&2
+    fi
+    # The pipe IS pi's input channel here — do NOT add </dev/null, which would close stdin
+    # before the request arrives and hang the probe out to its timeout.
+    printf '{"id":1,"type":"get_commands"}\n' \
+      | (cd "$sandbox/proj" && PI_CODING_AGENT_DIR="$sandbox/agent" \
+           timeout 120 "$pi_bin" --mode rpc --no-session 2>/dev/null) \
+      > "$sandbox/probe.out" || true
+    probe_out="$(python3 - "$root/skills" "$sandbox/agent/skills" "$sandbox/probe.out" <<'PY'
+import json, os, sys
+skills_src, user_skills_dir, probe_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+expected = sorted(d for d in os.listdir(skills_src)
+                  if os.path.isfile(os.path.join(skills_src, d, "SKILL.md")))
+if not expected:
+    print("FAIL|no skills/<name>/SKILL.md found to expect — the probe would be vacuous")
+    raise SystemExit
+
+resp = None
+for line in open(probe_path, errors="replace").read().splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        # strict=False: skill descriptions carry raw newlines/tabs through the RPC payload.
+        obj = json.loads(line, strict=False)
+    except ValueError:
+        continue
+    if obj.get("type") == "response" and obj.get("command") == "get_commands":
+        resp = obj
+if resp is None:
+    print("FAIL|pi returned no get_commands response — the probe did not run, so nothing "
+          "about skill loading was verified")
+    raise SystemExit
+if not resp.get("success"):
+    print("FAIL|pi answered get_commands with success=false"); raise SystemExit
+
+loaded = [c for c in (resp.get("data") or {}).get("commands", []) if c.get("source") == "skill"]
+prefix = os.path.join(user_skills_dir, "")
+from_user = {}
+for c in loaded:
+    p = ((c.get("sourceInfo") or {}).get("path") or "")
+    if p.startswith(prefix):
+        from_user[p[len(prefix):].split(os.sep)[0]] = c.get("name")
+
+missing = [n for n in expected if n not in from_user]
+if missing:
+    shown = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+    print("FAIL|pi loaded %d/%d installed skills from %s — missing: %s (it loaded %d skill(s) "
+          "in total, from: %s)"
+          % (len(from_user), len(expected), user_skills_dir, shown, len(loaded),
+             ", ".join(sorted({((c.get('sourceInfo') or {}).get('path') or '?').rsplit('/', 2)[0]
+                               for c in loaded})) or "nowhere"))
+else:
+    print("PASS|pi loaded all %d installed skills, from the copy install.sh made at %s"
+          % (len(expected), user_skills_dir))
+
+# The project copy is still written (install.sh is additive) but must not be what is doing
+# the work here: this sandbox was never trusted. If this ever flips, the user-scope install
+# has stopped being load-bearing and the assertion above has quietly changed meaning.
+project_scoped = [c for c in loaded if ((c.get("sourceInfo") or {}).get("scope")) == "project"]
+print(("FAIL|%d skill(s) loaded at project scope in an untrusted sandbox — the probe is no "
+       "longer proving the user-scope copy works" % len(project_scoped)) if project_scoped
+      else "PASS|nothing loaded from the untrusted project copy, so the user-scope copy is "
+           "what pi used")
+PY
+)"
+    verdicts <<< "$probe_out"
+    rm -rf "$sandbox"
+    trap - EXIT
+  fi
 fi
 
 echo ""

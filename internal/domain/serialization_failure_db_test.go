@@ -435,7 +435,8 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 	})
 
 	// aihub#497. FnForceTakeover is the one lock path that opens its transaction
-	// with pool.Begin — READ COMMITTED — so aihub#334 classified the statements on
+	// with a bare pool.Begin — no isolation pinned, so it runs at this
+	// database's read committed default — so aihub#334 classified the statements on
 	// it but nothing on it had ever actually been raced. aihub#451 raised the
 	// isolation level as a mutant and found a second swallow underneath the first:
 	// the 40001 arrives at acquireLockUpsert, whose error FnForceTakeover discarded

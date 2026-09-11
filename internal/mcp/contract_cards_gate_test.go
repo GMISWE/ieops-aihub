@@ -2058,6 +2058,28 @@ func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
 // mistake: HEADINGS (structure, not prose) and FENCED BLOCKS (code the cards
 // quote). A marker on either is MARKER_ORPHAN, deliberately.
 //
+// And a third population gap, measured for aihub#604 (2026-09-11): the PUBLISHED
+// hop-1 text itself. A tool description is never card prose — it reaches a card
+// only as two hashes (K3's jurisdiction) and as hand-quoted hop 0-1 cells (K9's,
+// which checks publication-consistency, not truth) — so a false published
+// sentence sits outside this walk even when a card quotes it verbatim. Measured
+// on the live pf_remember card: its `base_strength` promise row splits at the
+// period inside the K9-checked quote, and BOTH halves fail the recogniser — the
+// half carrying the range ("Initial strength, integer 1-5 (default 3).") is a
+// quoted noun phrase with no effect verb, and the refusal half ("A fractional
+// value is refused") has no anchor, because `refused` is a participle
+// attributionVerbs does not carry. Mutating that cell to the aihub#433
+// falsehood ("(0-1)" against a 1-5 CHECK) left this arm GREEN with candidates
+// unchanged at 826 while K9 alone went red. The falsehood itself never coexisted
+// with K12 anyway — c069570 (the fix, PR #375) is an ancestor of c9a2760 (the
+// cards' birth, PR #377, same 2026-09-08 batch) — so "unclassified=0" on a card
+// is a claim about card-prose classification coverage, never about hop-1 truth.
+// What holds hop-1 truth for that row is the execution-side probe family:
+// TestPublishedBaseStrengthRangeIsTheEnforcedOne builds "1-5" from
+// domain.MinBaseStrength/MaxBaseStrength, reds on any "0-1", and requires the
+// word "integer" — three independent reds on the reverted description, measured
+// on this tree alongside K3 INPUT_SCHEMA_DRIFT.
+//
 // The widening moved the population and every ledger row with it — 39 of 45
 // rows re-pinned from this arm's own failure output, the POPULATION_MOVED /
 // RECLASSIFIED discipline working as designed.

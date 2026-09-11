@@ -504,8 +504,9 @@ func TestFusedUpdateStepForwardsNextStep(t *testing.T) {
 //
 // The consequence of missing it is worse than a no-op. A pre-aihub#290 server
 // binds nothing, echo drops the parameter, the completion commits, and the call
-// answers 200 {"status":"completed"}. current_step never advances; the server
-// derives each completion row's step_id from current_step; so every later
+// answers 200 {"status":"completed"}. current_step never advances; a server of
+// that era derived each completion row's step_id from current_step (filing the
+// row under the request's own step only arrived with aihub#398); so every later
 // completion in the walk is filed under the FIRST step's name, silently. This
 // test pins the detection, because "the local schema publishes next_step" is a
 // fact about this binary and says nothing about what the peer binds.

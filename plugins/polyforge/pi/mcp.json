@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "polyforge": {
+      "command": "polyforge",
+      "args": ["serve"],
+      "directTools": true,
+      "lifecycle": "lazy",
+      "requestTimeoutMs": 30000
+    }
+  },
+  "settings": {
+    "scriptMode": false,
+    "disableProxyTool": true,
+    "toolPrefix": "server",
+    "warnOnLargeDirectTools": false
+  }
+}

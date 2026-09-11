@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "runtime": "pi",
+  "_comment": [
+    "Hook registration for the pi coding agent (@earendil-works/pi-coding-agent).",
+    "pi has no built-in hooks.json mechanism — it has a TypeScript extension API — so the",
+    "bridge extension in pi/extensions/polyforge/ READS this file and subscribes to the",
+    "listed pi events, converting each into the Claude Code-shaped JSON the hook scripts",
+    "already parse on stdin. The hook scripts themselves are unchanged and shared with the",
+    "other three runtimes.",
+    "",
+    "The matchers live here, in data, rather than inline in the extension, for one reason:",
+    "tests/pf-commit-guard.test.sh asserts that every runtime's registration file routes",
+    "pf_commit/pr/wrap/ship to pf-commit-guard and does NOT route unrelated tools. A matcher",
+    "hardcoded in TypeScript would be invisible to that gate.",
+    "",
+    "'event' keys are pi's own event names (ExtensionAPI.on overloads in",
+    "core/extensions/types.d.ts). 'match' declares WHICH SUBJECT the matcher is applied to,",
+    "and each event offers exactly one:",
+    "  toolName -> event.toolName          (tool_call, tool_result)",
+    "  text     -> event.text              (input)",
+    "  always   -> no matching, always run (session_start)",
+    "An entry whose 'match' disagrees with the event it is filed under is SKIPPED, not",
+    "silently tested against the wrong string — e.g. match:\"text\" under tool_call would",
+    "otherwise become a rule that never fires and never complains. Omitting 'match' means",
+    "\"whatever this event offers\". Where a matcher has a capturing group (the input entry),",
+    "the FIRST group is the value handed to the script."
+  ],
+  "hooks": {
+    "session_start": [
+      {
+        "matcher": ".*",
+        "match": "always",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-session-start\"",
+        "timeoutSec": 15,
+        "inject": "context"
+      }
+    ],
+    "input": [
+      {
+        "matcher": "^/(?:polyforge:)?(pf-[a-z-]+)\\b",
+        "match": "text",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-skill-router\"",
+        "timeoutSec": 10,
+        "inject": "context"
+      }
+    ],
+    "tool_call": [
+      {
+        "_why": [
+          "IR1 bypass doors, denied unconditionally. Both tools take the REAL tool name in a",
+          "parameter (mcpScript in a JS snippet, mcp in `tool`), so a gate keyed on tool name",
+          "sees only `mcp`/`mcpScript` and the pf_commit underneath goes unguarded.",
+          "",
+          "settings.scriptMode:false and settings.disableProxyTool:true in .mcp.json are the",
+          "first line and are asserted by tests/pi-runtime.test.sh. They are NOT sufficient:",
+          "measured on pi-mcp-adapter 2.32.1, the proxy tool is registered when ANY of three",
+          "conditions holds (index.ts:1192) --",
+          "    config.settings?.disableProxyTool !== true",
+          "    || directSpecs.length === 0",
+          "    || missingConfiguredDirectToolServers.length > 0",
+          "-- so on a COLD metadata cache (~/.pi/agent/mcp-cache.json absent, i.e. the very",
+          "first session after install) `mcp` is registered despite the key being true. Two-arm",
+          "measurement, identical config, cache the only variable: cold => 55 tools with `mcp`,",
+          "warm => 54 without. The same third condition re-opens it whenever MCP_DIRECT_TOOLS",
+          "narrows the direct-tool set, which no config-file check can see.",
+          "",
+          "This entry closes that window in our own code rather than depending on third-party",
+          "behaviour. It has no `bash`: the deny is issued directly by the bridge."
+        ],
+        "matcher": "^(?:mcp|mcpScript)$",
+        "match": "toolName",
+        "deny": "[polyforge IR1] BLOCKED: the `mcp` proxy and `mcpScript` tools carry the real MCP tool name inside their arguments, so a write to git could reach pf_commit/pf_pr/pf_wrap/pf_ship without passing the polyforge commit guard. Call the polyforge_pf_* tool directly instead — all 45 are registered individually.",
+        "inject": "decision"
+      },
+      {
+        "_why": [
+          "The emitted tool name is not fixed by the server name alone — pi-mcp-adapter's",
+          "resolveToolPrefix is `definition?.toolPrefix ?? globalPrefix ?? \"server\"`, and the",
+          "three non-default values change the spelling out from under a name-keyed gate:",
+          "  server (default) -> polyforge_pf_commit",
+          "  none             -> pf_commit",
+          "  mcp              -> mcp__polyforge_pf_commit",
+          "toolPrefix is settable globally AND per-server, so pinning it in mcp.json is not",
+          "enough on its own. This matcher therefore accepts all three spellings, and",
+          "tests/pi-runtime.test.sh asserts the pinned value as well — either alone leaves a",
+          "one-key edit that silently turns IR1 off. pf-commit-guard itself already copes:",
+          "rsplit(\"__\") plus the polyforge_ strip reduce every one of them to pf_commit."
+        ],
+        "matcher": "^(?:bash|powershell|(?:mcp__)?(?:polyforge_)?pf_(?:commit|pr|wrap|ship))$",
+        "match": "toolName",
+        "bash": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pf-commit-guard\"",
+        "timeoutSec": 10,
+        "inject": "decision"
+      }
+    ],
+    "tool_result": [
+      {
+        "matcher": "^(?:mcp__)?(?:polyforge_)?pf_(?:claim_work_item|update_step|save_artifact|wrap|complete_attempt)$",
+        "match": "toolName",
+        "bash": "node \"${CLAUDE_PLUGIN_ROOT}/bin/pf-chain-hook.cjs\"",
+        "timeoutSec": 10,
+        "inject": "none"
+      }
+    ]
+  }
+}

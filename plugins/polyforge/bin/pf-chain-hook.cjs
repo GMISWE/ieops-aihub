@@ -16,11 +16,22 @@ function mapStep(stepId) {
 
 function addUniq(arr, v) { return arr.includes(v) ? arr : arr.concat([v]); }
 
+// Every way a runtime can spell the same polyforge MCP tool. Claude Code uses
+// mcp__plugin_polyforge_polyforge__, Codex mcp__polyforge__, Copilot CLI `polyforge-`,
+// and pi `polyforge_` (aihub#503) — server name, separator, no "__" at all.
+//
+// ONE table, used by both call sites below. It used to be an inline literal written out
+// twice, which is how pi's spelling could be added to a matcher elsewhere while this file
+// kept silently falling through to `default: return chain` — no error, exit 0, and a
+// chain.json that simply never advances.
+const SERVER_PREFIX_RE = /^(?:mcp__(?:plugin_polyforge_polyforge|polyforge)__|polyforge[-_])/;
+function stripServerPrefix(toolName) {
+  return String(toolName || '').replace(SERVER_PREFIX_RE, '');
+}
+
 // Pure: given current chain state + an event, return the next state (null = delete the file).
 function applyEvent(chain, toolName, toolInput, toolResponse) {
-  // Prefix-agnostic: Claude Code uses mcp__plugin_polyforge_polyforge__, Codex uses
-  // mcp__polyforge__. Strip either so the transition fires identically under both runtimes.
-  const name = toolName.replace(/^(?:mcp__(?:plugin_polyforge_polyforge|polyforge)__|polyforge-)/, '');
+  const name = stripServerPrefix(toolName);
   switch (name) {
     case 'pf_update_step': {
       const station = mapStep(toolInput.step_id);
@@ -102,7 +113,7 @@ function main() {
   const cwd = evt.cwd || process.cwd();
   const dir = path.join(cwd, '.polyforge', 'state');
 
-  const shortName = toolName.replace(/^(?:mcp__(?:plugin_polyforge_polyforge|polyforge)__|polyforge-)/, '');
+  const shortName = stripServerPrefix(toolName);
   const st = findActiveState(dir);
   const wiId = resolveWiId(shortName, toolInput, st);
   if (!wiId) return; // no target wi

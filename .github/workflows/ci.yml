@@ -4712,6 +4712,104 @@ jobs:
             || { echo "::error::only $n PASS lines from pf-skill-router.test.sh, floor is 57 — checks have gone missing"; exit 1; }
           echo "skill-router gate: $n checks passed"
 
+      # aihub#503 adds pi as a fourth runtime. Two gates, because the change has two
+      # halves that fail independently.
+      #
+      # (1) pf-chain-hook.test.cjs has never run in CI — it was on the same unwired list
+      # as the two suites above. That mattered here: pi spells the MCP tools
+      # `polyforge_pf_*`, with an underscore and no "__", which matched NEITHER of the
+      # two mcp__ forms nor Copilot's `polyforge-`. Unstripped, every case in applyEvent
+      # falls through to `default: return chain` and the chain file is never advanced —
+      # exit 0, no stderr, nothing to notice. The prefix table used to be an inline
+      # literal written out twice; it is now one function, and these named checks are
+      # what keeps a fifth runtime from re-opening the same hole in only one of them.
+      #
+      # (2) pi-runtime.test.sh guards the settings that close pi's IR1 bypass doors.
+      # `mcpScript` and the `mcp` proxy both take the REAL tool name in an argument, so a
+      # gate keyed on tool name sees neither the pf_commit under `mcp` nor the one inside
+      # an mcpScript snippet. Turning either back on is a one-key JSON edit that looks
+      # like a performance tweak and that nothing else in the repo would notice.
+      #
+      # Both are hermetic: python3 and node, no docker, no network, no database.
+      - name: aihub#503 chain-hook transition gate
+        run: |
+          set -o pipefail
+          # --test-reporter=tap is load-bearing, not cosmetic: node's DEFAULT reporter
+          # prints "ℹ fail 0" wrapped in ANSI colour codes, so the `# fail 0` assertion
+          # below never matches and this step fails no matter what the suite did.
+          node --test --test-reporter=tap plugins/polyforge/tests/pf-chain-hook.test.cjs 2>&1 | tee chain_hook.log
+          for want in "pi prefix tool name (polyforge_) is handled" \
+                      "pi prefix: update_step and wrap fire identically" \
+                      "pi prefix: unrelated polyforge_ tool is inert" \
+                      "Copilot prefix tool name (polyforge-) is handled" \
+                      "Codex prefix tool name (mcp__polyforge__) is handled"; do
+            grep -qF -- "$want" chain_hook.log \
+              || { echo "::error::pf-chain-hook.test.cjs did not report '$want' — a runtime's tool-name spelling is unguarded"; exit 1; }
+          done
+          grep -qE '^# fail 0$' chain_hook.log \
+            || { echo "::error::pf-chain-hook.test.cjs reported failures"; exit 1; }
+          n=$(grep -cE '^# pass [0-9]+$' chain_hook.log || true)
+          [ "${n:-0}" -ge 1 ] || { echo "::error::pf-chain-hook.test.cjs produced no pass summary — did it run?"; exit 1; }
+          echo "chain-hook gate: $(grep -oE '^# pass [0-9]+$' chain_hook.log | head -1) "
+
+      # The suite above is grep-over-source, which cannot tell "the gate is wired" from "the
+      # gate is wired and its verdict is discarded". Measured mutant that keeps every one of
+      # its checks green: delete `if (reason) return { block: true, reason };` from the
+      # tool_call handler — run pf-commit-guard, then ignore what it said. `grep -q 'block:
+      # true'` still matches the mcp/mcpScript deny line, so IR1 would be off under pi with
+      # a fully green CI. This step drives the REAL handlers against the REAL hook scripts,
+      # and that mutant turns it red. The bridge is CommonJS precisely so this needs no
+      # transpiler and no version-gated node flag.
+      - name: aihub#503 pi bridge behaviour gate
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap plugins/polyforge/tests/pi-bridge.test.cjs 2>&1 | tee pi_bridge.log
+          for want in "tool_call: a banned commit message is blocked with the guard's own reason" \
+                      "tool_call: a clean commit message is NOT blocked" \
+                      "tool_call: every toolPrefix spelling reaches the gate" \
+                      "tool_call: shell tools are gated, and pi has TWO of them" \
+                      "tool_call: mcp and mcpScript are refused outright" \
+                      "tool_call: a payload larger than the pipe buffer does not kill the process" \
+                      "tool_result payload passes the WORKSPACE ROOT as cwd" \
+                      "the hook environment does not announce pi as Codex or Cursor"; do
+            grep -qF -- "$want" pi_bridge.log \
+              || { echo "::error::pi-bridge.test.cjs did not report '$want' — the bridge behaviour gate is not actually executing"; exit 1; }
+          done
+          # Several assertions skip when python3 is absent (the guard is inert by design
+          # without it), which would quietly hollow out this step.
+          ! grep -q '# skip [1-9]' pi_bridge.log \
+            || { echo "::error::pi-bridge.test.cjs SKIPped tests (python3 missing?) — the blocking assertions did not run"; exit 1; }
+          grep -qE '^# fail 0$' pi_bridge.log \
+            || { echo "::error::pi-bridge.test.cjs reported failures"; exit 1; }
+          echo "pi bridge gate: $(grep -oE '^# pass [0-9]+$' pi_bridge.log | head -1)"
+
+      - name: aihub#503 pi runtime gate
+        run: |
+          set -o pipefail
+          bash plugins/polyforge/tests/pi-runtime.test.sh 2>&1 | tee pi_runtime.log
+          for want in "PASS: settings.scriptMode == false" \
+                      "PASS: settings.disableProxyTool == true" \
+                      "PASS: directTools is true" \
+                      "PASS: mcp is denied outright" \
+                      "PASS: mcpScript is denied outright" \
+                      "PASS: polyforge_pf_commit is left callable" \
+                      "PASS: tool_call -> hooks/pf-commit-guard exists and is executable" \
+                      "PASS: unsets PLUGIN_ROOT so pi is not misread as Codex" \
+                      "PASS: does not gate on tool_execution_start" \
+                      "ALL PASS"; do
+            grep -qF -- "$want" pi_runtime.log \
+              || { echo "::error::pi-runtime.test.sh did not report '$want' — the pi IR1 configuration is not actually gated"; exit 1; }
+          done
+          # The suite exits 0 when python3 is missing, so the exit code alone cannot tell
+          # "all checks passed" from "no check ran". The event-name cross-check SKIPs by
+          # design when pi is absent (it is, on CI) and is deliberately not asserted here.
+          ! grep -q '^SKIP: python3' pi_runtime.log \
+            || { echo "::error::pi-runtime.test.sh SKIPped for want of python3 — this step would be a green no-op"; exit 1; }
+          n=$(grep -c '^  PASS: ' pi_runtime.log || true)
+          [ "${n:-0}" -ge 30 ] \
+            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 30 — checks have gone missing"; exit 1; }
+          echo "pi runtime gate: $n checks passed"
+
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal
       # flows from the aihub#412 corpus inventory, turned into invariant tests.
       # Three steps because they are three independent claims in two packages,

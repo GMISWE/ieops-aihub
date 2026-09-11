@@ -81,6 +81,24 @@ pass_ck  "Codex unrelated tool inert" '{"tool_name":"mcp__polyforge__pf_get_work
 pass_ck  "Codex clean commit"         '{"tool_name":"mcp__polyforge__pf_commit","tool_input":{"message":"fix race in reconnect logic"}}'
 
 echo ""
+# aihub#503: pi registers MCP tools as `<server>_<tool>` — an UNDERSCORE separator and no
+# "__" at all. `tool.rsplit("__", 1)[-1]` therefore returns the name unchanged, and the
+# `polyforge-` strip below it does not fire either (wrong separator). Without a matching
+# strip the name never equals "pf_commit", every branch is skipped, and the guard exits 0
+# with no output — the call is ALLOWED. That is silent: a blocked-looking guard that
+# blocks nothing. These assertions are what make the strip load-bearing.
+echo "== pi tool-name prefix (polyforge_*) must guard identically =="
+block_ck "pi pf_commit banned"      '{"tool_name":"polyforge_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "pi pf_pr banned"          '{"tool_name":"polyforge_pf_pr","tool_input":{"title":"ok","body":"AI-assisted fix"}}'
+block_ck "pi pf_wrap banned"        '{"tool_name":"polyforge_pf_wrap","tool_input":{"pr_title":"reviewed by sonnet","pr_body":"ok"}}'
+block_ck "pi pf_ship banned"        '{"tool_name":"polyforge_pf_ship","tool_input":{"message":"ok","pr_title":"ok","pr_body":"Generated with Claude Code"}}'
+# Negative controls: the strip must not turn unrelated calls into denials.
+pass_ck  "pi unrelated tool inert"  '{"tool_name":"polyforge_pf_get_work_item","tool_input":{"work_item_id":"AI-assisted"}}'
+pass_ck  "pi clean commit"          '{"tool_name":"polyforge_pf_commit","tool_input":{"message":"fix race in reconnect logic"}}'
+# pi's built-in shell tool is lowercase `bash`; the Bash branch already accepts it.
+block_ck "pi bash git commit banned" '{"tool_name":"bash","tool_input":{"command":"git commit -m \"Co-Authored-By: Claude\""}}'
+
+echo ""
 echo "== MUST-PASS: legit lookalikes and clean text (zero false positives) =="
 pass_ck "maintain/contain/detail"   "$(p_commit 'maintain the contained detail in the handler')"
 pass_ck "email + domain"            "$(p_commit 'validate email against the allowed domain')"
@@ -296,6 +314,13 @@ cases = {
     "copilot-hooks.json": (
         ["polyforge-pf_" + t for t in ("commit", "pr", "wrap", "ship")] + ["bash"],
         ["polyforge-pf_get_work_item"],
+    ),
+    # aihub#503: pi has no native hooks.json — the bridge extension reads THIS file and
+    # subscribes accordingly, so the matcher lives in data here exactly like the other
+    # three runtimes rather than being hardcoded in TypeScript where this gate cannot see it.
+    "pi-hooks.json": (
+        ["polyforge_pf_" + t for t in ("commit", "pr", "wrap", "ship")] + ["bash"],
+        ["polyforge_pf_get_work_item"],
     ),
 }
 

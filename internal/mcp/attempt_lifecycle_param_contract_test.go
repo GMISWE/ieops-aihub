@@ -10,9 +10,9 @@ package mcp_test
 // ⚠️ What "unreachable" means here, stated from what this package MEASURES rather
 // than from the sentence that travels with this defect. G4's own message says
 // "the SDK drops an argument the InputSchema does not declare" — go-sdk does not:
-// unknown_params.go's header records that its pre-handler validation passes
-// anything, because JSON Schema allows additional properties unless told
-// otherwise, and the aihub#389 disclosure that names the argument back to the
+// it runs no per-call validation at all on the untyped AddTool path this server
+// registers through (aihub#463; unknown_params.go's header carries the
+// measurement), and the aihub#389 disclosure that names the argument back to the
 // caller is proof the argument arrives. What is true, and sufficient, is that
 // **nothing reads it**: a tool handler pulls named arguments out of the map, so an
 // undeclared one is forwarded to nothing, echo's c.Bind then ignores what never

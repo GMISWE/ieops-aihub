@@ -20,11 +20,12 @@ package mcp_test
 // disclosure must survive on the error path too. That is why the check reads
 // every content block rather than only the first.
 //
-// 🔴 It does NOT assert rejection. Phase 1 reports; `additionalProperties:false`
-// is phase 2 and a separate work item (see unknown_params.go for the measured
-// reason: flipping it today would 400 one pf_update_step call in five). A future
-// reader who "fixes" this test to expect an error is implementing phase 2
-// without the number that licenses it.
+// 🔴 It does NOT assert rejection. Phase 1 reports; rejection is phase 2 and a
+// separate work item (see unknown_params.go: rejecting today would break one
+// pf_update_step call in five — and `additionalProperties:false` alone would
+// reject nothing, because the untyped AddTool path runs no per-call SDK
+// validation, aihub#463/aihub#547). A future reader who "fixes" this test to
+// expect an error is implementing phase 2 without the number that licenses it.
 //
 // No database needed:
 //

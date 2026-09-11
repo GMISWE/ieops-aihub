@@ -3,11 +3,11 @@ package domain
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"os"
+	"errors"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -271,9 +271,19 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	if req.WorkItemID != nil && *req.WorkItemID != "" {
 		canonicalWIID = *req.WorkItemID
 		var id, p string
-		if lookupErr := pool.QueryRow(ctx,
+		lookupErr := pool.QueryRow(ctx,
 			`SELECT id, project FROM work_items WHERE id=$1 OR slug=$1`, *req.WorkItemID,
-		).Scan(&id, &p); lookupErr == nil {
+		).Scan(&id, &p)
+		// aihub#522: ErrNoRows is the one error that MEANS something here — "no
+		// such work item", the documented create-preview fallback — so it keeps
+		// the fallback. Every other error used to take the same silent branch,
+		// which mis-namespaced every file_scope key below (effectiveProject
+		// stayed req.Project) and mis-keyed will_unlock: a DB failure quietly
+		// changed WHICH conflicts the rules were asked about.
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return nil, dbErrCause(lookupErr, "failed to resolve the work item for predict")
+		}
+		if lookupErr == nil {
 			if p != "" {
 				effectiveProject = p
 			}
@@ -307,6 +317,14 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 				WHERE `+lockConflictWhereClause+` AND ra.status='running'`+notCallersOwnLockHolderSQL+`$4`,
 				lockType, probe.Keys, probe.LikePattern, canonicalWIID,
 			).Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID)
+			// aihub#522: ErrNoRows is the answer "nobody holds this lock"; every
+			// other error used to be read the same way, so a failed probe passed
+			// the HARD gate — the aihub#238 fake all-clear on the one rule whose
+			// job is to block. Same fix as probeForeignLockHolders (aihub#410),
+			// which is this probe's claim-path twin.
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, dbErrCause(err, "failed to query rule 1 lock holders")
+			}
 			if err == nil {
 				result.Predictions = append(result.Predictions, ConflictPrediction{
 					Rule:         1,
@@ -360,34 +378,40 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  AND `+declaresContainmentSQL,
 			canonicalWIID, "repo", "repo:"+repoName,
 		)
-		if err == nil {
-			for rows.Next() {
-				var ownerAttemptID, actorDisplay, wiSlug, wiID string
-				var lastActive time.Time
-				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-					continue
-				}
-				result.Predictions = append(result.Predictions, ConflictPrediction{
-					Rule:                 2,
-					Severity:             SeveritySoftBlock,
-					Description:          "Another attempt declares the same repo",
-					ResourceType:         "repo",
-					ResourceKey:          repoName,
-					AttemptID:            ownerAttemptID,
-					ActorDisplay:         actorDisplay,
-					WISlug:               wiSlug,
-					WIID:                 wiID,
-					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
-				})
-				if result.Severity != SeverityHardBlock {
-					result.Severity = SeveritySoftBlock
-				}
+		if err != nil {
+			// aihub#522: a swallowed send-time failure rendered this rule as zero
+			// predictions, byte-identical to "nobody declares it" — the aihub#238
+			// fake all-clear this function's own headers keep circling back to.
+			return nil, dbErrCause(err, "failed to query rule 2 repo declarations")
+		}
+		for rows.Next() {
+			var ownerAttemptID, actorDisplay, wiSlug, wiID string
+			var lastActive time.Time
+			if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
+				continue
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 2 repo declaration rows: %v\n", err)
+			result.Predictions = append(result.Predictions, ConflictPrediction{
+				Rule:                 2,
+				Severity:             SeveritySoftBlock,
+				Description:          "Another attempt declares the same repo",
+				ResourceType:         "repo",
+				ResourceKey:          repoName,
+				AttemptID:            ownerAttemptID,
+				ActorDisplay:         actorDisplay,
+				WISlug:               wiSlug,
+				WIID:                 wiID,
+				LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
+			})
+			if result.Severity != SeverityHardBlock {
+				result.Severity = SeveritySoftBlock
 			}
-			rows.Close()
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		// aihub#522 upgrades the stderr log to a return: predictions built from a
+		// partial scan are the same fake all-clear as a swallowed send-time error.
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read rule 2 repo declaration rows")
 		}
 	}
 
@@ -411,37 +435,39 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  AND ra.status='running'`+notCallersOwnLockHolderSQL+`$1`,
 			canonicalWIID,
 		)
-		if err == nil {
-			for rows.Next() {
-				var existingKey, actorDisplay, wiSlug, wiID string
-				if err := rows.Scan(&existingKey, &actorDisplay, &wiSlug, &wiID); err != nil {
-					continue
+		if err != nil {
+			return nil, dbErrCause(err, "failed to query rule 3 file_scope locks")
+		}
+		for rows.Next() {
+			var existingKey, actorDisplay, wiSlug, wiID string
+			if err := rows.Scan(&existingKey, &actorDisplay, &wiSlug, &wiID); err != nil {
+				continue
+			}
+			if probe.Overlaps(existingKey) {
+				severity := SeveritySoftBlock
+				if res.Intent == "read" {
+					severity = SeverityInfo
 				}
-				if probe.Overlaps(existingKey) {
-					severity := SeveritySoftBlock
-					if res.Intent == "read" {
-						severity = SeverityInfo
-					}
-					result.Predictions = append(result.Predictions, ConflictPrediction{
-						Rule:         3,
-						Severity:     severity,
-						Description:  "File path overlaps with another running attempt",
-						ResourceType: "file_scope",
-						ResourceKey:  existingKey,
-						ActorDisplay: actorDisplay,
-						WISlug:       wiSlug,
-						WIID:         wiID,
-					})
-					if result.Severity != SeverityHardBlock && severity == SeveritySoftBlock {
-						result.Severity = SeveritySoftBlock
-					}
+				result.Predictions = append(result.Predictions, ConflictPrediction{
+					Rule:         3,
+					Severity:     severity,
+					Description:  "File path overlaps with another running attempt",
+					ResourceType: "file_scope",
+					ResourceKey:  existingKey,
+					ActorDisplay: actorDisplay,
+					WISlug:       wiSlug,
+					WIID:         wiID,
+				})
+				if result.Severity != SeverityHardBlock && severity == SeveritySoftBlock {
+					result.Severity = SeveritySoftBlock
 				}
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 3 file_scope rows: %v\n", err)
-			}
-			rows.Close()
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386); a
+		// partial scan is a fake all-clear, so it returns (aihub#522).
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read rule 3 file_scope rows")
 		}
 	}
 
@@ -459,36 +485,38 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  AND `+declaresIntentContainmentSQL,
 			canonicalWIID, "repo", "repo:"+repoName, "refactor",
 		)
-		if err == nil {
-			for rows.Next() {
-				var actorDisplay, wiSlug, wiID string
-				var lastActive time.Time
-				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-					continue
-				}
-				result.Predictions = append(result.Predictions, ConflictPrediction{
-					Rule:         4,
-					Severity:     SeveritySoftBlock,
-					Description:  "Another attempt is refactoring the same repo",
-					ResourceType: "repo",
-					ResourceKey:  repoName,
-					ActorDisplay: actorDisplay,
-					WISlug:       wiSlug,
-					// aihub#416: the same age rules 2 and 6 carry. Rule 4 is a repo
-					// prediction too, and a caller that got an age from rule 2 and
-					// none from rule 4 for one repo would read the gap as "that one
-					// is not live".
-					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
-				})
-				if result.Severity != SeverityHardBlock {
-					result.Severity = SeveritySoftBlock
-				}
+		if err != nil {
+			return nil, dbErrCause(err, "failed to query rule 4 refactor declarations")
+		}
+		for rows.Next() {
+			var actorDisplay, wiSlug, wiID string
+			var lastActive time.Time
+			if err := rows.Scan(&actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
+				continue
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 4 refactor rows: %v\n", err)
+			result.Predictions = append(result.Predictions, ConflictPrediction{
+				Rule:         4,
+				Severity:     SeveritySoftBlock,
+				Description:  "Another attempt is refactoring the same repo",
+				ResourceType: "repo",
+				ResourceKey:  repoName,
+				ActorDisplay: actorDisplay,
+				WISlug:       wiSlug,
+				// aihub#416: the same age rules 2 and 6 carry. Rule 4 is a repo
+				// prediction too, and a caller that got an age from rule 2 and
+				// none from rule 4 for one repo would read the gap as "that one
+				// is not live".
+				LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
+			})
+			if result.Severity != SeverityHardBlock {
+				result.Severity = SeveritySoftBlock
 			}
-			rows.Close()
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386); a
+		// partial scan is a fake all-clear, so it returns (aihub#522).
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read rule 4 refactor rows")
 		}
 	}
 
@@ -505,27 +533,29 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  AND `+declaresContainmentSQL,
 			canonicalWIID, "external_ref", res.URI,
 		)
-		if err == nil {
-			for rows.Next() {
-				var actorDisplay, wiSlug, wiID string
-				if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
-					continue
-				}
-				result.Predictions = append(result.Predictions, ConflictPrediction{
-					Rule:         5,
-					Severity:     SeverityInfo,
-					Description:  "Another attempt references the same external resource",
-					ResourceType: "external_ref",
-					ResourceKey:  res.URI,
-					ActorDisplay: actorDisplay,
-					WISlug:       wiSlug,
-				})
+		if err != nil {
+			return nil, dbErrCause(err, "failed to query rule 5 external_ref declarations")
+		}
+		for rows.Next() {
+			var actorDisplay, wiSlug, wiID string
+			if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
+				continue
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 5 external_ref rows: %v\n", err)
-			}
-			rows.Close()
+			result.Predictions = append(result.Predictions, ConflictPrediction{
+				Rule:         5,
+				Severity:     SeverityInfo,
+				Description:  "Another attempt references the same external resource",
+				ResourceType: "external_ref",
+				ResourceKey:  res.URI,
+				ActorDisplay: actorDisplay,
+				WISlug:       wiSlug,
+			})
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386); a
+		// partial scan is a fake all-clear, so it returns (aihub#522).
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read rule 5 external_ref rows")
 		}
 	}
 
@@ -563,34 +593,36 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  AND `+declaresContainmentSQL,
 			canonicalWIID, "service", "service:"+svc,
 		)
-		if err == nil {
-			for rows.Next() {
-				var ownerAttemptID, actorDisplay, wiSlug, wiID string
-				var lastActive time.Time
-				if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-					continue
-				}
-				result.Predictions = append(result.Predictions, ConflictPrediction{
-					Rule:                 6,
-					Severity:             SeverityInfo,
-					Description:          "Another attempt declares the same service",
-					ResourceType:         "service",
-					ResourceKey:          svc,
-					AttemptID:            ownerAttemptID,
-					ActorDisplay:         actorDisplay,
-					WISlug:               wiSlug,
-					WIID:                 wiID,
-					LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
-				})
-				// Deliberately NO write to result.Severity. An info prediction that
-				// raised the top-level severity would be a soft_block wearing
-				// another name, and pf-work's pre-claim gate reads that field.
+		if err != nil {
+			return nil, dbErrCause(err, "failed to query rule 6 service declarations")
+		}
+		for rows.Next() {
+			var ownerAttemptID, actorDisplay, wiSlug, wiID string
+			var lastActive time.Time
+			if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
+				continue
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: rule 6 service declaration rows: %v\n", err)
-			}
-			rows.Close()
+			result.Predictions = append(result.Predictions, ConflictPrediction{
+				Rule:                 6,
+				Severity:             SeverityInfo,
+				Description:          "Another attempt declares the same service",
+				ResourceType:         "service",
+				ResourceKey:          svc,
+				AttemptID:            ownerAttemptID,
+				ActorDisplay:         actorDisplay,
+				WISlug:               wiSlug,
+				WIID:                 wiID,
+				LastActiveAgeSeconds: lastActiveAgeSeconds(lastActive),
+			})
+			// Deliberately NO write to result.Severity. An info prediction that
+			// raised the top-level severity would be a soft_block wearing
+			// another name, and pf-work's pre-claim gate reads that field.
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386); a
+		// partial scan is a fake all-clear, so it returns (aihub#522).
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read rule 6 service declaration rows")
 		}
 	}
 
@@ -614,19 +646,24 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			  )`,
 			canonicalWIID,
 		)
-		if err == nil {
-			for rows.Next() {
-				var item WillUnlockItem
-				if err := rows.Scan(&item.ID, &item.Slug, &item.Goal); err != nil {
-					continue
-				}
-				result.WillUnlock = append(result.WillUnlock, item)
+		if err != nil {
+			// aihub#522: `"will_unlock": []` is also what "this unblocks nothing"
+			// returns — the exact ambiguity the aihub#357 comment above records —
+			// so a swallowed failure here is unreadable by construction.
+			return nil, dbErrCause(err, "failed to query will_unlock candidates")
+		}
+		for rows.Next() {
+			var item WillUnlockItem
+			if err := rows.Scan(&item.ID, &item.Slug, &item.Goal); err != nil {
+				continue
 			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := rows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "predict_conflicts: will_unlock rows: %v\n", err)
-			}
-			rows.Close()
+			result.WillUnlock = append(result.WillUnlock, item)
+		}
+		rows.Close()
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386); a
+		// partial scan is a fake all-clear, so it returns (aihub#522).
+		if err := rows.Err(); err != nil {
+			return nil, dbErrCause(err, "failed to read will_unlock rows")
 		}
 	}
 
@@ -636,7 +673,17 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		if p.WIID != "" {
 			// Look up the project of the conflicting wi
 			var wiProject string
-			pool.QueryRow(ctx, `SELECT project FROM work_items WHERE id=$1`, p.WIID).Scan(&wiProject) //nolint:errcheck
+			err := pool.QueryRow(ctx, `SELECT project FROM work_items WHERE id=$1`, p.WIID).Scan(&wiProject)
+			// aihub#522: this lookup FEEDS A REDACTION. On any error wiProject
+			// stayed "" and the branch below skipped the fold, so a DB failure
+			// here handed the caller an UNREDACTED cross-project prediction —
+			// fail-open on a visibility control. ErrNoRows keeps the old answer:
+			// the wi vanished between the rule query and this loop, there is no
+			// project left to check, and the prediction names a row that no
+			// longer exists.
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, dbErrCause(err, "failed to resolve a prediction's project for visibility folding")
+			}
 			if wiProject != "" {
 				callerRole := callerProjectRoles[wiProject]
 				if callerRole == "" && wiProject != "" {

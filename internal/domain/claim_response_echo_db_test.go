@@ -237,11 +237,17 @@ func TestServerFilledResponseFieldsAreEchoed(t *testing.T) {
 				`{"type":"path","uri":"file:internal/domain/echo509.go","intent":"write"}]`, sick.ID)
 		require.NoError(t, err)
 
-		// aihub#492's retry on all three calls in this subtest.
-		// FnClaimWorkItem and FnForceTakeover are both SERIALIZABLE and
-		// serialization_retry_test.go's header names them, so on a shared test
-		// database another package's DB-gated binary can abort either with
-		// 40001 — an error the server's own contract says to retry.
+		// aihub#492/#497's retry on all three calls in this subtest.
+		// FnClaimWorkItem opens SERIALIZABLE, so on a shared test database
+		// another package's DB-gated binary can abort it with 40001 — an error
+		// the server's own contract says to retry. FnForceTakeover is NOT
+		// serializable — its transaction is a bare pool.Begin, isolation not
+		// pinned, the pool/DSN default (txn_isolation_probe_test.go pins the
+		// split; an earlier revision here said "both SERIALIZABLE", which was
+		// never true of the takeover) — but class-40 rollbacks still reach it:
+		// 40P01 at any isolation level, 40001 wherever configuration raises
+		// the default, surfaced as the retryable 409 since aihub#497. See
+		// serialization_retry_test.go.
 		//
 		// Only the aihub#509 arm is wrapped; the three subtests above go through
 		// this file's `claim()` closure and are left as aihub#492 left them,

@@ -40,7 +40,7 @@ package mcp_test
 //     (TestCreateUserResponseIsTheHandlersOwnProjection);
 //   - handleUpdateUser treating a body that carries ONLY the withdrawn name as
 //     "no fields to update" is the same file's
-//     TestUpdateUserBindsTwoFieldsAndDropsTheRest.
+//     TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest.
 //
 // ⚠️ The MCP handler still FORWARDS the key (pf_update_user copies its whole
 // args map into the PATCH body; pf_create_user passes the map wholesale). That

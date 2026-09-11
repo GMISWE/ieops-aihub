@@ -1149,17 +1149,17 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
-		// stability_days mirrors domain.computeStabilityDays(memType, newActivationCount):
-		// base_stability_for_type × (1 + activation_count × 0.5).
-		// We replicate it inline since the helper is unexported.
-		baseStability := 7.0
-		switch {
-		case strings.HasPrefix(memType, "fact."):
-			baseStability = 180.0
-		case strings.HasPrefix(memType, "rule."), strings.HasPrefix(memType, "methodology."):
-			baseStability = 36500.0
-		}
-		newStability := baseStability * (1.0 + float64(newActivationCount)*0.5)
+		// stability_days is computed by domain.ComputeStabilityDays (§7.2).
+		//
+		// aihub#597: this used to be an inline replica of that formula — the
+		// three base values (7/180/36500) kept in sync with domain purely by
+		// hand, because the helper could not be called from here before it was
+		// exported. domain is now the ONE site that knows the formula. Two arms
+		// in routes_memory_stability_dedup_test.go hold the dedup: this handler
+		// must obtain the value from the domain helper and carry no stability
+		// base literal of its own, and no second replica may appear anywhere
+		// outside internal/domain.
+		newStability := domain.ComputeStabilityDays(memType, newActivationCount)
 
 		// aihub#475: RETURNING, and everything below is built from what comes
 		// back — not from newBaseStrength / newActivationCount.

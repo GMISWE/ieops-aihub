@@ -236,7 +236,7 @@ var clampsOutsideTheConvention = map[string]ScopeNote{
 			"SENT by one, which is the distinction the convention turns on",
 	},
 	"internal/domain/memory.go:MemoryStrength:stabilityDays": {
-		Origin: "a decay constant derived from the memory's own type by computeStabilityDays, " +
+		Origin: "a decay constant derived from the memory's own type by ComputeStabilityDays, " +
 			"never a request field; the guard is against dividing by zero",
 	},
 	"internal/domain/memory_unmatched.go:UnmatchedTypes:end": {

@@ -193,7 +193,7 @@ func TestActivate_StillRevivesADecayedVersionWithNoSuccessor(t *testing.T) {
 	//
 	//	M1  drop stability_days from Activate's UPDATE SET list        RED
 	//	M2  pass activationCount instead of newCount to
-	//	    computeStabilityDays                                        RED
+	//	    ComputeStabilityDays                                        RED
 	//	M3  drop activation_count from the UPDATE                       RED
 	require.Equal(t, 1, resp.ActivationCount,
 		"the first activation must report activation_count=1")
@@ -211,11 +211,11 @@ func TestActivate_StillRevivesADecayedVersionWithNoSuccessor(t *testing.T) {
 			"the forgetting curve; a term that did not move would make this tool the "+
 			"bookkeeping the card denies it is, and recall's min_strength predicate divides by "+
 			"this exact column", stabilityBefore, stabilityAfter)
-	require.Equal(t, computeStabilityDays("experience.debug", countAfter), stabilityAfter,
-		"the column holds %g and computeStabilityDays(experience.debug, %d) is %g. The write "+
+	require.Equal(t, ComputeStabilityDays("experience.debug", countAfter), stabilityAfter,
+		"the column holds %g and ComputeStabilityDays(experience.debug, %d) is %g. The write "+
 			"and the formula recall reads must be the same number, or the response's "+
 			"new_stability_days describes a curve the row is not on",
-		stabilityAfter, countAfter, computeStabilityDays("experience.debug", countAfter))
+		stabilityAfter, countAfter, ComputeStabilityDays("experience.debug", countAfter))
 	require.Equal(t, stabilityAfter, resp.NewStabilityDays,
 		"the response reported new_stability_days=%g against a stored %g",
 		resp.NewStabilityDays, stabilityAfter)

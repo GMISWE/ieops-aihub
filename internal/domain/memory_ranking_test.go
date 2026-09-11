@@ -236,7 +236,7 @@ func TestUpdateMemory_FreshEditWithStaleActivationSurvivesMinStrength(t *testing
 // Recall still reported full strength.
 //
 // experience.* is used deliberately: the trg_mem_immortal trigger does NOT
-// force stability_days for that prefix, so computeStabilityDays applies
+// force stability_days for that prefix, so ComputeStabilityDays applies
 // (7 * (1 + 1*0.5) = 10.5 days) and the archive threshold of 0.1 is reached
 // after only 10.5*ln(30) ~= 36 days. With fact.* the trigger pins 180 days and
 // the threshold is ~612 days away, which would make the test slow to reason

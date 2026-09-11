@@ -88,7 +88,10 @@ to make that call.)
 
 ⚠️ **That disclosure applies to every `pf_*` tool, not just this one.** If a response comes back
 with a `request_adjusted` entry naming `unknown_params`, you sent a parameter the tool does not
-publish: it reached nothing and changed nothing, whatever the rest of the response says. Read the
+publish: it was not applied — for pf_remember / pf_save_artifact / pf_update_memory it is
+stripped at the MCP boundary before the request is built (aihub#586); for every other tool it
+either never leaves the process or is sent to the server and dropped at its JSON binding —
+whatever the rest of the response says. Read the
 names it lists and stop sending them — do not retry the same call. This paragraph used to say the
 drop was simply "harmless", and while nothing breaks, a parameter you believe you passed and the
 server never saw is not harmless; `expected_version` was 202 such calls in 21 days, each one an

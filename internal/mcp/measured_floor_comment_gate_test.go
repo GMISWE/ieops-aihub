@@ -33,6 +33,8 @@ package mcp_test
 //
 //	NO_VALUE     a floor/ceiling comment may not restate a measured value
 //	NAMES_ARM    it must name the arm whose printed line carries the value
+//	NO_PRINT_ARM the pointed-at line must exist: G2's log line must carry the
+//	             outbound-request count floorToolsOnWire is set from (aihub#542)
 //	NO_RECIPE    the file must carry a runnable re-derivation command
 //	FLOOR_CONSTS the walk must have found constants to check
 //	UNGATED_FILE a labelled gate file must be in gatedFloorFiles
@@ -40,6 +42,13 @@ package mcp_test
 // NAMES_ARM is what keeps NO_VALUE from being lossy. Deleting a number and
 // leaving nothing behind would make the block cheaper to write and useless to
 // read; the pair is "no value, but always a pointer to where the value is".
+// And NO_PRINT_ARM is what keeps NAMES_ARM honest: floorToolsOnWire's comment
+// satisfied the pointer check while the line it pointed at printed the
+// distinct-path count rather than the floored quantity, so the only way to
+// read the floor's current value was to raise it to an absurd number and read
+// the failure — an exemption recorded in prose that no arm here refused, until
+// aihub#542 put the count into G2's log line and added the arm that keeps it
+// there.
 //
 // ─── Scope: the arms a developer can re-run with one command ───────────────
 //
@@ -66,6 +75,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -404,4 +414,104 @@ func declaresArmLabel(t *testing.T, base string) bool {
 		return true
 	})
 	return declares
+}
+
+// ─── aihub#542: the pointed-at line must exist ───────────────────────────────
+
+// logfFormats returns the format string of every t.Logf call in one file of
+// this package, string-concatenations flattened. AST rather than raw bytes for
+// the same reason as declaresArmLabel: prose that DESCRIBES a log line (this
+// comment, the gate's own error text) must not count as one.
+func logfFormats(t *testing.T, base string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, base, nil, 0) // comments dropped on purpose
+	if err != nil {
+		t.Fatalf("parse %s: %v", base, err)
+	}
+
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Logf" {
+			return true
+		}
+		if s, ok := flatStringLit(call.Args[0]); ok {
+			out = append(out, s)
+		}
+		return true
+	})
+	return out
+}
+
+// flatStringLit resolves an expression to its string value when it is a string
+// literal or a `+` concatenation of them, which are the only format shapes the
+// Logf calls in this package use.
+func flatStringLit(e ast.Expr) (string, bool) {
+	switch v := e.(type) {
+	case *ast.BasicLit:
+		if v.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(v.Value)
+		return s, err == nil
+	case *ast.BinaryExpr:
+		if v.Op != token.ADD {
+			return "", false
+		}
+		l, lok := flatStringLit(v.X)
+		r, rok := flatStringLit(v.Y)
+		return l + r, lok && rok
+	case *ast.ParenExpr:
+		return flatStringLit(v.X)
+	}
+	return "", false
+}
+
+// TestMeasuredFloorToolsOnWirePrintArm holds the seventh print arm in place.
+//
+// floorToolsOnWire was the one governed constant whose value no green log line
+// printed: NAMES_ARM accepted its comment because the comment named G2, but the
+// line G2 printed carried the distinct-path count, not the outbound-request
+// count the floor is set from — a pointer to a line that did not carry the
+// value. The header of universal_contract_gate_test.go even recorded the
+// workaround as the recipe: raise the floor to an absurd value and read the
+// count out of the failure. aihub#542 put the count into G2's log line; this
+// arm is what makes removing it again cost a red here rather than a silent
+// return to failure-only observability.
+func TestMeasuredFloorToolsOnWirePrintArm(t *testing.T) {
+	const base = "universal_contract_gate_test.go"
+	var g2 []string
+	for _, format := range logfFormats(t, base) {
+		if strings.HasPrefix(format, "G2") {
+			g2 = append(g2, format)
+		}
+	}
+	if len(g2) == 0 {
+		t.Fatalf("MEASURED_FLOOR NO_PRINT_ARM: %s has no t.Logf whose format begins with "+
+			"\"G2\" — the arm floorToolsOnWire's comment points at prints nothing on the green "+
+			"path, so this test cannot pass by not finding its subject.", base)
+	}
+	found := false
+	for _, format := range g2 {
+		if strings.Contains(format, "outbound request") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MEASURED_FLOOR NO_PRINT_ARM: none of the %d G2 log line(s) in %s carries an "+
+			"\"outbound request\" figure. floorToolsOnWire is G2's outbound-request floor and "+
+			"its comment points at G2's log line for the current value (NAMES_ARM); without "+
+			"the figure that pointer aims at a line that does not carry the value, which is "+
+			"the exemption aihub#542 removed — the only way to read the floor's value would "+
+			"again be to raise it to an absurd number and read the failure. Put len(observed) "+
+			"back into G2's t.Logf.", len(g2), base)
+	} else {
+		t.Logf("print arm: %d G2 log line(s) in %s, the \"outbound request\" figure present",
+			len(g2), base)
+	}
 }

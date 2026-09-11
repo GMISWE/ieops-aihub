@@ -71,13 +71,22 @@ group — the wording is pinned by `internal/mcp/unknown_params_wording_test.go`
 It is appended to the list, so a `request_adjusted` the server
 itself produced (a clamped `limit`, say) is still there alongside it.
 
-Reporting rather than rejecting is deliberate and temporary. `additionalProperties:false`
-in `objectSchema` would make the SDK refuse these before the handler runs, and it
-is the intended end state — but measured over 21 days of transcripts, 301 of
-12,133 `pf_*` calls carried an unpublished argument, 202 of them
-`pf_update_step.expected_version` alone (18% of that tool's calls), so flipping it
-today would fail roughly one `pf_update_step` in five. The flip is a separate work
-item, gated on a re-measure below 0.1%.
+Reporting rather than rejecting is deliberate and temporary: rejection is the
+intended end state, but not by schema flag alone. An earlier version of this
+paragraph said `additionalProperties:false` in `objectSchema` "would make the SDK
+refuse these before the handler runs" — false for this codebase (`aihub#463`
+measured it on go-sdk v1.6.0; corrected by `aihub#547`): every tool is registered
+through the untyped `(*mcp.Server).AddTool`, whose dispatch (`Server.callTool`)
+hands the request straight to the handler with no schema step — `applySchema ->
+resolved.Validate` runs only on the generic `AddTool[In, Out]` path this repo does
+not use — so the flag would change the published schema bytes and refuse nothing.
+Rejection needs a real mechanism: a per-call check in this server's own dispatch
+path (the `addTool` wrapper already computes the exact unknown set it discloses),
+or a migration to the typed registration. Either way it stays a separate work item
+(`aihub#431`), gated on a re-measure below 0.1%: over 21 days of transcripts, 301
+of 12,133 `pf_*` calls carried an unpublished argument, 202 of them
+`pf_update_step.expected_version` alone (18% of that tool's calls), so rejecting
+today would fail roughly one `pf_update_step` in five.
 
 ## Work item lifecycle (13) - `internal/mcp/tools_lifecycle.go`
 

@@ -168,17 +168,21 @@ and the resolved state file into the body of `PATCH /v1/memories/<id>/reinforce`
   something you did not name" shape — and the owner separated them on exactly the
   ground above, that a SUM is arithmetic where a named value is an intent. The two
   candidates that lost were a 400 on an overflowing sum and a `clamped: true` field
-  in the response; the second is why the response shape is untouched and K10's
-  declared key set with it, and the SATURATING call's body is now asserted as an
-  exact three-key set by
+  in the response; the second is why the response shape is untouched, and what holds
+  it untouched is the SATURATING call's body asserted as an exact three-key set by
   `internal/server/routes_memory_reinforce_returning_db_test.go`
-  (`TestReinforceMemory_IntegralDeltaStillMoves`) — K10's single direction is the
-  other one: every key a live response CARRIES must be declared, so a `clamped`
-  field arriving undeclared is precisely what K10 DOES catch, and what it cannot see
-  is a key that stops being sent. The exact three-key set is what covers that second
-  half, on the one call a withdrawn disclosure field would have had something to say
-  on. So a delta of `+4` on a row stored at `4` still answers
-  200 with `base_strength` `5` — the difference is that the caller is told in
+  (`TestReinforceMemory_IntegralDeltaStillMoves`) — the one request a withdrawn
+  disclosure field would have had something to say on. An earlier revision of this
+  card credited that unchanged shape to K10's declared key set, which overstated the
+  gate: this tool has no entry in `docs/mcp-cards/live-response-keys.json`, so the
+  declared set K10 grades a live reinforce against is this card's own
+  `response_keys_observed`, and the walk in
+  `internal/mcp/card_response_keys_live_e2e_db_test.go`
+  (`TestE2ELiveResponseKeysAreDeclaredOnTheCards`) drives its one reinforce with no
+  `strength_delta`, so the only reinforce body K10 ever reads is a non-saturating
+  one, where a clamp-engagement disclosure key would have had nothing to disclose
+  (corrected 2026-09-11, `aihub#531`). So a delta of `+4` on a row stored at `4`
+  still answers 200 with `base_strength` `5` — the difference is that the caller is told in
   advance that it will, which
   `internal/server/routes_memory_reinforce_returning_db_test.go`
   (`TestReinforceMemory_IntegralDeltaStillMoves`) drives by pushing a `+99` onto a

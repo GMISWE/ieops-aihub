@@ -378,7 +378,11 @@ const lockDeleteByKeySQL = `DELETE FROM resource_locks rl WHERE rl.resource_type
 //
 //	FnClaimWorkItem   BeginTx(IsoLevel: pgx.Serializable)
 //	FnAcquireLocks    BeginTx(IsoLevel: pgx.Serializable)
-//	FnForceTakeover   pool.Begin(ctx)   <- READ COMMITTED
+//	FnForceTakeover   pool.Begin(ctx)   <- no isolation pinned: a bare BEGIN
+//	                  runs at default_transaction_isolation, which the database,
+//	                  the role or the DSN decides (aihub#497) — read committed
+//	                  at the deployed defaults, but that is configuration, not
+//	                  code (txn_isolation_probe_test.go pins the split)
 //
 // The three rows used to carry line numbers as well. All three were wrong by
 // aihub#493 two days later, and wrong a second time within that same day's

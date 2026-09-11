@@ -16,7 +16,10 @@ package domain
 //
 //	FnClaimWorkItem   BeginTx(IsoLevel: pgx.Serializable)
 //	FnAcquireLocks    BeginTx(IsoLevel: pgx.Serializable)
-//	FnForceTakeover   pool.Begin(ctx)   <- READ COMMITTED
+//	FnForceTakeover   pool.Begin(ctx)   <- no isolation pinned: a bare BEGIN,
+//	                  so default_transaction_isolation decides (read committed
+//	                  at the deployed defaults; aihub#497,
+//	                  txn_isolation_probe_test.go)
 //
 // So the qualifier was inherited by the claim tool from a note written about the
 // takeover tool. Whether it is true THERE is a property of Postgres's

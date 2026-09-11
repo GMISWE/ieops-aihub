@@ -300,10 +300,17 @@ exemption. So the walk cannot shrink except in a diff somebody signs.
 
 The first thing the git arm found is in `live-response-keys.json`:
 `pf_wrap.pushed_sha`. The field has existed since 2026-08-14 and the corpus spans
-calls to 2026-09-07, yet none of its 90 recorded `pf_wrap` calls carried the key —
-which, since it is emitted whenever `pushed` is true, means **every wrap in the
-corpus was an idempotent replay that pushed nothing**. Six months of records could
-not have shown that; one live call did.
+calls to 2026-09-07, yet the key appears in none of the corpus's 90 recorded
+`pf_wrap` calls. What that absence proves is narrower than it reads (aihub#550):
+the corpus's key union is taken over strict-JSON success results only — 81 of
+the 90; the other 9 are prose (slim-render) results that contribute no keys —
+and a wrap that FAILS returns an error result carrying no payload keys at all,
+including the arm where the push itself succeeded and `complete_attempt` then
+failed. A success payload carries `pushed_sha` exactly when `pushed` is true, so
+the supported claim is: **every strict-JSON success in the corpus was an
+idempotent replay that pushed nothing** — about failed wraps, pushed or not, the
+key record is silent either way. Six months of records could not have shown the
+key; one live call did.
 
 ## Working on a card
 

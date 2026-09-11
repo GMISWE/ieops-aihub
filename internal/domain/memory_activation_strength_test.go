@@ -12,7 +12,7 @@ package domain
 // That second sentence is the one worth a probe, and it is a claim about a
 // COMPOSITION — three independent facts have to hold for it to be true:
 //
-//	1. the stability term rises with the activation count      computeStabilityDays
+//	1. the stability term rises with the activation count      ComputeStabilityDays
 //	2. effective strength rises with the stability term        MemoryStrength
 //	3. recall thresholds on that same expression, in SQL       the Recall WHERE
 //
@@ -52,9 +52,9 @@ var activationStrengthTypes = []string{
 // TestActivationRaisesTheStabilityTermTheStrengthFormulaReads holds facts 1 and
 // 2 of the composition above.
 //
-//	M1  computeStabilityDays: drop the `activation_count × 0.5` term so it
+//	M1  ComputeStabilityDays: drop the `activation_count × 0.5` term so it
 //	    returns the base stability regardless of the count        RED
-//	M2  computeStabilityDays: make the multiplier 0 for the default
+//	M2  ComputeStabilityDays: make the multiplier 0 for the default
 //	    branch only                                               RED
 //	    (the unrecognised type is why — a per-type list would miss it)
 //	M3  MemoryStrength: divide by a constant instead of by
@@ -81,14 +81,14 @@ func TestActivationRaisesTheStabilityTermTheStrengthFormulaReads(t *testing.T) {
 		distinct[baseStabilityForType(memType)] = true
 
 		// Fact 1: each activation raises the stability term, at every count.
-		prev := computeStabilityDays(memType, 0)
+		prev := ComputeStabilityDays(memType, 0)
 		require.Greater(t, prev, 0.0,
 			"%s starts at a non-positive stability, and MemoryStrength returns 0 for that — "+
 				"the whole curve would be dead before the first activation", memType)
 		for n := 1; n <= 5; n++ {
-			cur := computeStabilityDays(memType, n)
+			cur := ComputeStabilityDays(memType, n)
 			require.Greater(t, cur, prev,
-				"computeStabilityDays(%s, %d)=%g is not above the value at %d (%g). The card "+
+				"ComputeStabilityDays(%s, %d)=%g is not above the value at %d (%g). The card "+
 					"says activation UPDATES the stability term; a term that does not move makes "+
 					"the tool bookkeeping, which is exactly what the card denies", memType, n, cur, n-1, prev)
 			prev = cur
@@ -104,9 +104,9 @@ func TestActivationRaisesTheStabilityTermTheStrengthFormulaReads(t *testing.T) {
 	// expose.
 	created := time.Now().Add(-30 * 24 * time.Hour)
 	for _, bs := range []float64{MinBaseStrength, DefaultBaseStrength, MaxBaseStrength} {
-		prev := MemoryStrength(bs, computeStabilityDays("experience.debug", 0), nil, created)
+		prev := MemoryStrength(bs, ComputeStabilityDays("experience.debug", 0), nil, created)
 		for n := 1; n <= 5; n++ {
-			cur := MemoryStrength(bs, computeStabilityDays("experience.debug", n), nil, created)
+			cur := MemoryStrength(bs, ComputeStabilityDays("experience.debug", n), nil, created)
 			require.Greater(t, cur, prev,
 				"at base_strength=%g and 30 days of age, activation %d did not raise the "+
 					"effective strength (%g -> %g). The card's `effective_strength` is computed "+
@@ -129,7 +129,7 @@ func TestActivationRaisesTheStabilityTermTheStrengthFormulaReads(t *testing.T) {
 // the recall parameter's own default sits at, so the case is not invented to
 // order.
 //
-//	M6  computeStabilityDays: halve the multiplier so the rise never crosses
+//	M6  ComputeStabilityDays: halve the multiplier so the rise never crosses
 //	    the threshold at this age                                RED
 //	M7  raise the fixture's age past the point where any number of
 //	    activations helps                                        RED, and that
@@ -148,14 +148,14 @@ func TestActivationCanCarryAMemoryBackOverTheRecallThreshold(t *testing.T) {
 	const threshold = 0.3
 	created := time.Now().Add(-21 * 24 * time.Hour)
 
-	before := MemoryStrength(DefaultBaseStrength, computeStabilityDays("experience.debug", 0), nil, created)
+	before := MemoryStrength(DefaultBaseStrength, ComputeStabilityDays("experience.debug", 0), nil, created)
 	require.Less(t, before, threshold,
 		"the fixture no longer starts BELOW the threshold (%g), so the crossing this arm is "+
 			"about cannot happen and it would pass without measuring anything", threshold)
 
 	crossedAt := -1
 	for n := 1; n <= 10; n++ {
-		if MemoryStrength(DefaultBaseStrength, computeStabilityDays("experience.debug", n), nil, created) >= threshold {
+		if MemoryStrength(DefaultBaseStrength, ComputeStabilityDays("experience.debug", n), nil, created) >= threshold {
 			crossedAt = n
 			break
 		}

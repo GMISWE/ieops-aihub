@@ -823,9 +823,16 @@ func MemoryStrength(baseStrength, stabilityDays float64, lastActivatedAt *time.T
 	return baseStrength * math.Exp(-daysSince/stabilityDays)
 }
 
-// computeStabilityDays returns current stability_days per activation count (§7.2).
+// ComputeStabilityDays returns current stability_days per activation count (§7.2).
 // stability_days = base_stability × (1 + activation_count × 0.5)
-func computeStabilityDays(memType string, activationCount int) float64 {
+//
+// Exported by aihub#597. Before that, the server's reinforce handler carried an
+// inline replica of this formula — the three base values (7/180/36500) kept in
+// sync purely by hand — because it could not call the unexported helper. This
+// function is now the ONE site that knows the formula;
+// internal/server/routes_memory_stability_dedup_test.go holds both that the
+// handler calls it and that no second replica appears outside this package.
+func ComputeStabilityDays(memType string, activationCount int) float64 {
 	return baseStabilityForType(memType) * (1.0 + float64(activationCount)*0.5)
 }
 
@@ -1266,7 +1273,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		baseStrength = *req.BaseStrength
 	}
 	immortal := isImmortalType(req.Type)
-	stabilityDays := computeStabilityDays(req.Type, req.ActivationCount)
+	stabilityDays := ComputeStabilityDays(req.Type, req.ActivationCount)
 	if req.Tags == nil {
 		req.Tags = []string{}
 	}
@@ -1506,7 +1513,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			// stability_days derived from zero. Only bites experience.* and the
 			// default bucket: fn_mem_immortal (migration 0006) overwrites
 			// stability_days for rule.* / fact.* / methodology.* on INSERT.
-			stabilityDays = computeStabilityDays(req.Type, req.ActivationCount)
+			stabilityDays = ComputeStabilityDays(req.Type, req.ActivationCount)
 		}
 	}
 
@@ -3179,7 +3186,7 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 	}
 
 	newCount := activationCount + 1
-	newStability := computeStabilityDays(memType, newCount)
+	newStability := ComputeStabilityDays(memType, newCount)
 
 	// aihub#214 + aihub#175 finding 3: activation revives an archived memory to
 	// active — correct for a genuinely decayed experience/fact/rule (used again

@@ -402,9 +402,9 @@ func TestComputeStabilityDays(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.memType, func(t *testing.T) {
-			got := computeStabilityDays(tt.memType, tt.acts)
+			got := ComputeStabilityDays(tt.memType, tt.acts)
 			if math.Abs(got-tt.want) > 0.01 {
-				t.Errorf("computeStabilityDays(%q, %d) = %v, want %v", tt.memType, tt.acts, got, tt.want)
+				t.Errorf("ComputeStabilityDays(%q, %d) = %v, want %v", tt.memType, tt.acts, got, tt.want)
 			}
 		})
 	}

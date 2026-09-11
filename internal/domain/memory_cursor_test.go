@@ -218,7 +218,7 @@ func TestRemember_SupersedeInheritsActivationState(t *testing.T) {
 	// stability_days is computed before the supersede head is resolved, so an
 	// inherited count that did not trigger a recompute would leave a non-zero
 	// activation_count stored against a stability derived from zero.
-	assert.InDelta(t, computeStabilityDays(memType, inheritedCount), newHead.StabilityDays, 0.001,
+	assert.InDelta(t, ComputeStabilityDays(memType, inheritedCount), newHead.StabilityDays, 0.001,
 		"stability_days must be recomputed from the inherited activation_count")
 
 	// The reference time still resolves to the FRESH created_at: memRefTimeSQL is

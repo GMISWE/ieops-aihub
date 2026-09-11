@@ -1021,6 +1021,21 @@ func derivedFileScopeLocks(raw json.RawMessage, project string) (byKey map[strin
 func resourceToLock(res DeclaredResourceItem, project string) (lockType, lockKey string) {
 	switch res.Type {
 	case "path", "document", "section":
+		// A declaration whose uri names no file — absent, whitespace, or a bare
+		// "file:" with nothing after it — maps to no lock (aihub#524). Until
+		// then it fell through to fileScopeLockKey, whose unconditional project
+		// prefix turned the empty path into the NON-empty degenerate key
+		// "<project>:" (or "<project>:<repo>:"), so the empty-key skip in
+		// deriveClaimLocks never fired: a real row was inserted, listed in
+		// acquired_locks, and hard-blocked every other no-uri declaration in
+		// the project — all while UnrecognizedDeclaredResources told the caller
+		// the entry acquired no lock. Refusing here makes that report true, on
+		// every path that derives (claim, takeover, acquire_locks, commit
+		// reconcile, PredictConflicts rule 1), and the entry is surfaced by the
+		// report's no-uri arm rather than dropped silently.
+		if strings.TrimSpace(fileURIToLockKey(res.URI)) == "" {
+			return "", ""
+		}
 		return "file_scope", fileScopeLockKey(project, res.Repo, res.URI)
 	case "repo", "service", "external_ref":
 		return "", "" // advisory declarations: no lock is derived (aihub#416)

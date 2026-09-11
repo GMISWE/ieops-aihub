@@ -261,9 +261,15 @@ type routerRender struct {
 
 var routerAssembledRe = regexp.MustCompile(`payload is (\d+) chars`)
 
-// renderRouter drives the shipped hook exactly as the harness does, with the engine branch
-// pinned by fixture settings rather than inherited from whoever is running the test.
-func renderRouter(t *testing.T, pluginRoot, skill string, superpowers bool) routerRender {
+// execRouter is the ONE exec core behind every hook invocation in this file: fixture home,
+// the payload envelope, the hook run under bash, a scrubbed environment, stderr captured,
+// non-zero exit fatal. It does not interpret the emission — the aihub#514 header-only guard
+// makes an EMPTY emission a correct outcome for some fixtures, and asserting that requires
+// being able to observe it. Callers that need a parsed, guaranteed-non-empty render go
+// through renderRouter; callers that must see the raw (possibly empty) output call this
+// directly. It used to exist twice (renderRouter and a runRouterRaw copy of its first half),
+// which is how the two could drift apart without either going red.
+func execRouter(t *testing.T, pluginRoot, skill string, superpowers bool) (string, string) {
 	t.Helper()
 	home, ws := routerFixtureHome(t, superpowers)
 	payload := fmt.Sprintf(
@@ -285,12 +291,21 @@ func renderRouter(t *testing.T, pluginRoot, skill string, superpowers bool) rout
 		t.Fatalf("hook failed for %s (superpowers=%v): %v (stderr: %s)",
 			skill, superpowers, err, stderr.String())
 	}
+	return string(stdout), stderr.String()
+}
+
+// renderRouter drives the shipped hook exactly as the harness does, with the engine branch
+// pinned by fixture settings rather than inherited from whoever is running the test.
+func renderRouter(t *testing.T, pluginRoot, skill string, superpowers bool) routerRender {
+	t.Helper()
+	rawOut, rawErr := execRouter(t, pluginRoot, skill, superpowers)
+	stdout := []byte(rawOut)
 	// The hook is FAIL-SILENT by design. That is right for production and fatal for a gate:
 	// an empty render makes every assertion below vacuously true.
-	if len(strings.TrimSpace(string(stdout))) == 0 {
+	if len(strings.TrimSpace(rawOut)) == 0 {
 		t.Fatalf("hook emitted nothing for %s (superpowers=%v) — it is fail-silent, so this "+
 			"gate cannot tell a clean render from no render (stderr: %s)",
-			skill, superpowers, stderr.String())
+			skill, superpowers, rawErr)
 	}
 
 	var out struct {
@@ -317,7 +332,7 @@ func renderRouter(t *testing.T, pluginRoot, skill string, superpowers bool) rout
 	}
 
 	absRoot := mustAbs(t, pluginRoot)
-	r := routerRender{ctx: ctx, stderr: stderr.String(), assembledLen: charLen(ctx)}
+	r := routerRender{ctx: ctx, stderr: rawErr, assembledLen: charLen(ctx)}
 	r.pointers = strings.Count(ctx, absRoot)
 	r.normLen = charLen(strings.ReplaceAll(ctx, absRoot, routerRootToken))
 	r.worstLen = r.normLen + r.pointers*(routerAssumedRootLen-charLen(routerRootToken))
@@ -330,6 +345,13 @@ func renderRouter(t *testing.T, pluginRoot, skill string, superpowers bool) rout
 
 const (
 	routerBannerMark = "POLYFORGE SKILL-ROUTER PAYLOAD OVER BUDGET"
+	// The header's leading prefix, rendered by the hook in both modes. SINGLE-SOURCED here on
+	// purpose: it used to be hard-copied at every site that looked for it, including both
+	// banner-order checks, and those guarded themselves with `strings.Index(...) >= 0` — so a
+	// reworded sentinel updated in only one copy turned the stale site's lookup into -1 and its
+	// self-guard into a silent skip. Green by vacancy, not by order. One const cannot drift
+	// against itself, and assertBannerLeads makes a miss a FAILURE rather than a skip.
+	routerHeaderMark = "[polyforge router]"
 	// The sentence in the router's header that has to survive truncation.
 	routerBudgetNotice = "Fragments marked 📄 are NOT injected"
 	// Its header-only counterpart. Deliberately a DIFFERENT sentence: that mode defers nothing,
@@ -346,7 +368,7 @@ const (
 // Without it, "the notice is in the window" would pass just as happily on a payload short
 // enough that tle() returns everything, or on a broken tle() that never truncates.
 func TestRouterPreviewWindowCheckDiscriminates(t *testing.T) {
-	head := "[polyforge router] " + routerBudgetNotice + " — rest of the header.\n"
+	head := routerHeaderMark + " " + routerBudgetNotice + " — rest of the header.\n"
 	filler := strings.Repeat("padding line to push past the preview window\n", 200)
 
 	if !strings.Contains(tle(head+filler), routerBudgetNotice) {
@@ -446,7 +468,7 @@ func TestRoutedSkillHook_PayloadFitsHarnessLimit(t *testing.T) {
 				// tle(ctx). What has to survive that is the header — it is the single line
 				// that tells the model fragments were deferred and that `Read` is how to get
 				// them. Assert it lands in the window, which is a claim about ORDER.
-				if !strings.HasPrefix(r.ctx, "[polyforge router]") {
+				if !strings.HasPrefix(r.ctx, routerHeaderMark) {
 					t.Errorf("%s: the payload does not start with the router header", key)
 				}
 				notice := routerBudgetNotice
@@ -907,17 +929,10 @@ func assertDegradesLoudly(t *testing.T, pluginRoot, skill string) {
 		t.Errorf("degraded payload is %d chars — it must be non-empty and within %d, or it "+
 			"would be replaced by a preview exactly as before", got, routerHarnessHardLimit)
 	}
-	if !strings.Contains(over.ctx, routerBannerMark) {
-		t.Errorf("degraded payload carries no banner — the omission would be silent, which is " +
-			"the failure mode this exists to remove")
-	}
 	// aihub#514 F4: the banner must LEAD the degraded payload. The hook's final safety cut is
 	// ctx[:limit] — a TAIL cut — so a banner joined after the header is the first thing a
 	// too-long header pushes out: exactly the sentence announcing the truncation.
-	if bi, hi := strings.Index(over.ctx, routerBannerMark), strings.Index(over.ctx, "[polyforge router]"); bi >= 0 && hi >= 0 && bi > hi {
-		t.Errorf("the banner sits at offset %d, after the header at offset %d — the tail cut "+
-			"removes the banner before anything else", bi, hi)
-	}
+	assertBannerLeads(t, over.ctx, over.stderr)
 	// aihub#338 / aihub#478: the degrade loop drops FRAGMENTS. Both header-resident texts live
 	// in the header precisely so that it cannot drop them, and this is the only place that
 	// state can be observed — every other assertion in this file measures a tree that does not
@@ -991,6 +1006,36 @@ func assertDegradesLoudly(t *testing.T, pluginRoot, skill string) {
 	if checked == 0 {
 		t.Errorf("the banner named %v, none of which this check knows how to verify — it "+
 			"asserted nothing. Add a marker for the fragments actually being dropped.", dropped)
+	}
+}
+
+// assertBannerLeads proves the over-budget banner is PRESENT in a degraded payload and sits
+// ahead of the header. Both sentinel lookups fail LOUDLY: the two inline copies of this check
+// guarded themselves with `bi >= 0 && hi >= 0`, so rewording a sentinel in the hook while
+// updating only one test copy left the stale site silently skipping the ordering assertion
+// (strings.Index == -1) instead of going red — an order gate green precisely because it could
+// no longer see either of the things it orders.
+func assertBannerLeads(t *testing.T, ctx, stderr string) {
+	t.Helper()
+	bi := strings.Index(ctx, routerBannerMark)
+	if bi < 0 {
+		t.Errorf("no %q banner in the degraded payload — the truncation is silent, the exact "+
+			"aihub#514 F4 failure the degrade path exists to remove (stderr: %s)",
+			routerBannerMark, stderr)
+	}
+	hi := strings.Index(ctx, routerHeaderMark)
+	if hi < 0 {
+		t.Errorf("header mark %q is missing from the degraded payload — either the cut took "+
+			"the header itself or the sentinel drifted from the hook. Both are failures; "+
+			"neither may downgrade the ordering assertion to a silent skip.", routerHeaderMark)
+	}
+	if bi < 0 || hi < 0 {
+		return
+	}
+	if bi > hi {
+		t.Errorf("the banner sits at offset %d, after the header at offset %d — the hook's "+
+			"final safety cut is ctx[:limit], a TAIL cut, so it removes the banner before "+
+			"anything else", bi, hi)
 	}
 }
 
@@ -1094,31 +1139,6 @@ func padFragment(t *testing.T, path string, n int) {
 	}
 }
 
-// runRouterRaw drives the hook like renderRouter but does not treat an empty emission as
-// fatal. The aihub#514 header-only guard makes silence a CORRECT outcome — asserting it
-// requires being able to observe it, which renderRouter's fail-silent trap forbids.
-func runRouterRaw(t *testing.T, pluginRoot, skill string, superpowers bool) (string, string) {
-	t.Helper()
-	home, ws := routerFixtureHome(t, superpowers)
-	payload := fmt.Sprintf(
-		`{"tool_name":"Skill","tool_input":{"skill":"polyforge:%s"},"cwd":%q}`, skill, ws)
-	cmd := exec.Command("bash", filepath.Join(pluginRoot, "hooks", "pf-skill-router"))
-	cmd.Stdin = strings.NewReader(payload)
-	cmd.Env = []string{
-		"HOME=" + home,
-		"PATH=" + os.Getenv("PATH"),
-		"CLAUDE_PLUGIN_ROOT=" + mustAbs(t, pluginRoot),
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	stdout, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("hook failed for %s (superpowers=%v): %v (stderr: %s)",
-			skill, superpowers, err, stderr.String())
-	}
-	return string(stdout), stderr.String()
-}
-
 // TestRoutedSkillHook_HeaderOnlyOverBudgetBannerSurvives drives the header-only over-budget
 // path (aihub#514 F4). That mode has no droppable parts[], so the ONLY way the hook can fit
 // an oversized header is the ctx[:limit] tail cut — and with the banner joined after the
@@ -1157,15 +1177,7 @@ func TestRoutedSkillHook_HeaderOnlyOverBudgetBannerSurvives(t *testing.T) {
 				t.Errorf("delivered payload is %d chars — must be non-empty and within %d",
 					got, routerHarnessHardLimit)
 			}
-			bi := strings.Index(over.ctx, routerBannerMark)
-			if bi < 0 {
-				t.Fatalf("no banner in the truncated header-only payload — the truncation is "+
-					"silent, which is aihub#514 F4 verbatim. stderr: %s", over.stderr)
-			}
-			if hi := strings.Index(over.ctx, "[polyforge router]"); hi >= 0 && bi > hi {
-				t.Errorf("banner at offset %d, after the header at offset %d — the tail cut "+
-					"takes the banner before it takes the padding", bi, hi)
-			}
+			assertBannerLeads(t, over.ctx, over.stderr)
 			// The WHOLE banner, not a prefix of it: both of its load-bearing sentences.
 			for _, want := range []string{
 				"THIS HEADER IS TRUNCATED",
@@ -1218,7 +1230,9 @@ func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
 				root := copyPluginTree(t, pluginRoot)
 				// Control first: the COPY, before gutting, emits. Without this, the silence
 				// asserted below could be the copy failing rather than the guard firing.
-				if out, stderr := runRouterRaw(t, root, skill, false); strings.TrimSpace(out) == "" {
+				// execRouter, not renderRouter: the guard under test makes an EMPTY emission
+				// the correct outcome, and renderRouter's fail-silent trap forbids observing it.
+				if out, stderr := execRouter(t, root, skill, false); strings.TrimSpace(out) == "" {
 					t.Fatalf("the copied tree emits nothing before gutting (stderr: %s) — "+
 						"fixture broken, nothing below means anything", stderr)
 				}
@@ -1227,7 +1241,7 @@ func TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard(t *testing.T) {
 						t.Fatalf("gut %s: %v", rel, err)
 					}
 				}
-				out, stderr := runRouterRaw(t, root, skill, false)
+				out, stderr := execRouter(t, root, skill, false)
 				if headerOnly {
 					droveHeaderOnly++
 					if strings.TrimSpace(out) != "" {

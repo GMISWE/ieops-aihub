@@ -195,9 +195,9 @@ func declaredResourceSchemePrefixes() map[string]bool {
 // input, which is the one failure mode worse than the one being fixed: the cheap
 // way out of a validator that refuses good payloads is to delete the validator.
 // Note in particular that a bare `"file:"` with nothing after it still passes
-// this; that entry derives an empty lock key and is reported by the separate
-// no-uri path in UnrecognizedDeclaredResources, which is where the existing
-// remedy for it lives.
+// this; since aihub#524 that entry derives no lock (resourceToLock refuses the
+// degenerate "<project>:" key it used to emit) and is reported by the no-uri
+// path in UnrecognizedDeclaredResources, which is where the remedy for it lives.
 func uriSchemeProblem(typ, uri string) (problem, expected string) {
 	scheme, known := declaredResourceURISchemes[typ]
 	if !known {
@@ -348,7 +348,17 @@ func UnrecognizedDeclaredResources(raw json.RawMessage) []string {
 	for i, item := range items {
 		typ, _ := item["type"].(string)
 		uri, _ := item["uri"].(string)
-		hasURI := strings.TrimSpace(uri) != ""
+		// A uri that is empty once its type's scheme is stripped names nothing —
+		// "file:" selects no file — so it counts as missing here, exactly as
+		// resourceToLock treats it (aihub#524). Before that, the scheme-only
+		// shape was doubly silent: it derived a real file_scope lock on the
+		// degenerate key "<project>:" AND, being a non-empty string, dodged
+		// this report.
+		effURI := strings.TrimSpace(uri)
+		if scheme := declaredResourceURISchemes[typ]; scheme != "" && strings.HasPrefix(effURI, scheme) {
+			effURI = strings.TrimSpace(strings.TrimPrefix(effURI, scheme))
+		}
+		hasURI := effURI != ""
 
 		switch {
 		case !declaredResourceTypes[typ]:
@@ -363,13 +373,28 @@ func UnrecognizedDeclaredResources(raw json.RawMessage) []string {
 			out = append(out, desc)
 
 		case typ != "external_ref" && !hasURI:
-			// A recognized type with no uri is the second silent shape: it maps to a
-			// well-typed lock with an EMPTY key (e.g. service -> ("deploy_env","")),
-			// which the claim path now refuses to insert. Report it, or skipping it
-			// would be just as quiet as the bug this change fixes.
+			// A recognized type whose uri names nothing is the second silent
+			// shape, and since aihub#524 "derives no lock" is true of it on
+			// every derivation path. (Before aihub#416 the example here was
+			// service -> ("deploy_env",""), skipped for its empty key; after
+			// #416 service derives nothing regardless, and the surviving case
+			// was path/document/section, whose degenerate "<project>:" key was
+			// REAL — resourceToLock now refuses it.) Report it, or skipping it
+			// would be just as quiet as the bug this function exists to fix.
 			// external_ref is exempt: it takes no lock either way.
-			out = append(out, fmt.Sprintf(
-				"declared_resources[%d]: type %s has no `uri`, so it acquires no lock (the field is `uri`, not value/path/scope)", i, typ))
+			//
+			// Two messages because the causality differs — keep the type split
+			// in lock-step with resourceToLock's switch in conflicts.go.
+			if typ == "repo" || typ == "service" {
+				// Advisory types derive no lock whatever the uri says
+				// (aihub#416); what the missing uri costs them is visibility to
+				// the advisory conflict rules (2, 4 and 6 join on the uri).
+				out = append(out, fmt.Sprintf(
+					"declared_resources[%d]: type %s is advisory and derives no lock (aihub#416); with no `uri` naming anything, the conflict-prediction rules cannot read it either (the field is `uri`, not value/path/scope)", i, typ))
+			} else {
+				out = append(out, fmt.Sprintf(
+					"declared_resources[%d]: type %s has no `uri` naming a file, so it derives no lock (the field is `uri`, not value/path/scope)", i, typ))
+			}
 		}
 	}
 	return out

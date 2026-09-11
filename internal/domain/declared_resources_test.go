@@ -101,10 +101,12 @@ func TestValidateDeclaredResources_RejectsAbsentType(t *testing.T) {
 }
 
 // The other half of the reporter's mistake: right type, wrong field name. A
-// `path` entry with no uri yields lock key "<project>:" — a live footgun.
+// `path` entry with no uri derives no lock at all since aihub#524 (until then it
+// derived a REAL one on the degenerate key "<project>:"), so accepting it would
+// store a declaration that guards nothing while its author believes otherwise.
 func TestValidateDeclaredResources_RejectsMissingURI(t *testing.T) {
 	if err := ValidateDeclaredResources(json.RawMessage(`[{"type":"path","value":"internal/a.go"}]`)); err == nil {
-		t.Fatal("accepted type=path with no uri (field was `value`) — lock key would be \"<project>:\"")
+		t.Fatal("accepted type=path with no uri (field was `value`) — the declared path would be silently unguarded")
 	}
 }
 
@@ -297,16 +299,37 @@ func TestUnrecognizedDeclaredResources_MalformedIsSafe(t *testing.T) {
 	}
 }
 
-// aihub#238 review finding 2: a RECOGNIZED type with no uri is the second silent
-// shape. It maps to a well-typed lock with an empty key, which claim now refuses
-// to insert — so it must be reported, or the skip is as quiet as the original bug.
+// aihub#238 review finding 2, re-grounded since: a RECOGNIZED type with no uri
+// is the second silent shape and must be reported. When this test was written,
+// service derived ("deploy_env","") — a well-typed lock with an empty key the
+// claim path refused to insert. Since aihub#416 service derives no lock at all,
+// uri or none (resourceToLock maps it to ("","")); what the missing uri still
+// costs is visibility to the advisory conflict rules, which join on it. Either
+// way the entry does nothing while its author believes it is guarded, so the
+// report must fire.
 func TestUnrecognizedDeclaredResources_ReportsRecognizedTypeMissingURI(t *testing.T) {
 	got := UnrecognizedDeclaredResources(json.RawMessage(`[{"type":"service","intent":"write"}]`))
 	if len(got) != 1 {
-		t.Fatalf("got %d entries %v, want 1 — a service entry with no uri derives (\"deploy_env\",\"\") and locks nothing", len(got), got)
+		t.Fatalf("got %d entries %v, want 1 — a service entry derives no lock since aihub#416 whatever its uri, and with no uri the advisory rules cannot see it either; skipping it here is as quiet as the original bug", len(got), got)
 	}
 	if !strings.Contains(got[0], "uri") {
 		t.Errorf("report should point at the missing `uri`; got %q", got[0])
+	}
+}
+
+// A uri that is nothing but its scheme names nothing: {"type":"path","uri":"file:"}
+// selects no file. Before aihub#524 that shape was DOUBLY silent — it derived a
+// real file_scope lock on the degenerate key "<project>:" (fileScopeLockKey's
+// unconditional project prefix defeats the empty-key skip) and, because the uri
+// string is non-empty, the no-uri report here said nothing either. It must be
+// reported like the absent-uri shape it is.
+func TestUnrecognizedDeclaredResources_ReportsSchemeOnlyURI(t *testing.T) {
+	got := UnrecognizedDeclaredResources(json.RawMessage(`[{"type":"path","uri":"file:","intent":"write"}]`))
+	if len(got) != 1 {
+		t.Fatalf("got %d entries %v, want 1 — a scheme-only uri names no file and derives no lock (aihub#524)", len(got), got)
+	}
+	if !strings.Contains(got[0], "uri") {
+		t.Errorf("report should point at the unusable `uri`; got %q", got[0])
 	}
 }
 

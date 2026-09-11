@@ -263,7 +263,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 
 ### Mode B — Claim existing queued wi (`/pf-work <slug>`)
 
-1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` → conflict preview
+1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` → conflict preview. Since aihub#564
+   the preview excludes this wi's own locks and declarations, so any soft_block/hard_block it
+   shows is held by somebody else — do not dismiss one as "probably my own earlier attempt".
 2. `pf_claim_work_item(work_item_id=<slug>, ...)`
 3. After successful claim — recall wi-linked memories:
    ```python

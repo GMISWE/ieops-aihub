@@ -51,7 +51,8 @@ Returns the current caller's identity information, including display_name, role,
 users = pf_list_users()
 ```
 
-Returns the list of all users, including id, display_name, user_type, role, and email.
+Returns the 100 newest users by creation time (no cursor, no total), including id,
+display_name, user_type, role, and email.
 The `id` field is used for subsequent update / key-add / key-revoke operations.
 
 ---
@@ -198,7 +199,7 @@ Current user identity information has been retrieved.
 | api_keys     | 2 (active)          |
 
 ## Next steps
-- `/pf-user` list — view all users
+- `/pf-user` list — view users (the 100 newest)
 - `/pf-user` invite — invite a new member
 ```
 

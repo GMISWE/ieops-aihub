@@ -96,7 +96,8 @@ empty-array-clears spelling the old description published is gone with the
 parameter: `[]` now lands in the same dropped-field bucket as every other
 unbound name, held at the handler boundary by
 `internal/server/user_admin_write_shape_test.go`
-(`TestUpdateUserBindsTwoFieldsAndDropsTheRest`, `empty_alias_list_is_not_a_write`).
+(`TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest`,
+`empty_alias_list_is_not_a_write`).
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -115,13 +116,22 @@ end binds only what its request struct names.
 
 ## hop 4 — what it actually does
 
-- Sets only the bound fields present in the body — `display_name` and `role`,
-  since `aihub#587` — and anything else, `author_aliases` included, is silently
-  dropped by the bind so the request behaves exactly as though it carried
-  nothing, held leg by leg (both aliases spellings, `user_type`, the empty body,
-  and a `display_name` write control) by
+- Sets only the two updatable fields present in the body — `display_name` and
+  `role`, since `aihub#587` — and any unbound name, `author_aliases` included, is
+  silently dropped by the bind so the request behaves exactly as though it
+  carried nothing, held leg by leg (both aliases spellings, the empty body, and
+  a `display_name` write control) by
   `internal/server/user_admin_write_shape_test.go`
-  (`TestUpdateUserBindsTwoFieldsAndDropsTheRest`).
+  (`TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest`).
+- `user_type` is the one name with a third verdict (`aihub#530`, 2026-09-11):
+  bound only to be **refused**, a `400` with `details.field = "user_type"`
+  echoing the value, before the `UPDATE` and whole-request — a rename riding
+  beside it does not half-succeed — held leg by leg (beside a rename, alone,
+  the `null` spelling counting as absent, and a two-field write control) by
+  `internal/server/update_user_user_type_test.go`
+  (`TestUpdateUserUserTypeIsRefusedNotDropped`), with the no-write half staying
+  on the `user_type_is_not_a_write` leg of
+  `TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest`.
 - `role` writes the **global** role — `writer | admin` — not a project member role,
   a split held as a property of the two live vocabularies by
   `internal/domain/role_vocabularies_test.go`
@@ -204,13 +214,26 @@ live server and holds the result to `ok`, declared in
 
 - Nothing this card can settle. The null corpus record is explained above rather than
   treated as a disuse signal.
-- Noted rather than owned by this card: `user_type` is **not updatable** on this path
-  at all, which the `user_type_is_not_a_write` leg of
+- SETTLED 2026-09-11 by `aihub#530`, kept as history: this bullet used to record
+  that a `user_type` sent to `PATCH /v1/admin/users/:id` was **silently dropped**
+  rather than refused — first noted 2026-09-09 by `aihub#496`, whose scope was
+  `role` — so beside any bound field the caller got `{"ok":true}` for an identity
+  write that never happened. The verdict is now **refusal rather than binding**:
+  `user_type` is identity — the create-time email invariant hangs off it, a
+  machine mailbox generated and a human one required, held by
   `internal/server/user_admin_write_shape_test.go`
-  (`TestUpdateUserBindsTwoFieldsAndDropsTheRest`) drives directly. The request
-  struct binds only `display_name` and `role` (since `aihub#587`), so a `user_type`
-  sent to `PATCH /v1/admin/users/:id` is silently dropped rather than refused — the
-  same leg of `TestUpdateUserBindsTwoFieldsAndDropsTheRest` requires the request to
-  behave exactly as though it had carried nothing, which is a stronger statement than
-  "the struct has two fields" and is the one this bullet makes. It is unreachable from MCP — this tool does not publish it — so the
-  exposure is HTTP-only. Recorded 2026-09-09 by `aihub#496`, whose scope was `role`.
+  (`TestCreateUserEmailIsRequiredForHumansAndGeneratedForMachines`), and this
+  handler binds no email with which to keep that pairing consistent — and the
+  tool still does not publish the field, so binding it would be the `aihub#419`
+  BOUND_FIELD_UNPUBLISHED shape.
+  The refusal is under hop 4, held by
+  `internal/server/update_user_user_type_test.go`
+  (`TestUpdateUserUserTypeIsRefusedNotDropped`); the exposure was HTTP-only and
+  the refusal is not: the handler forwards every argument (hop 2-3 above), so an
+  MCP caller sending the unpublished name now gets the server's 400 naming
+  `user_type` as the tool error, with the `request_adjusted.unknown_params`
+  disclosure appended as its own text block — `internal/mcp/unknown_params.go`
+  attaches it to an error result as an additional block precisely because an
+  unknown parameter is a plausible cause of the error the caller is looking at —
+  instead of the old disclosure on an `{"ok":true}` answer, which named the
+  field while the other fields wrote anyway.

@@ -27,6 +27,22 @@ import (
 // If a deploy overrides this via RENDER_MEMORY_TYPES it must include these
 // types too — but the lazy-render fallback in handleArtifactHTML makes
 // save-time rendering an optimisation, not the only render path.
+//
+// ⚠️ Deliberately the six SUGGESTED names, not a methodology.* prefix rule
+// (aihub#539; the tiering dates from aihub#499). pf_save_artifact accepts ANY
+// methodology.* type, so an off-list name — methodology.playbook, 3 rows
+// measured live 2026-09-09 — is stored but sits OUTSIDE this set: no deferred
+// render on save (resolveRenderedHTML precedence #2), no lazy render at read
+// (hasRenderableBody), and no publication to the anonymous /share/:id route
+// (shareRefusal gates on IsRenderType). That two-tier split is PUBLISHED
+// CONTRACT, not an oversight: the live pf_save_artifact `type` description,
+// docs/mcp-cards/pf_save_artifact.md (§6.2 T2-6) and docs/mcp-tools.md all
+// disclose it, and internal/server's
+// TestOffListMethodologyTypeIsNeitherPreRenderedNorLinked goes RED if this set
+// admits the measured off-list name (its mutant M36). Widening one DEPLOYMENT
+// is what RENDER_MEMORY_TYPES is for — and note that widening render does NOT
+// widen the wi artifact-links section, whose own six-name list
+// (server.fetchArtifactLinks) is fixed at compile time.
 const defaultRenderTypes = "methodology.spec,methodology.plan,methodology.review,methodology.execute,methodology.retro,methodology.wrap_summary"
 
 // renderTypes is the set of memory types for which Markdown→HTML rendering is

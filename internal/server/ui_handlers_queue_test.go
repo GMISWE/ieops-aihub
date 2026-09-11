@@ -10,7 +10,9 @@ package server
 //   - the /ui/queue full page now 302-redirects to /ui/wi (the queue is
 //     embedded there as a collapsible block)
 //   - the redirect preserves ?project=
-//   - partial endpoint renders all six LCRS sections + omits layout chrome
+//   - partial endpoint renders only the four-cell count strip + omits layout
+//     chrome (it stopped rendering LCRS sections in aihub#129 review-round-1 #7;
+//     the rows live in the wi list below it)
 //   - the /ui/queue route is wired correctly on a real echo group
 
 import (
@@ -26,10 +28,11 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
-// fixtureQueue returns a *domain.ReadyQueue with at least one entry in every
-// segment so the template's empty-state branch is exercised AND every list
-// renders at least one row. The IDs/slugs are deterministic so test bodies
-// can grep for them if they want.
+// fixtureQueue returns a *domain.ReadyQueue with one entry in six of the seven
+// segments (everything but stale_running). The queue partial renders none of
+// them any more — only .Err and the count strip — so the fixture's remaining
+// job is to be a realistic non-nil queue for getQueueFn. The IDs/slugs are
+// deterministic so test bodies can grep for them if they want.
 func fixtureQueue() *domain.ReadyQueue {
 	gotype := "feature"
 	return &domain.ReadyQueue{

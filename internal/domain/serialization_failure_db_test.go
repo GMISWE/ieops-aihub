@@ -674,6 +674,224 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 				"item exactly as it was", bAttempt)
 	})
 
+	// aihub#545, first of three: the credential heartbeat. verifyAttemptCredential
+	// ends with `UPDATE run_attempts SET last_active_at=...`, whose error was
+	// discarded outright (`//nolint:errcheck`). That function runs inside four
+	// SERIALIZABLE transactions and the UPDATE writes run_attempts — the very
+	// table those transactions take SIReadLocks on — so a 40001 there is live,
+	// not latent. Before the fix the swallow left the transaction dead and the
+	// caller was told about the NEXT statement:
+	//
+	//	500 INTERNAL_ERROR  failed to update run_attempt status
+	//	                    (current transaction is aborted, SQLSTATE 25P02)
+	//
+	// The race: a holder rewrites the attempt's own run_attempts row and sits on
+	// it uncommitted. The completing transaction gets past its work_items FOR
+	// UPDATE (untouched table) and past the credential SELECT (plain MVCC read,
+	// does not block), and parks exactly at the heartbeat UPDATE.
+	t.Run("complete attempt heartbeat gets a retryable 409, not a 500", func(t *testing.T) {
+		ctx := context.Background()
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedWI(t, pool, project, u)
+		const secret = "aihub545-heartbeat-secret"
+		attemptID := seedRunAttempt(t, pool, wi.ID, u, secret)
+
+		holder, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer holder.Release()
+		tx, err := holder.Begin(ctx)
+		require.NoError(t, err)
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		_, err = tx.Exec(ctx, `UPDATE run_attempts SET machine_id = 'held-by-the-winner' WHERE id = $1`, attemptID)
+		require.NoError(t, err)
+
+		got := make(chan *AihubError, 1)
+		go func() {
+			got <- FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
+				AttemptID:     attemptID,
+				ClaimEpoch:    1,
+				SessionSecret: secret,
+				Status:        "paused",
+			})
+		}()
+
+		waitForLockWaiter(t, pool, "%last_active_at%",
+			"the credential heartbeat (UPDATE run_attempts SET last_active_at)")
+		require.NoError(t, tx.Commit(ctx))
+		committed = true
+
+		var aerr *AihubError
+		select {
+		case aerr = <-got:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the losing complete_attempt never returned after the holder committed")
+		}
+
+		require.NotNil(t, aerr, "the heartbeat lost a serialization race and the whole transaction "+
+			"rolled back, so complete_attempt cannot report success")
+		assert.Equal(t, 409, aerr.HTTPStatus,
+			"got %d %s: %s", aerr.HTTPStatus, aerr.Code, aerr.Message)
+		assert.Equal(t, ErrConflictSerializationFailure, aerr.Code,
+			"got %s: %s — an INTERNAL_ERROR here means the heartbeat's error is being discarded "+
+				"again and the caller is being told about whichever statement ran second",
+			aerr.Code, aerr.Message)
+		assert.NotContains(t, aerr.Message, "failed to update run_attempt status",
+			"the caller is being told about the status UPDATE, which only failed with 25P02 because "+
+				"the swallowed heartbeat 40001 had already aborted the transaction")
+		assert.Contains(t, aerr.Message, "40001",
+			"the class-40 SQLSTATE must survive into the message the caller reads; got %q", aerr.Message)
+
+		details, ok := aerr.Details.(map[string]any)
+		require.True(t, ok, "the conflict must carry machine-readable retry guidance; got %#v", aerr.Details)
+		assert.Equal(t, "40001", details["sqlstate"],
+			"the originating SQLSTATE must survive; got %#v", details["sqlstate"])
+	})
+
+	// aihub#545, second of three: FnCompleteAttempt's own wi_step_state read —
+	// the sibling of the two reads aihub#492 (claim path) and aihub#497
+	// (takeover path) already classified, missed because the class-40 sweep
+	// searched by spelling rather than by property. A plain SELECT never blocks
+	// on a row lock, so the interleaving the other arms use cannot reach it;
+	// what CAN is SSI's read-time dangerous-structure check, arranged
+	// deterministically by ssiDoomStepStateRead below. Before the fix the 40001
+	// raised at the read made stepErr non-nil, the guard read that as "no step
+	// in progress", and the caller was told about the next statement:
+	//
+	//	500 INTERNAL_ERROR  failed to update run_attempt status  (25P02)
+	t.Run("complete attempt step-state read gets a retryable 409, not a 500", func(t *testing.T) {
+		ctx := context.Background()
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedWI(t, pool, project, u)
+		const secret = "aihub545-stepread-secret"
+		attemptID := seedRunAttempt(t, pool, wi.ID, u, secret)
+		seedStepState(t, pool, wi.ID, "idle", nil)
+
+		// Park the subject at its FIRST statement (the work_items FOR UPDATE) so
+		// its snapshot is pinned before the pivot commits. The parker only LOCKS
+		// the row — no write — so on release the subject proceeds on its original
+		// snapshot instead of failing there.
+		parker, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer parker.Release()
+		parkTx, err := parker.Begin(ctx)
+		require.NoError(t, err)
+		parkReleased := false
+		defer func() {
+			if !parkReleased {
+				_ = parkTx.Rollback(ctx)
+			}
+		}()
+		var lockedID string
+		require.NoError(t, parkTx.QueryRow(ctx,
+			`SELECT id FROM work_items WHERE id = $1 FOR UPDATE`, wi.ID).Scan(&lockedID))
+
+		commitPivot := ssiDoomStepStateRead(t, pool, project, wi.ID)
+
+		got := make(chan *AihubError, 1)
+		go func() {
+			got <- FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
+				AttemptID:     attemptID,
+				ClaimEpoch:    1,
+				SessionSecret: secret,
+				Status:        "paused",
+			})
+		}()
+
+		waitForRowLockWaiter(t, pool)
+		// The subject has taken its snapshot; complete the dangerous structure,
+		// then let the subject run into it.
+		commitPivot()
+		require.NoError(t, parkTx.Commit(ctx))
+		parkReleased = true
+
+		var aerr *AihubError
+		select {
+		case aerr = <-got:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the doomed complete_attempt never returned after the parker committed")
+		}
+
+		require.NotNil(t, aerr, "the step-state read lost a serialization race and the whole "+
+			"transaction rolled back, so complete_attempt cannot report success")
+		assert.Equal(t, 409, aerr.HTTPStatus,
+			"got %d %s: %s", aerr.HTTPStatus, aerr.Code, aerr.Message)
+		assert.Equal(t, ErrConflictSerializationFailure, aerr.Code,
+			"got %s: %s — an INTERNAL_ERROR here means the read's error is being folded into "+
+				"\"no step in progress\" again and the caller is being told about a later statement",
+			aerr.Code, aerr.Message)
+		assert.NotContains(t, aerr.Message, "failed to update run_attempt status",
+			"the caller is being told about the status UPDATE, which only failed with 25P02 because "+
+				"the swallowed step-state 40001 had already aborted the transaction")
+		details, ok := aerr.Details.(map[string]any)
+		require.True(t, ok, "the conflict must carry machine-readable retry guidance; got %#v", aerr.Details)
+		assert.Equal(t, "40001", details["sqlstate"],
+			"the originating SQLSTATE must survive; got %#v", details["sqlstate"])
+	})
+
+	// aihub#545, third of three: fnForceTerminateStep's opening current-step
+	// read, whose error was discarded outright (`//nolint:errcheck`) so a
+	// class-40 rollback came back as "no step to terminate" — nil. That nil is
+	// what made aihub#497's guard arm at the FnForceTakeover call site
+	// structurally unreachable for this hop: the arm matches
+	// ErrConflictSerializationFailure on this function's RETURN, and a discarded
+	// 40001 never becomes a return value.
+	//
+	// Called directly (same package) on a transaction pre-doomed by
+	// ssiDoomStepStateRead, because no external interleaving can park a caller
+	// between ITS step-state read and this one — they are adjacent statements.
+	// The function-level contract is exactly what both call sites consume, and
+	// asserting the CODE here is asserting the aihub#497 arm's match condition.
+	t.Run("force terminate current-step read is classified, not swallowed as no step", func(t *testing.T) {
+		ctx := context.Background()
+		u := testUser(t, pool)
+		project := testProject(t, pool, u)
+		wi := seedWI(t, pool, project, u)
+		const secret = "aihub545-ft-secret"
+		attemptID := seedRunAttempt(t, pool, wi.ID, u, secret)
+		saID := "sa_aihub545"
+		seedStepState(t, pool, wi.ID, "in_progress", &saID)
+
+		subj, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer subj.Release()
+		sTx, err := subj.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		require.NoError(t, err)
+		defer sTx.Rollback(ctx) //nolint:errcheck
+
+		// Pin the subject's snapshot on a table the pivot never writes, BEFORE
+		// the pivot commits — the read under test must be the transaction's
+		// first visit to the doomed tuple.
+		var one int
+		require.NoError(t, sTx.QueryRow(ctx, `SELECT 1 FROM work_items WHERE id = $1`, wi.ID).Scan(&one))
+
+		commitPivot := ssiDoomStepStateRead(t, pool, project, wi.ID)
+		commitPivot()
+
+		aerr := fnForceTerminateStep(ctx, sTx, wi.ID, attemptID, &saID)
+
+		require.NotNil(t, aerr, "the current-step read lost a class-40 race; answering nil says "+
+			"\"no step to terminate\" and leaves the caller to run the rest of the operation "+
+			"inside a dead transaction")
+		assert.Equal(t, ErrConflictSerializationFailure, aerr.Code,
+			"got %s: %s — this exact code is what FnForceTakeover's aihub#497 guard arm matches "+
+				"on; anything else keeps that arm unreachable for this hop", aerr.Code, aerr.Message)
+		assert.Equal(t, 409, aerr.HTTPStatus,
+			"got %d %s: %s", aerr.HTTPStatus, aerr.Code, aerr.Message)
+		assert.Contains(t, aerr.Message, "40001",
+			"the class-40 SQLSTATE must survive into the message the caller reads; got %q", aerr.Message)
+		details, ok := aerr.Details.(map[string]any)
+		require.True(t, ok, "the conflict must carry machine-readable retry guidance; got %#v", aerr.Details)
+		assert.Equal(t, "40001", details["sqlstate"],
+			"the originating SQLSTATE must survive; got %#v", details["sqlstate"])
+	})
+
 	t.Run("read committed loser still succeeds", func(t *testing.T) {
 		u := testUser(t, pool)
 		project := casProject(t, pool, u)
@@ -690,4 +908,94 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 		assert.Equal(t, []string{"u_loser"}, casMembersOf(t, fresh.Members),
 			"the write that waited for the lock must actually have landed")
 	})
+}
+
+// seedStepState inserts a wi_step_state row directly, the way a claim's upsert
+// would leave it, so the aihub#545 arms have a real tuple for their reads to
+// visit. stepAttempt non-nil seeds an in_progress step named "implement".
+func seedStepState(t *testing.T, pool *pgxpool.Pool, wiID, status string, stepAttempt *string) {
+	t.Helper()
+	var currentStep *string
+	if status == "in_progress" {
+		s := "implement"
+		currentStep = &s
+	}
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO wi_step_state (work_item_id, wi_type, graph_source, current_step,
+		                           current_step_status, current_step_attempt)
+		VALUES ($1, 'feature', 'scenario_config', $2, $3, $4)
+		ON CONFLICT (work_item_id) DO UPDATE
+		  SET current_step=$2, current_step_status=$3, current_step_attempt=$4`,
+		wiID, currentStep, status, stepAttempt)
+	require.NoError(t, err)
+}
+
+// ssiDoomStepStateRead arranges the one SSI shape that dooms a PLAIN SELECT —
+// the statement shape none of this file's lock-wait interleavings can reach,
+// because an MVCC read neither blocks nor takes a row lock.
+//
+// Postgres cancels a SERIALIZABLE reader at the read itself ("Canceled on
+// conflict out to old pivot", SQLSTATE 40001) when it visits a tuple superseded
+// by a concurrent COMMITTED transaction P that already carries a read-write
+// conflict out to some T which committed before the reader's snapshot. This
+// helper builds exactly that:
+//
+//	P (SERIALIZABLE): reads the project row            <- P's snapshot
+//	T (SERIALIZABLE): overwrites that row, COMMITS     <- P -> T conflict out
+//	<caller pins the subject's snapshot>               <- T is now "old"
+//	commitPivot: P overwrites wiID's wi_step_state row, COMMITS
+//	subject: first read of that wi_step_state row      -> 40001, at the read
+//
+// The aux row is the test's own projects row: nothing on the complete-attempt
+// or force-terminate paths reads or writes `projects`, so the structure touches
+// the subject ONLY through the wi_step_state tuple under test. The returned
+// commitPivot must be called only after the subject's snapshot exists —
+// P must commit after it, or P is not concurrent with the subject and the read
+// simply sees the new tuple.
+func ssiDoomStepStateRead(t *testing.T, pool *pgxpool.Pool, auxProject, wiID string) (commitPivot func()) {
+	t.Helper()
+	ctx := context.Background()
+
+	pConn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	pTx, err := pConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	require.NoError(t, err)
+	pivotDone := false
+	t.Cleanup(func() {
+		if !pivotDone {
+			_ = pTx.Rollback(ctx)
+		}
+		pConn.Release()
+	})
+
+	// P's read: the SIRead lock T's write will collide with.
+	var desc *string
+	require.NoError(t, pTx.QueryRow(ctx,
+		`SELECT description FROM projects WHERE name = $1`, auxProject).Scan(&desc))
+
+	// T: overwrite what P read and commit, giving P its conflict out to an
+	// already-committed transaction. T must be SERIALIZABLE too — SSI only
+	// tracks edges between serializable transactions.
+	tConn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer tConn.Release()
+	tTx, err := tConn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	require.NoError(t, err)
+	tag, err := tTx.Exec(ctx,
+		`UPDATE projects SET description = 'overwritten to give the pivot its out-conflict' WHERE name = $1`,
+		auxProject)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected(),
+		"the aux project row %q must exist, or P gets no conflict out and nothing is doomed", auxProject)
+	require.NoError(t, tTx.Commit(ctx))
+
+	return func() {
+		tag, err := pTx.Exec(ctx,
+			`UPDATE wi_step_state SET version = version + 1 WHERE work_item_id = $1`, wiID)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, tag.RowsAffected(),
+			"the wi_step_state row for %s must exist, or the subject's read visits no doomed tuple", wiID)
+		require.NoError(t, pTx.Commit(ctx))
+		pivotDone = true
+	}
 }

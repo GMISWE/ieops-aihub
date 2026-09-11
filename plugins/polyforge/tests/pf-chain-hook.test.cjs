@@ -59,6 +59,33 @@ test('Codex prefix tool name (mcp__polyforge__) is handled', () => {
   assert.ok(s.completed.includes('spec'));
 });
 
+test('Copilot prefix tool name (polyforge-) is handled', () => {
+  const s = applyEvent(base(), 'polyforge-pf_save_artifact', { type: 'spec' }, {});
+  assert.ok(s.completed.includes('spec'));
+});
+
+// pi names MCP tools `<server>_<tool>` with an UNDERSCORE and no "__" separator, so it
+// matches neither the two mcp__ forms nor Copilot's `polyforge-`. Left unstripped, every
+// case below falls to `default: return chain` and the chain file is never advanced —
+// silently, with exit 0. Same shape as the aihub#503 finding in pf-commit-guard.
+test('pi prefix tool name (polyforge_) is handled', () => {
+  const s = applyEvent(base(), 'polyforge_pf_save_artifact', { type: 'spec' }, {});
+  assert.ok(s.completed.includes('spec'));
+});
+
+test('pi prefix: update_step and wrap fire identically', () => {
+  const s = applyEvent(base(), 'polyforge_pf_update_step', { status: 'in_progress', step_id: 'write_spec' }, {});
+  assert.strictEqual(s.active, 'spec');
+  assert.strictEqual(applyEvent(base(), 'polyforge_pf_wrap', { status: 'wrapped' }, {}), null);
+});
+
+// Negative control: stripping must not be so greedy that an unrelated tool whose name
+// merely starts with the server prefix turns into a lifecycle transition.
+test('pi prefix: unrelated polyforge_ tool is inert', () => {
+  const start = base();
+  assert.deepStrictEqual(applyEvent(start, 'polyforge_pf_get_work_item', { type: 'spec' }, {}), start);
+});
+
 // ─── execute is a multi-step phase (event-driven sub-progress, no premature green) ───
 
 test('execute in_progress keeps execute active + records exec.active (not in completed)', () => {

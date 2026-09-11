@@ -587,6 +587,13 @@ base_tool = tool.rsplit("__", 1)[-1]
 # strip that server prefix so the guard fires identically under all three harnesses.
 if base_tool.startswith("polyforge-"):
     base_tool = base_tool[len("polyforge-"):]
+# pi names them `<server>_<tool>` (e.g. polyforge_pf_commit) — also no "__", but an
+# UNDERSCORE separator, so neither the rsplit above nor the Copilot strip touches it
+# (aihub#503). Left unstripped the name never equals "pf_commit" and the guard exits 0
+# with no output, i.e. ALLOWS the write. A separate branch, so the three existing
+# runtimes reach exactly the code they reached before.
+elif base_tool.startswith("polyforge_"):
+    base_tool = base_tool[len("polyforge_"):]
 fields = []
 bash_cmd = None
 if base_tool == "pf_commit":
@@ -602,7 +609,13 @@ elif base_tool == "pf_ship":
     # keyed on tool name: the guard is not a property of the git operation, it
     # is a property of the entry point, and a new entry point starts unguarded.
     fields = [field("message"), field("pr_title"), field("pr_body")]
-elif tool in ("Bash", "bash"):
+elif tool in ("Bash", "bash", "powershell"):
+    # pi registers a `powershell` shell tool alongside `bash` (measured: it is in the tool
+    # table), and pi's own types declare `PowerShellToolInput = BashToolInput` — same
+    # `command` field, same shell semantics. Without it here a `git commit` issued through
+    # that tool reaches no branch, produces no fields, and is allowed: the attribution scan
+    # AND the worktree / protected-branch / finishing-ops rules would all be skipped.
+    # Inert for the other three runtimes, which expose no tool of that name.
     cmd = ti.get("command")
     if isinstance(cmd, str) and cmd:
         bash_cmd = cmd

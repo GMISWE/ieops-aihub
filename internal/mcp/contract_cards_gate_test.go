@@ -2546,7 +2546,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_update_memory":           {Candidates: 17, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
 	"pf_update_project":          {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_update_step":             {Candidates: 21, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_user":             {Candidates: 22, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_update_user":             {Candidates: 23, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_update_work_item":        {Candidates: 66, Cited: 54, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
 	"pf_whoami":                  {Candidates: 13, Cited: 11, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},

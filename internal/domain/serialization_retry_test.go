@@ -5,15 +5,21 @@ package domain
 //
 // # Why the tests need one at all
 //
-// FnClaimWorkItem, FnForceTakeover and FnAcquireLocks run at
-// pgx.Serializable, and their cross-work-item lock probe (foreignLockHolderSQL)
+// FnClaimWorkItem and FnAcquireLocks run at pgx.Serializable. FnForceTakeover
+// does NOT — its transaction is a bare pool.Begin, so its isolation level is
+// not pinned and follows the pool/DSN default (txn_isolation_probe_test.go
+// pins the split; an earlier revision of this header said all three run at
+// pgx.Serializable, which was never true of the takeover). The shared
+// cross-work-item lock probe (foreignLockHolderSQL)
 // reads resource_locks JOIN run_attempts JOIN work_items with NO project
 // predicate — it cannot have one, because a lock key is global. On a test
 // database those three relations hold a few dozen rows, so Postgres seq-scans
-// them and SSI takes a RELATION-level SIReadLock rather than a tuple-level one.
-// Every concurrent committed write to any of the three then builds a
-// read/write dependency with the claim, and one of the pair is aborted with
-// SQLSTATE 40001.
+// them and SSI takes a RELATION-level SIReadLock rather than a tuple-level one
+// on the serializable paths. Every concurrent committed write to any of the
+// three then builds a read/write dependency with the claim, and one of the
+// pair is aborted with SQLSTATE 40001. The takeover owes the retry too:
+// 40P01 arrives at any isolation level, 40001 wherever configuration raises
+// the default, and both surface as the retryable 409 since aihub#497.
 //
 // That concurrency is not hypothetical and it is not a bug in the tests that
 // collide: `go test ./...` runs one test binary per package in parallel, and

@@ -538,7 +538,9 @@ func NamesPublishedToken(s string) bool {
 // an anchor — the sentence is pinned to a measurement or a ruling — without a
 // published token, which is exactly the shape the two measured misses take: the
 // isolation-level sentence on pf_force_takeover (`aihub#430` … opens SERIALIZABLE
-// while this one opens READ COMMITTED) and pf_get_step's record of the
+// while this one opens READ COMMITTED — as it read when measured; aihub#591 then
+// anchored it to the isolation probe and aihub#546 reworded it to "no isolation
+// level pinned") and pf_get_step's record of the
 // tools_step.go falsehood — live when this was measured, corrected by aihub#590
 // in the same batch — whose only backticks were `aihub#400` and `aihub#450`.
 //

@@ -1100,7 +1100,16 @@ func TestPendingEscapeHatchIsWiredIntoTheArm(t *testing.T) {
 // The same anchor form scripts/pf_docs_contract_check.py's C1 error message tells
 // authors to use. The path half is what C2 would check if it globbed this
 // directory; the symbol half is what aihub#406 says C2 does not check anywhere.
-var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?: \\(`([\\w.]+)`\\))?")
+//
+// The path/symbol separator is one space OR a single line wrap (optional trailing
+// blanks, one newline, optional indentation). 🔴 Until aihub#528 it was exactly
+// one space, so an anchor wrapped across a newline — which prose reflow produces
+// constantly — silently degraded to path-only: the symbol half parsed as sym==""
+// and was never verified. Measured 2026-09-11 on this tree: 617 of 888 symbol
+// anchors (69%) were in the wrapped shape, all invisible. A blank line (two
+// newlines) still ends the anchor: a parenthesised symbol opening the next
+// paragraph is prose, not a citation of the path above it.
+var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?:(?: |[ \\t]*\\n[ \\t]*)\\(`([\\w.]+)`\\))?")
 
 // cardBareGoFileRef matches a backticked Go filename with NO directory component,
 // which K6 REPORTS rather than resolves.
@@ -1140,6 +1149,7 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 	// One parse per referenced file, however many cards cite it.
 	declared := map[string]map[string]bool{}
 	resolved := 0
+	symChecked := 0
 
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
@@ -1173,6 +1183,7 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 			if sym == "" {
 				continue
 			}
+			symChecked++
 			names, ok := declared[ref]
 			if !ok {
 				names = declaredNames(t, abs)
@@ -1198,7 +1209,8 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 		t.Errorf("K8 FLOOR_ANCHORS: only %d anchor(s) resolved, floor is %d — a card set that "+
 			"cites nothing passes this arm by having nothing to check", resolved, floorCardAnchors)
 	}
-	t.Logf("K6: %d anchors resolved across %d referenced files", resolved, len(declared))
+	t.Logf("K6: %d anchors resolved across %d referenced files; %d symbol anchors verified",
+		resolved, len(declared), symChecked)
 }
 
 // declaredNames returns every top-level name a Go file declares: funcs and

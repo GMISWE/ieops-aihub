@@ -16,7 +16,11 @@ package domain
 //	  other segment, and items[] is the FIRST query the function sends.
 //	TestEveryReadyQueueSegmentQueryErrorIsA500NamingThatSegment  every one of the
 //	  seven answers a send-time failure with 500 INTERNAL_ERROR and a message that
-//	  names its own segment, distinctly.
+//	  names its own segment, distinctly — except a class-40 rollback, which the
+//	  guards classify through dbErr into the retryable 409 (aihub#548); that arm
+//	  is owned by ready_queue_query_errors_test.go's classifier rule, and this
+//	  census reads dbErr as the ErrInternalError-and-message pair its
+//	  non-conflict arm returns.
 //
 // Neither needs a database: what is measured is which arguments the calls carry
 // and which error each one returns, and both are properties of this source file.
@@ -144,7 +148,19 @@ func readyQueueQuerySites(t *testing.T) []querySite {
 }
 
 // returnedNewErr pulls the error code identifier and message literal out of a
-// statement of the shape `if err != nil { return nil, NewErr(Code, "msg") }`.
+// statement of the shape `if err != nil { return nil, NewErr(Code, "msg") }` —
+// or, since aihub#548, `if err != nil { return nil, dbErr(err, "msg") }`.
+//
+// dbErr is read as ErrInternalError carrying its msg, because that is what its
+// non-conflict arm returns, byte for byte (internal/domain/pgx_err.go: "byte-
+// identical to NewErr(ErrInternalError, msg) otherwise"). The census therefore
+// keeps holding the published 500-and-message pair for every failure except a
+// class-40 rollback, whose retryable-409 arm is owned by the classifier rule in
+// ready_queue_query_errors_test.go — deliberately there and only there, so THIS
+// arm stays about which segment answers under which name. dbErrCause is NOT
+// read: it appends the driver's text, so a guard using it would stop matching
+// the exact `failed to query <segment> items` message the card publishes, and
+// unrecognised here means red below.
 func returnedNewErr(stmt ast.Stmt) (code, message string) {
 	ifs, ok := stmt.(*ast.IfStmt)
 	if !ok {
@@ -161,22 +177,34 @@ func returnedNewErr(stmt ast.Stmt) (code, message string) {
 				continue
 			}
 			id, ok := call.Fun.(*ast.Ident)
-			if !ok || id.Name != "NewErr" || len(call.Args) < 2 {
+			if !ok || len(call.Args) < 2 {
 				continue
 			}
-			codeIdent, ok := call.Args[0].(*ast.Ident)
-			if !ok {
+			var codeName string
+			var msgArg ast.Expr
+			switch id.Name {
+			case "NewErr":
+				codeIdent, ok := call.Args[0].(*ast.Ident)
+				if !ok {
+					continue
+				}
+				codeName = codeIdent.Name
+				msgArg = call.Args[1]
+			case "dbErr":
+				codeName = "ErrInternalError"
+				msgArg = call.Args[1]
+			default:
 				continue
 			}
-			lit, ok := call.Args[1].(*ast.BasicLit)
+			lit, ok := msgArg.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
-				return codeIdent.Name, ""
+				return codeName, ""
 			}
 			msg, err := strconv.Unquote(lit.Value)
 			if err != nil {
-				return codeIdent.Name, ""
+				return codeName, ""
 			}
-			return codeIdent.Name, msg
+			return codeName, msg
 		}
 	}
 	return "", ""

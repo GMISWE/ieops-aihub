@@ -3686,13 +3686,27 @@ func newReadyQueue(requestedMax int) (*ReadyQueue, int) {
 // segments — and there a partial queue is the harmful answer, because aihub#449
 // made all seven keys always-present precisely so that an empty one asserts
 // "nothing is here" rather than "no data reached you".
+//
+// # The send-time guards classify class 40 too (aihub#548)
+//
+// aihub#500 gave all seven segments the same SHAPE — every Query error is
+// answered — but wrote the five new guards as bare NewErr(ErrInternalError, …)
+// while the rows.Err() branch a dozen lines below each of them returns
+// dbErrCause. That reopened #500's own argument one axis over: the same segment
+// classified a class-40 rollback as a retryable 409 on one error path and as a
+// 500 on the other, for the same underlying condition. So every send-time guard
+// now goes through dbErr, the documented drop-in whose non-conflict outcome is
+// byte-identical to the bare NewErr it replaces (see pgx_err.go) — the caller's
+// message does not move, only SQLSTATE 40001/40P01 stops being reported as "the
+// server is broken". The classifier rule of TestReadyQueueAnswersEveryQueryError
+// holds this for all seven and for any segment added later.
 func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max int) (*ReadyQueue, *AihubError) {
 	result, max := newReadyQueue(max)
 
 	// items[]: queued + no blocker + requires_human_session=false.
 	itemRows, err := pool.Query(ctx, buildReadyQueueItemsQuery(), project, max)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query ready items")
+		return nil, dbErr(err, "failed to query ready items")
 	}
 	defer itemRows.Close()
 	for itemRows.Next() {
@@ -3718,7 +3732,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query running items")
+		return nil, dbErr(err, "failed to query running items")
 	}
 	defer runRows.Close()
 	for runRows.Next() {
@@ -3754,7 +3768,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query stalled items")
+		return nil, dbErr(err, "failed to query stalled items")
 	}
 	defer stalledRows.Close()
 	for stalledRows.Next() {
@@ -3793,7 +3807,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query paused items")
+		return nil, dbErr(err, "failed to query paused items")
 	}
 	defer pausedRows.Close()
 	for pausedRows.Next() {
@@ -3833,7 +3847,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project, max,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query needs_human_session items")
+		return nil, dbErr(err, "failed to query needs_human_session items")
 	}
 	defer humanRows.Close()
 	for humanRows.Next() {
@@ -3874,7 +3888,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project, max,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query unclassified items")
+		return nil, dbErr(err, "failed to query unclassified items")
 	}
 	defer unclRows.Close()
 	for unclRows.Next() {
@@ -3905,7 +3919,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		project,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query stale_running items")
+		return nil, dbErr(err, "failed to query stale_running items")
 	}
 	defer staleRows.Close()
 	for staleRows.Next() {

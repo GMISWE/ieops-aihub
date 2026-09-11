@@ -78,7 +78,7 @@ Replace `<64hex>` / `<secret>` placeholders in scenario files with `MY_SECRET` b
 For scenarios where step 2 uses MCP pf_claim_work_item, read credentials from:
 `<WORKSPACE>/.polyforge/state/<wi_id>.json` → fields: `attempt_id`, `claim_epoch`, `session_secret`.
 `~/.polyforge/` holds no claim state — `config.StateDir()` is workspace-scoped
-(`internal/config/state.go:37`), and has been since 2026-05-22.
+(`internal/config/state.go`, `StateDir`), and has been since 2026-05-22.
 
 ## Field format reference
 

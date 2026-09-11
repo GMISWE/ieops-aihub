@@ -16,7 +16,7 @@ package server
 //	  "`author_aliases` … behaves exactly as though the body carried nothing"
 //	   (withdrawn by aihub#587, 2026-09-10) /
 //	   "`user_type` is **not updatable** on this path at all"
-//	      -> TestUpdateUserBindsTwoFieldsAndDropsTheRest
+//	      -> TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest
 //
 // The nil pool is the instrument, as in create_user_vocab_test.go and
 // update_user_vocab_test.go: any DB access panics, so "reached the statement" and
@@ -24,7 +24,7 @@ package server
 // than usual here — every DB-gated test in this repo SKIPs on `go test ./...`
 // while still reading as coverage, and these are the claims a caller acts on.
 //
-//	GOWORK=off go test ./internal/server/ -run 'TestCreateUserEmailIsRequired|TestUpdateUserBindsTwoFields|TestCreateUserResponseIsTheHandlers' -count=1
+//	GOWORK=off go test ./internal/server/ -run 'TestCreateUserEmailIsRequired|TestUpdateUserWritesTwoFields|TestCreateUserResponseIsTheHandlers' -count=1
 
 import (
 	"encoding/json"
@@ -144,9 +144,10 @@ func TestCreateUserEmailIsRequiredForHumansAndGeneratedForMachines(t *testing.T)
 // absence of a panic.
 type recorderHolder struct{ r *httptest.ResponseRecorder }
 
-// TestUpdateUserBindsTwoFieldsAndDropsTheRest holds pf_update_user's binding
-// census from the enforcement side: the handler acts on the fields its request
-// struct binds — display_name and role, since aihub#587 — and only those.
+// TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest holds
+// pf_update_user's binding census from the enforcement side: the handler acts
+// on the two updatable fields its request struct names — display_name and role,
+// since aihub#587 — refuses the third bound name, and drops everything else.
 //
 // 🔴 The discriminating observable is "did this request produce a WRITE", and the
 // nil pool answers it without a database. `if len(sets) == 0` refuses with 400
@@ -157,7 +158,9 @@ type recorderHolder struct{ r *httptest.ResponseRecorder }
 //	                             CLEAR the column, so it is the destructive
 //	                             direction a stale caller would still send
 //	{}                           must NOT    — the control for "no write"
-//	{"user_type": "machine"}     must NOT    — the field was never bound here
+//	{"user_type": "machine"}     must NOT    — bound since aihub#530, but only to
+//	                             be REFUSED; the 400's shape is held by
+//	                             update_user_user_type_test.go
 //	{"display_name": "x"}        must WRITE  — the control for "a write happens"
 //
 // Until aihub#587 (2026-09-10) this arm was
@@ -166,19 +169,23 @@ type recorderHolder struct{ r *httptest.ResponseRecorder }
 // replaced the list wholesale, with the absent/empty/null distinction published
 // on the schema. The owner's ruling withdrew the parameter — the column has no
 // reader anywhere in internal/ or pkg/ — so `author_aliases` now sits in the
-// same census bucket `user_type` has always occupied: silently dropped by
-// c.Bind, the request behaving exactly as though it carried nothing. The
-// tree-wide zero-write census is TestAuthorAliasesIsNeitherWrittenNorRead
+// silent-drop bucket, the request behaving exactly as though it carried
+// nothing. `user_type` left that bucket with aihub#530 (2026-09-11): a body
+// carrying it is refused outright rather than dropped, so its row below stays
+// "not a write" for a louder reason. The tree-wide zero-write census is
+// TestAuthorAliasesIsNeitherWrittenNorRead
 // (internal/mcp/user_admin_surface_test.go); this arm pins the same fact at the
 // handler boundary, where a regression would actually re-enter.
 //
-// MUTANTS (aihub#587, 2026-09-10):
+// MUTANTS (aihub#587, 2026-09-10; user_type rows re-cut by aihub#530):
 //
 //	M36 enforcement: re-bind AuthorAliases in the request struct and restore its
 //	     SET clause                          RED  alias_list_is_not_a_write and
 //	                                              empty_alias_list_is_not_a_write
-//	M37 enforcement: bind UserType in the request struct and add its SET clause
-//	                                          RED  user_type_is_not_a_write
+//	M37 enforcement: replace the user_type refusal with a SET clause
+//	                                          RED  user_type_is_not_a_write (and
+//	                                               both refusal legs in
+//	                                               update_user_user_type_test.go)
 //	M38 enforcement: drop the `len(sets) == 0` refusal
 //	                                          RED  no_fields_is_not_a_write and
 //	                                               alias_list_is_not_a_write
@@ -187,7 +194,7 @@ type recorderHolder struct{ r *httptest.ResponseRecorder }
 //	                                               card pins no such param) and
 //	                                               INPUT_SCHEMA_DRIFT (the pinned
 //	                                               schema hash moved)
-func TestUpdateUserBindsTwoFieldsAndDropsTheRest(t *testing.T) {
+func TestUpdateUserWritesTwoFieldsRefusesUserTypeAndDropsTheRest(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		body      map[string]any
@@ -219,11 +226,12 @@ func TestUpdateUserBindsTwoFieldsAndDropsTheRest(t *testing.T) {
 		{
 			name: "user_type_is_not_a_write", body: map[string]any{"user_type": "machine"},
 			wantWrite: false,
-			why: "the request struct binds display_name and role only, so user_type is silently " +
-				"dropped — the request behaves as though it carried nothing. " +
-				"pf_update_user.md records that as an HTTP-only exposure precisely because " +
-				"the tool does not publish the field; binding it here without publishing it " +
-				"would be the aihub#419 BOUND_FIELD_UNPUBLISHED shape.",
+			why: "user_type is bound since aihub#530, but only to be REFUSED with a 400 naming " +
+				"the field — never written. It is identity, not profile: the create-time email " +
+				"invariant hangs off it and this handler binds no email, and pf_update_user " +
+				"does not publish the field, so a SET clause here would be the aihub#419 " +
+				"BOUND_FIELD_UNPUBLISHED shape. The refusal's shape is held by " +
+				"update_user_user_type_test.go; this leg holds only that no write happens.",
 		},
 		{
 			name: "display_name_is_a_write", body: map[string]any{"display_name": "Probe 587"},

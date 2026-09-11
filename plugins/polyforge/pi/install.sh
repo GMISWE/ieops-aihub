@@ -12,11 +12,17 @@
 # land in the project layer and be ignored. So user-level installation is the only route,
 # and something has to copy the files there.
 #
+# Skills are installed TWICE, on purpose — see the two "skills ->" steps below. The
+# user-scope copy is the one pi actually loads by default; the project copy is kept because
+# it is what starts working the moment a user trusts the project, and because .agents/skills
+# is a cross-tool convention this script is not the only writer of.
+#
 # Everything this writes is listed under "what this touches" in the summary at the end.
-# Re-running is safe: nothing is overwritten without a backup alongside it. Two cases are
+# Re-running is safe: nothing is overwritten without a backup alongside it. Three cases are
 # not plain file copies and are handled explicitly —
-#   .mcp.json         is MERGED (other MCP servers in it are preserved), not replaced;
-#   .agents/skills/   is a tree, so the whole directory is backed up before it is refreshed.
+#   .mcp.json           is MERGED (other MCP servers in it are preserved), not replaced;
+#   .agents/skills/     is a tree, so the whole directory is backed up before it is refreshed;
+#   $PI_DIR/skills/     likewise.
 
 set -euo pipefail
 
@@ -40,6 +46,24 @@ place() {
     say "backed up existing $(basename "$dst") -> $(basename "$dst").bak-$STAMP"
   fi
   cp -p "$src" "$dst"
+}
+
+# place() for a directory. A recursive copy cannot go through it, so back the whole tree up
+# first when it already holds something — without this the header's "never silently
+# overwritten" promise is false for exactly the directories a user is most likely to have
+# edited. Both skill destinations go through this one function so the promise cannot hold
+# for one of them and not the other.
+# The count is an ARGUMENT, not a global read from here: under `set -u` a global would make
+# this function usable only after the line that assigns it, which is 140 lines below.
+place_skills() {
+  local dst="$1" label="$2" count="$3"
+  if [ -d "$dst" ] && [ -n "$(ls -A "$dst" 2>/dev/null)" ]; then
+    cp -a "$dst" "$dst.bak-$STAMP"
+    say "backed up existing $label -> $label.bak-$STAMP"
+  fi
+  mkdir -p "$dst"
+  cp -r "$PLUGIN_ROOT"/skills/* "$dst/"
+  say "installed $count skills into $label (no modification needed)"
 }
 
 [ -f "$PLUGIN_ROOT/pi-hooks.json" ] || die "not a polyforge plugin checkout: $PLUGIN_ROOT"
@@ -173,17 +197,33 @@ else
   sed 's/^/      /' "$PLUGIN_ROOT/pi/mcp.json" >&2
 fi
 
-step "skills -> $PROJECT_DIR/.agents/skills/"
-# A recursive copy cannot go through place(), so back the whole tree up first when it
-# already holds something. Without this the header's "never silently overwritten" promise
-# is false for exactly the directory a user is most likely to have edited.
-if [ -d "$PROJECT_DIR/.agents/skills" ] && [ -n "$(ls -A "$PROJECT_DIR/.agents/skills" 2>/dev/null)" ]; then
-  cp -a "$PROJECT_DIR/.agents/skills" "$PROJECT_DIR/.agents/skills.bak-$STAMP"
-  say "backed up existing skills -> .agents/skills.bak-$STAMP"
-fi
-mkdir -p "$PROJECT_DIR/.agents/skills"
-cp -r "$PLUGIN_ROOT"/skills/* "$PROJECT_DIR/.agents/skills/"
-say "installed $(find "$PLUGIN_ROOT/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') skills (no modification needed)"
+# Count what pi will actually load — a directory holding a SKILL.md — not every directory
+# under skills/. `_common/` carries shared fragments and no SKILL.md, so counting directories
+# reported one skill more than any install has ever had.
+SKILL_COUNT="$(find "$PLUGIN_ROOT/skills" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
+
+step "skills -> $PI_DIR/skills/  (the copy pi loads by default)"
+# THIS is the destination that works out of the box. pi assembles its skill search path in
+# dist/core/package-manager.js: the user directory `join(globalBaseDir, "skills")` — i.e.
+# this one — is added unconditionally, while every ancestor `.agents/skills` is added only
+# when `isProjectTrusted()`, and project trust is default-off (dist/core/trust-manager.js
+# names `.agents/skills` a trust-requiring project resource, carving out only
+# $HOME/.agents/skills as a user resource). Measured on 0.85.1, sandbox install, the same
+# get_commands probe from the same project, trust the only variable: 0 skills loaded without
+# --approve, 17 with it. So the project copy below is invisible under the default, which is
+# how 17 skills shipped silently unavailable in aihub#503.
+#
+# The backup lands at $PI_DIR/skills.bak-$STAMP — a SIBLING of the search path, never inside
+# it. A backup nested under $PI_DIR/skills/ would be discovered as skills in its own right
+# and every skill would load twice.
+place_skills "$PI_DIR/skills" "skills" "$SKILL_COUNT"
+
+step "skills -> $PROJECT_DIR/.agents/skills/  (kept: used once the project is trusted)"
+# Deliberately NOT replaced by the step above. Two reasons: this copy is what pi loads the
+# moment a user runs /trust on the project, and .agents/skills is a cross-tool convention
+# (this box carries a .agents/.skill-lock.json written by something else entirely), so
+# deleting it would change behaviour for readers this script does not know about.
+place_skills "$PROJECT_DIR/.agents/skills" ".agents/skills" "$SKILL_COUNT"
 
 cat <<EOF
 
@@ -193,12 +233,25 @@ what this touches
   $PI_DIR/extensions/polyforge/   hook bridge (pi events -> polyforge's bash hooks)
   $PI_DIR/extensions/subagent/    pi's own subagent tool
   $PI_DIR/agents/pf-*.md          polyforge agent definitions
+  $PI_DIR/skills/                 the polyforge skills — the copy pi loads by default
   $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings
-  $PROJECT_DIR/.agents/skills/    the polyforge skills, verbatim
+  $PROJECT_DIR/.agents/skills/    the same skills, for when the project is trusted
 
 verify
-  cd "$PROJECT_DIR" && pi -p "list your tools"
+  cd "$PROJECT_DIR" && pi -p "list your tools"   # note: pi -p reads stdin, so add </dev/null
   Expect 45 polyforge_pf_* tools, and NEITHER \`mcp\` nor \`mcpScript\`.
   On the very first run \`mcp\` may still be listed — the adapter needs one run to populate
   ~/.pi/agent/mcp-cache.json. Calling it is refused by the bridge either way.
+
+  The skills, without needing an API key — this counts what pi LOADED, not what was copied:
+  cd "$PROJECT_DIR" && printf '{"id":1,"type":"get_commands"}' \\
+    | pi --mode rpc --no-session | grep -o '"source":"skill"' | wc -l
+  Expect at least $SKILL_COUNT (this install), plus any skill from another source. A count of
+  0 or 1 means discovery is not seeing this install at all.
+  NOTE the missing \`</dev/null\` here, deliberately: --mode rpc takes its REQUEST on stdin,
+  so redirecting it closes the channel and the count comes back 0 on a perfectly good
+  install. That is the opposite of the \`pi -p\` line above, which has no pipe and does need
+  the redirect. Measured both ways under bash on a correct install: 0 with it, $SKILL_COUNT
+  without. (Under zsh MULTIOS merges the two and it "works", which is how the wrong advice
+  reads as fine on a dev box.)
 EOF

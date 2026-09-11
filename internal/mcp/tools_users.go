@@ -11,9 +11,16 @@ import (
 
 func (s *Server) registerUserTools() {
 	// pf_list_users
+	//
+	// aihub#596 (2026-09-11): this said "List all users" and that was measured
+	// false past a hundred users — handleListUsers runs ORDER BY created_at DESC
+	// LIMIT 100 with no cursor and no total (the data-layer fact is held by
+	// internal/server/list_users_response_shape_test.go). The description now
+	// states the cap and the ordering instead of promising totality; adding
+	// pagination is a separate feature decision, deliberately not taken here.
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_list_users",
-		Description: "List all users (admin only)",
+		Description: "List the 100 newest users by creation time (admin only). No pagination: no cursor, no total, rows past the cap are silently omitted",
 		InputSchema: emptyObjectSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		result, err := s.client.ListUsers(ctx)

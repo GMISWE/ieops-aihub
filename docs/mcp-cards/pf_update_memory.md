@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_memory",
   "description_sha256": "e373c1b2dd6fc7d2da8301632578d70f162feaa3cc682aaced84abaffddb0f1a",
-  "input_schema_sha256": "945ba1d2776c5da93d813ec1c338f47f4fb161ed2700a9558907623044549151",
+  "input_schema_sha256": "34a85d04f5a50c8143d9c95269fdab4ac620153c3743f1a7c77432214cdb139a",
   "params": {
     "base_strength": {
       "type": "number",
@@ -71,7 +71,7 @@ distinct semantic from sending a zero value.
 | `memory_id` | string | yes | "any id in the lineage" |
 | `work_item_id` | string | yes | for credential injection |
 | `content` | string | no | new content (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
-| `visibility` | string | no | new visibility (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
+| `visibility` | string | no | "New visibility (omit to keep current)" — then the full five-value column vocabulary and the `public` no-auth consequence, asserted both ways against `internal/domain/memory.go` (`MemoryVisibilityList`) by `internal/mcp/visibility_vocab_publication_test.go` (`TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne`); omitted-key forwarding held by `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue` |
 | `tags` | array | no | new tags (omit to keep current — `TestMemoryToolsForwardAnOptionalParamOnlyWhenItCarriesAValue`) |
 | `base_strength` | number | no | new base strength, **integer** 1-5 (omit to keep current); a fractional value is a 400 (`TestValidateIntegralStrengthIsTheWholeNumberRule`) |
 
@@ -195,6 +195,23 @@ real callers have been handed.
 - **§6.2 T2-1** — one editability matrix for the whole struct and one error code per
   rejection kind; the "omit to keep current" convention is this tool's local version
   of that matrix.
+- **§6.1 T1-4 — the caller-facing half, applied to `visibility` here by `aihub#529`
+  (2026-09-11).** `aihub#495` widened `pf_remember`'s hand-typed four-value ladder to
+  the five values the column enforces; this tool's description named NO values at
+  all — "New visibility (omit to keep current)" — the same gap in the direction of
+  silence, and silence is worse: a wrong ladder at least hands a caller four legal
+  values, while here every legal value was a guess and every illegal one a 400.
+  <!-- prose-only: because=history -->
+  The description now shares `pf_remember`'s tail outright —
+  `internal/mcp/tools_memory.go` (`updateMemoryVisibilityParamDesc`) concatenates
+  `internal/mcp/tools_memory.go` (`visibilityVocabAndConsequence`), which builds the
+  value set from `internal/domain/memory.go` (`MemoryVisibilityList`) — and
+  `internal/mcp/visibility_vocab_publication_test.go`
+  (`TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne`) asserts that set both
+  ways plus the `public` consequence for this tool exactly as it does for
+  `pf_remember`, with the scoped/out-of-scope partition checked in both directions
+  by `internal/mcp/remember_visibility_scope_test.go`
+  (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`).
 
 ## Open
 

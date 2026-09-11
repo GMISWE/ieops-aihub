@@ -279,8 +279,14 @@ func TestFileScopeRepoKey_ForceTakeoverDerivesRepoQualifiedKey(t *testing.T) {
 		t.Fatalf("initial claim: %v", aerr)
 	}
 
-	// aihub#492: FnForceTakeover is SERIALIZABLE and runs the same lock probe as
-	// a claim, so it loses the same races. See serialization_retry_test.go.
+	// aihub#492/#497: FnForceTakeover runs the same lock probe as a claim, but
+	// unlike FnClaimWorkItem its transaction is a bare pool.Begin — the isolation
+	// level is not pinned and follows the pool/DSN default
+	// (txn_isolation_probe_test.go pins the split; an earlier revision here said
+	// "is SERIALIZABLE", which was never true of this path). Class-40 rollbacks
+	// still reach it — 40P01 at any isolation level, 40001 wherever configuration
+	// raises the default — and surface as the retryable 409 since aihub#497, so
+	// the retry stays. See serialization_retry_test.go.
 	if _, aerr := retryOnSerializationConflict(t, "force_takeover", func() (*ForceTakeoverResponse, *AihubError) {
 		return FnForceTakeover(ctx, pool, wi.ID, uid, "taker", "admin",
 			map[string]string{proj: "owner"},

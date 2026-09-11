@@ -136,13 +136,16 @@ const (
 	//
 	//	GOWORK=off go test ./internal/mcp/ -run '^TestContractEvery' -count=1 -v
 	//
-	// (the G1-G4 log lines), and for floorToolsOnWire, which no log line prints,
-	// raise it to an absurd value and read the count out of the failure.
-	// measured_floor_comment_gate_test.go keeps the values out of this block.
+	// (the G1-G4 log lines). floorToolsOnWire's value is the "outbound requests"
+	// figure in G2's line — printed since aihub#542; before that no log line
+	// carried it and the recipe was to raise the floor to an absurd value and
+	// read the count out of the failure. measured_floor_comment_gate_test.go
+	// keeps the values out of this block, and its NO_PRINT_ARM arm keeps the
+	// "outbound requests" figure in G2's line.
 	floorTools       = 40  // G1's tool count
 	floorParams      = 200 // G1's parameter count
 	floorRoutes      = 40  // G2's route count ("against N routes")
-	floorToolsOnWire = 25  // G2's OUTBOUND REQUEST count — not a tool count, and not the distinct-path count G2 logs; only the FLOOR_ failure prints it
+	floorToolsOnWire = 25  // G2's OUTBOUND REQUEST count — not a tool count, and not the distinct-path count; the "outbound requests" figure in G2's log line (aihub#542)
 	floorProjections = 20  // G3's inspected-result count
 	floorBoundFields = 20  // G4's resolved server-side name occurrences
 
@@ -1516,8 +1519,8 @@ func TestContractEveryPathTheMCPLayerCallsIsRouted(t *testing.T) {
 		t.Error("matchRoute matched a path that cannot exist — it answers yes to everything, so " +
 			"its verdict that every observed path is routed carries no information")
 	}
-	t.Logf("G2: %d distinct paths from %d tools, %d matched, against %d routes",
-		len(seen), len(tools), matched, len(routes))
+	t.Logf("G2: %d outbound requests, %d distinct paths from %d tools, %d matched, against %d routes",
+		len(observed), len(seen), len(tools), matched, len(routes))
 	baseline.assertNoStaleEntries(t, gatePathNotRouted)
 }
 

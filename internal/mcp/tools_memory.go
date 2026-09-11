@@ -806,15 +806,59 @@ func memoryTypeParamDesc() string {
 // this tool can make: renderTypes is configurable, so the conjunct is the honest
 // stopping point.
 //
-// ⚠️ Scoped to this tool. pf_save_artifact and pf_update_memory publish the same
-// column and are the file scope of other work items; see the gate in
-// visibility_vocab_publication_test.go for which of them is checked and why.
+// ⚠️ No longer scoped to this tool alone. pf_update_memory writes the same
+// column through the same guard and shares this description's whole tail since
+// aihub#529 (see visibilityVocabAndConsequence); pf_save_artifact still carries
+// a hand-typed four-value literal and is the file scope of another work item.
+// See the gate in visibility_vocab_publication_test.go for which tools are
+// checked and why.
 func rememberVisibilityParamDesc() string {
-	return "Visibility tier. ENFORCED: one of " +
+	return "Visibility tier. " + visibilityVocabAndConsequence() +
+		" Send `project` unless you mean to publish."
+}
+
+// visibilityVocabAndConsequence is the shared tail of every `visibility`
+// description the aihub#495 gate scopes: the enforced vocabulary, derived from
+// domain.MemoryVisibilityList() rather than retyped — the same list
+// domain.vocabularyErr renders into the 400, so the set a caller is shown and
+// the set a refusal names cannot drift — plus the `public` consequence, the one
+// sentence rememberVisibilityParamDesc's header explains at length: `public` is
+// the tier GET /share/:id serves WITHOUT auth, so a list that omitted the
+// warning would publish the affordance and withhold the reason to be careful
+// with it.
+//
+// One function rather than a copy per tool (aihub#529): pf_remember and
+// pf_update_memory write the same column through the same guard
+// (domain.UpdateMemory builds a RememberRequest and calls Remember), so their
+// published vocabularies diverging could only ever mislead. The gate in
+// visibility_vocab_publication_test.go asserts the set and the consequence per
+// tool regardless, so this sharing is a convenience, not the enforcement.
+func visibilityVocabAndConsequence() string {
+	return "ENFORCED: one of " +
 		strings.Join(domain.MemoryVisibilityList(), "|") +
 		" (memories_visibility_check, mirrored in Go — anything else is a 400 naming the field). " +
 		"⚠️ `public` is the anonymous-share tier: GET /share/:id serves a public memory with NO auth " +
-		"when it also has a renderable body. Send `project` unless you mean to publish."
+		"when it also has a renderable body."
+}
+
+// updateMemoryVisibilityParamDesc is pf_update_memory's published `visibility`
+// description.
+//
+// aihub#529. It used to read "New visibility (omit to keep current)" — no
+// values at all, which is worse than the four-of-five literal aihub#495 fixed
+// on pf_remember: silence did not even leave a caller a stale ladder to copy
+// from, so every legal value was a guess and every illegal one a 400. The
+// vocabulary and its consequence are pf_remember's own tail, shared via
+// visibilityVocabAndConsequence rather than restated, because both tools write
+// memories.visibility through the same guard.
+//
+// The closing advice deliberately differs from pf_remember's "Send `project`
+// unless you mean to publish": on an update the safe default is OMITTING the
+// key, which keeps the lineage head's value — sending `project` here would
+// itself be a change.
+func updateMemoryVisibilityParamDesc() string {
+	return "New visibility (omit to keep current). " + visibilityVocabAndConsequence() +
+		" Omit unless you mean to change who can read the memory."
 }
 
 // rememberSchema is pf_remember's published InputSchema.
@@ -961,11 +1005,15 @@ func buildReinforceMemoryBody(args map[string]any, sf *config.StateFile) map[str
 // guard covers both tools, so a caller told about it by only one of them would
 // meet the other's 400 with no warning — which is the T1-3 shape again, in the
 // direction of silence rather than of a wrong answer.
+//
+// aihub#529: `visibility` is the third instance of the same shape. Same column,
+// same guard, and this tool's description named no values at all; see
+// updateMemoryVisibilityParamDesc.
 func updateMemorySchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"memory_id":     prop("string", "Memory ID (any id in the lineage)"),
 		"content":       prop("string", "New content (omit to keep current)"),
-		"visibility":    prop("string", "New visibility (omit to keep current)"),
+		"visibility":    prop("string", updateMemoryVisibilityParamDesc()),
 		"tags":          prop("array", "New tags (omit to keep current)"),
 		"base_strength": prop("number", "New base strength, integer 1-5 (omit to keep current). A fractional value is refused"),
 		"work_item_id":  prop("string", "Work item ID (for credential injection)"),

@@ -10,12 +10,15 @@ package mcp_test
 //	"⚠️ **Scoped to this tool** … `pf_save_artifact`'s `visibility` still carries
 //	 the same four-value literal and `pf_update_memory`'s names no values at all"
 //	    -> TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary
+//	    (the card sentence as it stood at wave 2; aihub#529 has since moved
+//	    pf_update_memory INTO visibilityVocabTools and the card sentence with it,
+//	    the exact transition the partition below is built to sign)
 //
 // 🔴 Both are gaps in a gate that already exists, which is why they are stated
 // here rather than folded into it. TestPublishedMemoryVisibilityVocabularyIsThe-
 // EnforcedOne compares the two vocabularies as SETS — it sorts both sides — so
 // "one value in one ORDER" is exactly the half it cannot fail on; and its scope
-// note names the other two tools in a COMMENT, which is the form that rots
+// note named the out-of-scope tools in a COMMENT, which is the form that rots
 // silently the day one of them is fixed.
 //
 //	GOWORK=off go test ./internal/mcp/ -run 'TestPublishedVisibilityVocabularyMatchesTheRefusal|TestOnlyTheScopedToolsPublish' -count=1
@@ -170,20 +173,21 @@ func orderedPipeRun(desc string) []string {
 // visibilityVocabTools, with how many values its description names today.
 //
 // 🔴 A table, not a comment. The scope note in visibility_vocab_publication_test.go
-// records these two tools in prose, and prose is what stops being true without
-// anything going red — so the day somebody widens pf_save_artifact's literal and
-// forgets the map entry, the card's sentence about it becomes false in silence.
-// Here the count is the claim, and the arm below checks it both ways.
+// records the out-of-scope tools in prose, and prose is what stops being true
+// without anything going red — so the day somebody widens pf_save_artifact's
+// literal and forgets the map entry, the card's sentence about it becomes false
+// in silence. Here the count is the claim, and the arm below checks it both ways.
 //
 // An entry is a statement that the tool is covered by SOMEBODY ELSE's work item,
 // not that four values are correct. It is removed, not edited, when the tool
-// joins visibilityVocabTools.
+// joins visibilityVocabTools — which is exactly what happened to the
+// pf_update_memory row this table used to carry ("New visibility (omit to keep
+// current)", 0 values): aihub#529 moved it into visibilityVocabTools and deleted
+// it here in the same change.
 var visibilityVocabOutOfScope = map[string]int{
 	// "private|project|team|admin (default: project)" — the same four-value
 	// literal pf_remember carried before aihub#495.
 	"pf_save_artifact": 4,
-	// "New visibility (omit to keep current)" — names no values at all.
-	"pf_update_memory": 0,
 }
 
 // TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary partitions every

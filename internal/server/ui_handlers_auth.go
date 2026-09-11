@@ -181,30 +181,37 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 			WHERE members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
 			uc.UserID,
 		)
-		if perr == nil {
-			for prows.Next() {
-				var projName string
-				var membersRaw []byte
-				if err := prows.Scan(&projName, &membersRaw); err != nil {
-					continue
-				}
-				role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
-				if decodeErr != nil {
-					warnMalformedMembersOnce(projName, decodeErr)
-				}
-				if !found {
-					continue
-				}
-				if projectScope == nil || *projectScope == projName {
-					uc.ProjectRoles[projName] = role
-				}
-			}
-			// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
-			if err := prows.Err(); err != nil {
-				fmt.Fprintf(os.Stderr, "ui session: project membership rows: %v\n", err)
-			}
-			prows.Close()
+		if perr != nil {
+			// aihub#522: BearerAuth's twin. A swallowed failure built a session
+			// with ZERO ProjectRoles, so /ui rendered a member's every project
+			// as invisible. Returned rather than JSON'd because the one caller
+			// (RequireUISession) turns any error into the login redirect —
+			// which is already what the users query above does on this same
+			// failure.
+			return nil, perr
 		}
+		for prows.Next() {
+			var projName string
+			var membersRaw []byte
+			if err := prows.Scan(&projName, &membersRaw); err != nil {
+				continue
+			}
+			role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+			if decodeErr != nil {
+				warnMalformedMembersOnce(projName, decodeErr)
+			}
+			if !found {
+				continue
+			}
+			if projectScope == nil || *projectScope == projName {
+				uc.ProjectRoles[projName] = role
+			}
+		}
+		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		if err := prows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "ui session: project membership rows: %v\n", err)
+		}
+		prows.Close()
 	}
 	return &uc, nil
 }

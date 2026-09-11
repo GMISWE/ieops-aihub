@@ -996,6 +996,17 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	stepErr := tx.QueryRow(ctx, `
 		SELECT current_step_status, current_step_attempt FROM wi_step_state WHERE work_item_id=$1`, wiID,
 	).Scan(&stepStatus, &stepAttempt)
+	// aihub#545: stepErr is read, not returned — pgx.ErrNoRows is the normal
+	// "this work item has no step state" answer and the guard below treats any
+	// error as "no step in progress". A class-40 rollback is not that: this
+	// transaction is SERIALIZABLE, so a 40001 here has already aborted it, and
+	// reading past one replaces the classified retryable 409 with a 25P02-backed
+	// 500 at the very next statement. Same read, same reasoning and same fix as
+	// aihub#492's prior-step read on the claim path and aihub#497's on the
+	// takeover path — this is their sibling on the complete-attempt path.
+	if aerr := retryConflictErr(stepErr, "failed to read step state for complete_attempt"); aerr != nil {
+		return aerr
+	}
 	if stepErr == nil && stepStatus == "in_progress" {
 		if req.Status == "paused" || req.ForceTerminateStep {
 			if aihubErr := fnForceTerminateStep(ctx, tx, wiID, req.AttemptID, stepAttempt); aihubErr != nil {
@@ -1132,7 +1143,23 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string, stepAttemptID *string) *AihubError {
 	// Get current step
 	var currentStep *string
-	tx.QueryRow(ctx, `SELECT current_step FROM wi_step_state WHERE work_item_id=$1`, wiID).Scan(&currentStep) //nolint:errcheck
+	stepErr := tx.QueryRow(ctx, `SELECT current_step FROM wi_step_state WHERE work_item_id=$1`, wiID).Scan(&currentStep)
+	// aihub#545: stepErr is read, not returned — pgx.ErrNoRows and a NULL
+	// current_step both keep meaning "no step to terminate", exactly as before.
+	// A class-40 rollback is not that: Postgres has already aborted the
+	// enclosing transaction, so answering nil here tells the caller "nothing to
+	// do, carry on", and carrying on is running the rest of a SERIALIZABLE
+	// complete-attempt (or takeover) inside a dead transaction until some later
+	// statement fails with 25P02 — unclassifiable, reported as a 500. Worse,
+	// the swallow made aihub#497's guard arm at the FnForceTakeover call site
+	// structurally unreachable for this hop: that arm matches
+	// ErrConflictSerializationFailure on this function's RETURN, and a 40001
+	// discarded at this Scan never becomes a return value at all. Same read,
+	// same reasoning and same fix as aihub#492's prior-step read on the claim
+	// path and aihub#497's step-state read on the takeover path.
+	if aerr := retryConflictErr(stepErr, "failed to read current step for force_terminate"); aerr != nil {
+		return aerr
+	}
 
 	if currentStep == nil {
 		return nil // No step to terminate
@@ -1751,7 +1778,22 @@ func verifyAttemptCredential(ctx context.Context, tx pgx.Tx, wi WorkItem, attemp
 	}
 
 	// 6. Update last_active_at (heartbeat)
-	tx.Exec(ctx, `UPDATE run_attempts SET last_active_at=clock_timestamp() WHERE id=$1`, attemptID) //nolint:errcheck
+	//
+	// aihub#545: through bestEffortExec, not a discarded tx.Exec. The heartbeat
+	// stays best-effort for every error that leaves the transaction usable — a
+	// missed refresh costs one stall-detection tick, and failing the caller's
+	// operation over it would be backwards. A class-40 rollback does not leave
+	// the transaction usable: this function runs inside four SERIALIZABLE
+	// transactions (FnCompleteAttempt, FnAcquireLocks, FnRecordRepoPins,
+	// FnReconcileCommitLocks), and this UPDATE writes run_attempts — the very
+	// table those transactions take SIReadLocks on — so a 40001 here is live,
+	// not latent. Discarding it means every later statement runs against a dead
+	// transaction and the caller is told about whichever one failed first with
+	// 25P02, as a 500 instead of the retryable 409. See bestEffortExec.
+	if aerr := bestEffortExec(ctx, tx, "failed to refresh attempt heartbeat (last_active_at)", `
+		UPDATE run_attempts SET last_active_at=clock_timestamp() WHERE id=$1`, attemptID); aerr != nil {
+		return aerr
+	}
 
 	return nil
 }

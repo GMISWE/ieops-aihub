@@ -268,10 +268,16 @@ func TestNoResourceArrayIsRegisteredWithoutItemSchema(t *testing.T) {
 // ─── aihub#395: the four declared_resources contract residues ───────────────
 
 // declaredResourcesItemsSchema renders the shared prop once so every assertion
-// below reads the SAME schema the four tools publish (declaredResourcesProp is
-// used by pf_create_work_item, pf_batch_create_work_items, pf_update_work_item
-// and pf_predict_conflicts). One definition is the point: a per-tool copy is how
-// two of these tools would end up describing different contracts.
+// below reads the SAME entry schema every publisher of declaredResourcesProp
+// ships. The roster is the prop's call sites, not a count kept here (an earlier
+// revision said "four tools" when the top-level registrations were three): grep
+// declaredResourcesProp — today pf_predict_conflicts and pf_update_work_item
+// register it directly, and workItemFieldProps carries it into
+// pf_create_work_item at top level and into pf_batch_create_work_items nested
+// under `items` — and TestNoResourceArrayIsRegisteredWithoutItemSchema above is
+// what keeps any new resource array on the helper. One definition is the point:
+// a per-tool copy is how two of these tools would end up describing different
+// contracts.
 func declaredResourcesItemsSchema(t *testing.T) map[string]any {
 	t.Helper()
 	schema := objectSchema(map[string]any{

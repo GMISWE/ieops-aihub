@@ -1504,9 +1504,27 @@ func handleUIWIEventsPartial(pool *pgxpool.Pool, tmpl *template.Template) echo.H
 	}
 }
 
-// fetchArtifactLinks pulls the methodology.* memories for a wi via the recall
-// path. Errors are silently swallowed — the section is best-effort; a broken
+// fetchArtifactLinks pulls a wi's artifact memories via the recall path.
+// Errors are silently swallowed — the section is best-effort; a broken
 // recall query should not break the detail page.
+//
+// ⚠️ NOT "the methodology.* memories": the request names the six SUGGESTED
+// kinds and nothing else, on purpose (aihub#539). pf_save_artifact accepts any
+// methodology.* type (aihub#499 enforces the prefix, not the names), so an
+// off-list artifact — methodology.playbook, 3 rows measured live 2026-09-09 —
+// is stored but never appears in this section, exactly as the published `type`
+// description, docs/mcp-cards/pf_save_artifact.md (§6.2 T2-6) and
+// docs/mcp-tools.md disclose. Recall's type filter even takes "methodology.*"
+// wildcards (memory_unmatched.go), so the prefix version is one edit away —
+// making that edit REVERSES a published contract rather than fixing a wart:
+// TestOffListMethodologyTypeIsNeitherPreRenderedNorLinked drives this list off
+// the RecallRequest the handler really builds and goes RED on a prefix (its
+// mutant M37) or a dropped name (M38). The six are literals rather than
+// domain.MethodologyTypeEnum because that test cross-checks THIS copy against
+// the enum; deriving one from the other would turn its equality arm into
+// X == X. And unlike the render half, which has a per-deploy widening knob
+// (RENDER_MEMORY_TYPES), this list has none — a widened deployment pre-renders
+// an off-list type that still will not link here.
 func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext, wi *domain.WorkItem) []artifactLink {
 	wiID := wi.ID
 	req := &domain.RecallRequest{

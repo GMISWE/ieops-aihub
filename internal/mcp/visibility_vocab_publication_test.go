@@ -32,14 +32,17 @@ package mcp_test
 // both directions — a value the column accepts and hop 1 hides fails, and a value
 // hop 1 offers and the column refuses fails too.
 //
-// ⚠️ SCOPE — two other tools publish this same column and are NOT checked here.
-// pf_save_artifact's `visibility` carries the same four-value literal, and
-// pf_update_memory's names no values at all ("New visibility (omit to keep
-// current)"). Both are real, both are somebody else's file scope in this batch,
-// and adding them to the map below is the whole change needed when that lands.
-// They are named rather than silently skipped because an arm that quietly
-// measures less than its title claims is the failure rhsThirdStateTools' floor
-// exists to catch.
+// ⚠️ SCOPE — one other tool publishes this same column and is NOT checked here.
+// pf_save_artifact's `visibility` carries the same four-value literal; it is
+// somebody else's file scope, and adding it to the map below is the whole
+// change needed when that lands. pf_update_memory used to sit beside it — its
+// description named no values at all ("New visibility (omit to keep current)"),
+// which is worse than four-of-five because silence leaves a caller nothing at
+// all — until aihub#529 made exactly the promised one-entry change: it now
+// shares pf_remember's derivation (visibilityVocabAndConsequence) and is
+// asserted below like any scoped tool. The remainder is named rather than
+// silently skipped because an arm that quietly measures less than its title
+// claims is the failure rhsThirdStateTools' floor exists to catch.
 //
 // No database needed:
 //
@@ -57,7 +60,8 @@ import (
 // visibilityVocabTools maps each tool whose `visibility` description must publish
 // the full column vocabulary to the parameter that carries it.
 var visibilityVocabTools = map[string]string{
-	"pf_remember": "visibility",
+	"pf_remember":      "visibility",
+	"pf_update_memory": "visibility",
 }
 
 func TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne(t *testing.T) {
@@ -84,9 +88,9 @@ func TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne(t *testing.T) {
 		published := pipedVocabularyIn(desc)
 		if len(published) == 0 {
 			t.Errorf("VISIBILITY_VOCAB_UNPUBLISHED: %s's %q description names no pipe-separated "+
-				"value set at all.\n\nThe parameter is REQUIRED on this tool, so the description is "+
-				"the only place a caller can learn what to send; without it every legal value is a "+
-				"guess and every illegal one is a 400.\n\nLive description was:\n%s",
+				"value set at all.\n\nRequired or optional, the description is the only place a "+
+				"caller can learn what to send; without it every legal value is a guess and every "+
+				"illegal one is a 400.\n\nLive description was:\n%s",
 				toolName, param, desc)
 			continue
 		}

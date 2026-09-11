@@ -438,14 +438,20 @@ card does NOT declare and so cannot see a key that stops being sent.
   `internal/mcp/visibility_vocab_publication_test.go` asserts the SET both ways — a
   legal value hop 1 hides fails, and an offered value the column refuses fails too,
   which is the direction a shortening back to a literal would take.
-  ⚠️ **Scoped to this tool, and the arm says so rather than quietly measuring less
-  than its name.** `pf_save_artifact`'s `visibility` still carries the same
-  four-value literal and `pf_update_memory`'s names no values at all — both counts
-  recorded and checked against the live schema by
+  ⚠️ **Scoped to this tool and `pf_update_memory`, and the arm says exactly what it
+  covers rather than quietly measuring less than its name.** `pf_update_memory`'s
+  `visibility` used to name no values at all ("New visibility (omit to keep
+  current)") and since `aihub#529` shares this tool's derivation — both descriptions
+  concatenate `internal/mcp/tools_memory.go` (`visibilityVocabAndConsequence`) — so
+  `internal/mcp/visibility_vocab_publication_test.go`
+  (`TestPublishedMemoryVisibilityVocabularyIsTheEnforcedOne`) asserts its set and
+  its `public` consequence exactly as it does this tool's. `pf_save_artifact`'s
+  `visibility` still carries the same four-value literal — the count recorded and
+  checked against the live schema by
   `internal/mcp/remember_visibility_scope_test.go`
-  (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`) — and both write this
-  column, and both are the file scope of other work items in this batch. The fix
-  there is one entry each in that gate's `visibilityVocabTools`, which is also what
+  (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`) — and it writes this
+  column, and it is the file scope of another work item in this batch. The fix
+  there is one entry in that gate's `visibilityVocabTools`, which is also what
   moves the population of `internal/mcp/remember_visibility_scope_test.go`
   (`TestOnlyTheScopedToolsPublishTheWholeVisibilityVocabulary`): it derives the set
   of tools publishing the column from the live tool list and partitions it against

@@ -1,18 +1,25 @@
 package mcp_test
 
 // aihub#449 / aihub#411 T2-20 — the ready queue's section count is ONE number,
-// written in three places, and this test is what keeps the three the same.
+// written in four places, and this test is what keeps the four the same.
 //
-// The three copies are:
+// The four copies are:
 //
 //	struct       internal/domain/work_items.go (ReadyQueue) — the field list
 //	schema       the pf_get_ready_queue description in tools_lifecycle.go
 //	design doc   the Ready Queue block of docs/design/polyforge-v1-design.md
+//	skill doc    plugins/polyforge/skills/pf-status/SKILL.md — the operator's view
 //
-// Before this wi they said seven, six and six-with-three-impossible-fields
-// respectively, and nothing anywhere went red. Each copy is individually
+// Before this wi the first three said seven, six and six-with-three-impossible-
+// fields respectively, and nothing anywhere went red. Each copy is individually
 // correct-looking — that is the whole difficulty — so the only thing that can
-// catch the drift is an assertion that reads all three and compares them.
+// catch the drift is an assertion that reads all of them and compares them.
+//
+// The fourth copy was the proof: the skill doc said "six segments" from
+// aihub#449 until a person fixed it by hand in 1.1.31, because it was the one
+// copy this gate did not read (aihub#560). Reading it here changes nothing
+// under plugins/ — a test that reads a file is not a plugin change and forces
+// no version bump.
 //
 // 🔴 Why the STRUCT is the authority and not the schema: the struct is what
 // marshals, so it is the only one of the three a caller can observe. The other
@@ -173,8 +180,9 @@ func TestReadyQueueSectionCountIsOneNumber(t *testing.T) {
 		t.Errorf("%s's description says %d sections; internal/domain/work_items.go "+
 			"(ReadyQueue) marshals %d: %s.\nThe struct is the authority — it is the one a "+
 			"caller can observe — so fix the description, and fix the Ready Queue block of "+
-			"docs/design/polyforge-v1-design.md in the same change.",
-			readyQueueTool, said, len(segments), strings.Join(segments, ", "))
+			"docs/design/polyforge-v1-design.md and the segment count in %s in the same "+
+			"change.", readyQueueTool, said, len(segments), strings.Join(segments, ", "),
+			readyQueueSkillDoc)
 	}
 	t.Logf("ready queue: %d segments (%s), description says %d",
 		len(segments), strings.Join(segments, ", "), said)
@@ -406,4 +414,96 @@ func TestTheDeadReadyQueueFieldsAreDeclaredNowhereInGo(t *testing.T) {
 	t.Logf("dead fields: %d field(s) across %d response type(s) carry none of %v; %s appears in "+
 		"0 of %d parsed Go files", fields, len(seenType), readyQueueDeadFields,
 		readyQueueDeadGoIdent, parsed)
+}
+
+// ─── aihub#560: the fourth copy — the pf-status skill doc ────────────────────
+
+// readyQueueSkillDoc is the fourth copy of the section count, relative to the
+// repository root (cardsRepoRoot, contract_cards_gate_test.go — the same root
+// every repo-root read in this package goes through). It is the copy an
+// OPERATOR reads: the /pf-status skill renders the queue from this file's
+// instructions, so a wrong count here mis-renders every status call. It said
+// "six segments" from aihub#449 until 1.1.31, when a person noticed by hand —
+// the exact drift the gate above was built for, on the one copy the gate did
+// not read.
+const readyQueueSkillDoc = "plugins/polyforge/skills/pf-status/SKILL.md"
+
+// readyQueueCountWords spells the counts this gate can read back out of prose,
+// index = value. The skill doc writes its count as a WORD ("seven segments"),
+// not a digit, so the digit regexp the schema arm uses cannot serve here.
+var readyQueueCountWords = []string{
+	"zero", "one", "two", "three", "four", "five", "six",
+	"seven", "eight", "nine", "ten", "eleven", "twelve",
+}
+
+// TestReadyQueueSectionCountInSkillDoc is the fourth copy: every spelled-out
+// "<count> segments" in the pf-status skill doc must state the number
+// internal/domain/work_items.go (ReadyQueue) marshals.
+//
+// What counts as a copy, and what does not:
+//
+//   - "<word> segments" (space, plural) where <word> spells a number — a copy.
+//     "seven segments" appears in the skill doc's Purpose line and in its
+//     global-view mechanic, and both bound what an operator expects back.
+//   - "three-segment output" (hyphen, singular) — NOT a copy. That is the
+//     skill's RENDER format, a different number that has nothing to do with
+//     how many sections the queue carries, and pinning it here would red the
+//     gate on a truth.
+//   - "Highlight segments", "the segments" — no count stated, nothing to pin.
+//
+// Reading plugins/ is all this test does to it. It changes no plugin byte, so
+// it forces no version bump and can land at any time.
+func TestReadyQueueSectionCountInSkillDoc(t *testing.T) {
+	segments := readyQueueSegments(t)
+	if len(segments) >= len(readyQueueCountWords) {
+		t.Fatalf("ReadyQueue marshals %d segments, which readyQueueCountWords cannot spell — "+
+			"extend the table, it ends at %q", len(segments),
+			readyQueueCountWords[len(readyQueueCountWords)-1])
+	}
+	want := readyQueueCountWords[len(segments)]
+
+	wordValue := map[string]int{}
+	for v, w := range readyQueueCountWords {
+		wordValue[w] = v
+	}
+
+	path := filepath.Join(cardsRepoRoot, filepath.FromSlash(readyQueueSkillDoc))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v — this test cannot pass by not finding its subject",
+			readyQueueSkillDoc, err)
+	}
+
+	countRe := regexp.MustCompile(`\b([A-Za-z]+) segments\b`)
+	found := 0
+	for i, line := range strings.Split(string(raw), "\n") {
+		for _, m := range countRe.FindAllStringSubmatch(line, -1) {
+			said, ok := wordValue[strings.ToLower(m[1])]
+			if !ok {
+				continue // "Highlight segments" — a mention, not a count
+			}
+			found++
+			if said != len(segments) {
+				t.Errorf("%s:%d says %q — %d sections; internal/domain/work_items.go "+
+					"(ReadyQueue) marshals %d: %s.\nThe struct is the authority — it is the one "+
+					"a caller can observe — so write %q, and fix the schema description and the "+
+					"Ready Queue block of docs/design/polyforge-v1-design.md in the same change. "+
+					"This is the copy that sat on \"six\" from aihub#449 to 1.1.31 because "+
+					"nothing read it (aihub#560).", readyQueueSkillDoc, i+1, m[0], said,
+					len(segments), strings.Join(segments, ", "), want+" segments")
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatalf("%s spells out no segment count anywhere (no \"<count> segments\" phrase). It "+
+			"has stated one since the skill was written, and the count is what an operator "+
+			"plans a status render around — dropping it silently is the same defect as the "+
+			"schema dropping \"(N-section)\" (aihub#411 T2-20). Write %q, or retarget this "+
+			"test rather than letting it pass by finding nothing.",
+			readyQueueSkillDoc, want+" segments")
+	}
+	if !t.Failed() {
+		t.Logf("skill doc: %d spelled-out count(s) in %s, all say %q, struct marshals %d",
+			found, readyQueueSkillDoc, want+" segments", len(segments))
+	}
 }

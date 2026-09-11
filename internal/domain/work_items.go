@@ -961,7 +961,18 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		)
 	}
 	if err != nil {
-		return nil // Dedup is best-effort; if query fails, allow creation
+		// Dedup is best-effort; if the query fails, allow creation. aihub#522
+		// verified this is a DELIBERATE discard, not a missed check (the aihub#500
+		// census flagged both branch assignments above as NO-CHECK because the
+		// guard sits after the if/else, not inside it) — with one carve-out,
+		// symmetric with the rows.Err() arm below: a class-40 rollback has
+		// already killed the transaction CreateWorkItem is holding, so "allow
+		// creation" is not a fallback there, it is the caller being told 500 at
+		// a later statement with the SQLSTATE gone (aihub#492 / bestEffortExec).
+		if aerr := retryConflictErr(err, "failed to query dedup candidates"); aerr != nil {
+			return aerr
+		}
+		return nil
 	}
 	defer rows.Close()
 

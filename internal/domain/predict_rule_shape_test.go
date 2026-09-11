@@ -310,7 +310,17 @@ func predictRuleSites(t *testing.T, fn *ast.FuncDecl, dryRunGuards []*ast.BlockS
 }
 
 // innermostLoopReturns reports whether the smallest `for … range` loop
-// containing pos has a return in it.
+// containing pos has a return in it that PUBLISHES AN ANSWER.
+//
+// aihub#522 narrowed "a return" to "a suppressing return". Every rule's loop
+// now propagates its query errors (`return nil, dbErrCause(…)`), and an error
+// return cannot "hide every rule after it from a caller the card promises will
+// see them" — the caller sees no ladder at all, the call failed. The card's
+// suppression sentence is about rule 1 handing back a RESULT on the first hit,
+// so what this counts is a return whose first value is anything but the `nil`
+// identifier: `return result, nil` is suppression, `return nil, aerr` is not.
+// The quiet direction is covered — an early `return result, nil` smuggled into
+// rule 5 still reddens the suppression arm, error propagation or no.
 func innermostLoopReturns(loops []*ast.RangeStmt, pos token.Pos) bool {
 	var best *ast.RangeStmt
 	for _, l := range loops {
@@ -326,9 +336,18 @@ func innermostLoopReturns(loops []*ast.RangeStmt, pos token.Pos) bool {
 	}
 	returns := false
 	ast.Inspect(best.Body, func(n ast.Node) bool {
-		if _, ok := n.(*ast.ReturnStmt); ok {
-			returns = true
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
 		}
+		if len(ret.Results) > 0 {
+			if id, ok := ret.Results[0].(*ast.Ident); ok && id.Name == "nil" {
+				// Error propagation: no answer is published, nothing is
+				// suppressed (aihub#522).
+				return true
+			}
+		}
+		returns = true
 		return !returns
 	})
 	return returns

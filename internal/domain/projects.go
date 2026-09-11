@@ -567,7 +567,12 @@ func ListProjects(ctx context.Context, conn *pgxpool.Pool, caller *UserRecord) (
 			caller.ID)
 	}
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("list projects: %v", err))
+		// aihub#522 (rider): not a swallow — the aihub#500 census flagged both
+		// branch assignments above as NO-CHECK only because this guard sits
+		// after the if/else. Routed through dbErrCause so the send-time arm
+		// classifies class 40 exactly as the rows.Err() arm below already does;
+		// byte-identical for every other error.
+		return nil, dbErrCause(err, "list projects")
 	}
 	defer rows.Close()
 

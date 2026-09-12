@@ -440,8 +440,12 @@ func TestQueryResultsAreDrainedForErrors(t *testing.T) {
 		forEachFunc(file, func(fn *ast.FuncDecl, name string) {
 			// Same scoping as Rule 1, and for the same reason: an undrained
 			// error on a pool query outside any transaction is a real bug, but
-			// it is not THIS class, and there are 20-odd of them. Closing that
-			// wider set is tracked separately rather than smuggled in here.
+			// it is not THIS class, and there were 20-odd of them. That wider
+			// set is closed now — aihub#522 took PredictConflicts and
+			// FnClaimWorkItem (predict_claim_query_errors_test.go), aihub#607
+			// took the rest (nontx_query_errors_test.go runs both census
+			// scanners over every NON-transactional function in this package)
+			// — still gated there rather than smuggled in here.
 			if !isTransactional(t, fset, fn) {
 				return
 			}

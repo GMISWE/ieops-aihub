@@ -261,7 +261,15 @@ func detectCycle(ctx context.Context, pool *pgxpool.Pool, blockedWIID, blockingW
 		blockedWIID, blockingWIID, kind,
 	).Scan(&count)
 	if err != nil {
-		return nil // Non-fatal; allow creation
+		// aihub#607: this used to be `return nil // Non-fatal; allow creation` — a
+		// DB failure read as "no cycle", failing OPEN on the one check whose job
+		// is to keep the dependency graph acyclic (the same defect shape as
+		// PredictConflicts rule 1's probe before aihub#522). A cycle admitted
+		// here is durable data damage: the wis on it block each other, so none
+		// of them can ever become ready without manual repair. The answer to
+		// "the check could not run" must be the failure, not the pass.
+		// COUNT(*) always returns a row, so there is no ErrNoRows arm to preserve.
+		return dbErrCause(err, "failed to check for dependency cycles")
 	}
 	if count > 0 {
 		return NewErrDetails(ErrConflictDependencyCycle,
@@ -303,7 +311,7 @@ func GetParentRef(ctx context.Context, pool *pgxpool.Pool, childWiID string, cal
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, NewErr(ErrInternalError, "failed to query parent work item")
+		return nil, dbErr(err, "failed to query parent work item")
 	}
 	if callerRole == "admin" || callerProjectRoles[ref.Project] != "" {
 		ref.Slug = &slug
@@ -325,7 +333,7 @@ func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, ca
 		ORDER BY seq ASC`, parentWiID,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query child work items")
+		return nil, dbErr(err, "failed to query child work items")
 	}
 	defer rows.Close()
 
@@ -528,7 +536,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		WHERE d.blocking_wi_id = $1`, wiID,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query dependencies")
+		return nil, dbErr(err, "failed to query dependencies")
 	}
 	defer blockingRows.Close()
 	for blockingRows.Next() {
@@ -565,7 +573,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		WHERE d.blocked_wi_id = $1`, wiID,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, "failed to query blocked_by dependencies")
+		return nil, dbErr(err, "failed to query blocked_by dependencies")
 	}
 	defer blockedByRows.Close()
 	for blockedByRows.Next() {

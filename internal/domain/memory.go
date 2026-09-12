@@ -1693,7 +1693,7 @@ func textDedupCheck(ctx context.Context, pool *pgxpool.Pool, project, memType, c
 		project, memType,
 	)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("dedup query: %v", err))
+		return nil, dbErrCause(err, "dedup query")
 	}
 	defer rows.Close()
 
@@ -2227,7 +2227,11 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 		return NewErr(ErrInternalError, fmt.Sprintf("failed to reply to commit: %v", execErr))
 	}
 
-	// Look up the memory's work_item_id for the event row.
+	// Look up the memory's work_item_id for the event row. Best-effort BY the
+	// same warrant as the emission below (aihub#607, ledger in
+	// nontx_query_errors_test.go): the reply itself is already committed, this
+	// runs on the pool with no transaction to poison, and a failure costs only
+	// the wi linkage on an event row the next statement already agreed to lose.
 	var wiID *string
 	_ = pool.QueryRow(ctx, `SELECT work_item_id FROM memories WHERE id=$1`, memID).
 		Scan(&wiID)
@@ -2421,8 +2425,7 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	if req.WorkItemID != nil && *req.WorkItemID != "" {
 		resolved, rerr := resolveRecallWorkItemRef(ctx, pool, *req.WorkItemID)
 		if rerr != nil {
-			return nil, NewErr(ErrInternalError,
-				fmt.Sprintf("failed to resolve work_item_id filter: %v", rerr))
+			return nil, dbErrCause(rerr, "failed to resolve work_item_id filter")
 		}
 		req.WorkItemID = &resolved
 	}
@@ -2700,7 +2703,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 	// since the lexical branch's own comment notes it doesn't use the cursor.
 	total, terr := countMemories(ctx, pool, where, args)
 	if terr != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall count query: %v", terr))
+		return nil, dbErrCause(terr, "recall count query")
 	}
 
 	// Cursor-based pagination. memRefTimeSQL is a single total expression (no
@@ -2771,7 +2774,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall query: %v", err))
+		return nil, dbErrCause(err, "recall query")
 	}
 	defer rows.Close()
 
@@ -2788,7 +2791,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("recall rows error: %v", err))
+		return nil, dbErrCause(err, "recall rows error")
 	}
 
 	var nextCursor *string
@@ -2924,10 +2927,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, NewErr(ErrNotFound, "memory not found")
-		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to load memory: %v", err))
+		return nil, pgxErr(err, "memory not found", "failed to load memory")
 	}
 
 	// aihub#74 Stream A: single-memory related/backlinks enrichment is deferred to the
@@ -2952,10 +2952,7 @@ func GetLatestByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		SELECT COALESCE(latest_id, id) FROM memories WHERE id = $1`, id,
 	).Scan(&head)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, NewErr(ErrNotFound, "memory not found")
-		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to resolve latest memory: %v", err))
+		return nil, pgxErr(err, "memory not found", "failed to resolve latest memory")
 	}
 	return GetMemoryByID(ctx, pool, head)
 }
@@ -3225,7 +3222,7 @@ func Activate(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, call
 		newCount, newStability, callerUserID, newStatus, memID,
 	).Scan(&newLastActivatedAt)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to activate memory: %v", err))
+		return nil, dbErrCause(err, "failed to activate memory")
 	}
 
 	strength := MemoryStrength(baseStrength, newStability, &newLastActivatedAt, createdAt)
@@ -3331,7 +3328,7 @@ func repointHeadIfRedacted(ctx context.Context, pool *pgxpool.Pool, redactedID s
 	if err := pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM memories WHERE latest_id = $1)`, redactedID,
 	).Scan(&wasHead); err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to check lineage head: %v", err))
+		return dbErrCause(err, "failed to check lineage head")
 	}
 	if !wasHead {
 		return nil
@@ -3367,7 +3364,7 @@ func repointHeadIfRedacted(ctx context.Context, pool *pgxpool.Pool, redactedID s
 		LIMIT 1`, redactedID,
 	).Scan(&newHead)
 	if err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to resolve component head: %v", err))
+		return dbErrCause(err, "failed to resolve component head")
 	}
 	if newHead == redactedID {
 		// Every member is redacted (or this row has no component) — nothing to repoint.
@@ -3490,7 +3487,7 @@ func ListEvents(ctx context.Context, pool *pgxpool.Pool, f *ListEventsFilter) (*
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("events query: %v", err))
+		return nil, dbErrCause(err, "events query")
 	}
 	defer rows.Close()
 
@@ -3669,6 +3666,16 @@ func verifyAttemptCredentialSimple(ctx context.Context, pool *pgxpool.Pool, wi *
 	var storedHash string
 	err := pool.QueryRow(ctx, `SELECT session_secret_hash FROM run_attempts WHERE id = $1`, attemptID).
 		Scan(&storedHash)
+	// aihub#607: a DB failure used to fold into the `storedHash != secretHash`
+	// arm and answer "invalid session_secret" — an availability fault delivered
+	// as a credential verdict, the same second-lie shape aihub#522 removed from
+	// BearerAuth's membership query. The transactional twin of this function
+	// (verifyAttemptCredential) already answers its own load failure loudly
+	// through dbErr; a missing attempt row (ErrNoRows) IS an invalid credential
+	// and keeps the mismatch answer.
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return dbErr(err, "failed to load run_attempt credential")
+	}
 	if err != nil || storedHash != secretHash {
 		return NewErr(ErrAttemptMismatch, "invalid session_secret")
 	}
@@ -3733,6 +3740,10 @@ func ResolveCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, rep
 
 	// Look up the memory's work_item_id for the event row.
 	// project is already known from findCommitEntry above.
+	// Best-effort BY the same warrant as the emission below (aihub#607, ledger in
+	// nontx_query_errors_test.go): the resolve itself is already committed, this
+	// runs on the pool with no transaction to poison, and a failure costs only
+	// the wi linkage on an event row the next statement already agreed to lose.
 	var wiID *string
 	_ = pool.QueryRow(ctx, `SELECT work_item_id FROM memories WHERE id=$1`, memID).
 		Scan(&wiID)

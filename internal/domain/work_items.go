@@ -1777,7 +1777,7 @@ func listWorkItemsPage(ctx context.Context, pool *pgxpool.Pool, project string, 
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to list work_items: %v", err))
+		return nil, dbErrCause(err, "failed to list work_items")
 	}
 	defer rows.Close()
 

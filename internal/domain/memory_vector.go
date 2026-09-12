@@ -156,7 +156,11 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	}
 	total, terr := countMemories(ctx, pool, where, countArgs)
 	if terr != nil {
-		return nil, fmt.Errorf("recallWithVector count query: %w", terr)
+		// dbErrCause rather than fmt.Errorf (aihub#607): domainErr type-asserts a
+		// top-level *AihubError and does not unwrap, so a %w-wrapped error always
+		// answered 500 — including a class-40 rollback whose contract answer is
+		// the retryable 409. Message is byte-identical for every other error.
+		return nil, dbErrCause(terr, "recallWithVector count query")
 	}
 
 	// Limit placeholder ($idx — topK is appended at this 1-based position).
@@ -209,7 +213,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("recallWithVector query: %w", err)
+		return nil, dbErrCause(err, "recallWithVector query")
 	}
 	defer rows.Close()
 
@@ -233,7 +237,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("recallWithVector rows: %w", err)
+		return nil, dbErrCause(err, "recallWithVector rows")
 	}
 
 	// Enrich with forward relations (same as Recall text path).

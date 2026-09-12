@@ -437,6 +437,12 @@ func unrecognisedMarkerProblem(card, raw, name string) string {
 //  2. its verb is an effect-or-refusal verb;
 //  3. it is present tense about the current tree.
 //
+// Plus ONE form that stands outside the three conditions: form (d), a table-row
+// unit whose cell opens with a double quote — K9's claimed-verbatim shape. The
+// quote is a recorded published promise by construction, so it is a candidate
+// with no verb or tense condition; see IsQuotedPromiseRow for the aihub#604
+// measurement that forced this.
+//
 // ⚠️ And it is tuned to OVER-REPORT, deliberately. A present-tense sentence naming
 // a token and an effect verb is a candidate even where a human would immediately
 // call it prose-only; the author then files a prose-only marker with a `because`.
@@ -590,6 +596,53 @@ var attributionVerbs = map[string]bool{
 	"counts": true,
 }
 
+// LeadingQuoteCell matches a table cell that OPENS with a double-quoted string —
+// K9's claimed-verbatim form, single-sourced here since aihub#611 so the form K9
+// checks and the form this package counts cannot drift apart. A cell that opens
+// with a quote is a claim that the quote is VERBATIM published text; a quote
+// inside a sentence is the author's own words about the text and stays out.
+var LeadingQuoteCell = regexp.MustCompile(`\|\s*"([^"\n]+)"`)
+
+// LeadingQuotes returns every claimed-verbatim leading quote in a table-row
+// unit, and nothing from any other unit shape.
+//
+// 🔴 Gated on the unit being a WHOLE row (`|` at both edges, the same population
+// K9 walks) rather than on the regex alone, because the regex's `|"` can occur
+// mid-prose in a sentence quoting table syntax, and sweeping that in would make
+// the quoted-promise class contain units K9 never checks — a pin claim with no
+// pinner behind it.
+func LeadingQuotes(s string) []string {
+	if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") {
+		return nil
+	}
+	var out []string
+	for _, m := range LeadingQuoteCell.FindAllStringSubmatch(s, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// IsQuotedPromiseRow is condition 1's form (d), added by aihub#611 (2026-09-12)
+// after aihub#604 measured the gap it closes: a hop 0-1 promise row whose cell
+// opens with a double quote was INVISIBLE to this recogniser even though the
+// quote is, by K9's own definition, a recorded published promise. The measured
+// instance — pf_remember's `base_strength` row — split at the period inside the
+// K9-checked quote, and BOTH halves failed: the range half is a quoted noun
+// phrase with no effect verb, the refusal half has no anchor ("refused" is a
+// participle attributionVerbs does not carry). Mutating the cell to the
+// aihub#433 falsehood left K12 green with candidates unchanged while K9 alone
+// went red.
+//
+// So a quoted-promise row is a candidate BY FORM, with no effect-verb or tense
+// condition: the quote is the claim, whatever grammar it uses — the whole point
+// of the measured miss is that a published promise can be a noun phrase. A row
+// documenting WITHDRAWN text this way (K9's `<!-- historical -->` shape) stays
+// a candidate too and classifies through its own prose-only `because=history`
+// marker, so the population cannot shrink by rewording a quote into the past.
+func IsQuotedPromiseRow(s string) bool {
+	return len(LeadingQuotes(s)) > 0
+}
+
 // AttributedToPrevious is condition 1's form (c): no backticks in this sentence,
 // a published token named in the one before it, and a refusal-or-response verb
 // here. One hop only, and the hop is not transitive — the previous sentence must
@@ -637,6 +690,12 @@ func IsHistorical(s string) bool {
 // read immediately before this one — "" at the start of a card — and is consulted
 // only by condition 1's form (c).
 func IsCandidateInContext(s, prev string) (bool, string) {
+	// Form (d) first, and it short-circuits conditions 2 and 3 deliberately: a
+	// claimed-verbatim quote is a recorded promise whatever its grammar, and the
+	// measured miss (aihub#604) was precisely a promise written as a noun phrase.
+	if IsQuotedPromiseRow(s) {
+		return true, ""
+	}
 	if !NamesPublishedToken(s) && !NamesOnlyExcludedRefs(s) && !AttributedToPrevious(s, prev) {
 		return false, "names no published token in backticks, no wi/section anchor, " +
 			"and no refusal-or-response verb attributed from the sentence before it"
@@ -912,7 +971,7 @@ type CardRead struct {
 // wrong claim.
 func ReadCard(card, prose string) CardRead {
 	joined, markers, out := joinProse(prose)
-	spans := splitSentences(joined, out.cuts)
+	spans := splitSentences(joined, out.cuts, out.rows)
 
 	// Placement runs over EVERY unit, including the sub-floor fragments, so a
 	// marker's host is the unit it really follows rather than the nearest survivor.
@@ -968,6 +1027,12 @@ type walkOut struct {
 	orphans      []Marker
 	unrecognised []string
 	cuts         []int
+	// rows are the joined-text spans occupied by table rows. splitSentences
+	// suppresses punctuation cuts strictly inside them (aihub#611): a row is a
+	// cell list, not running prose, so sentence-final punctuation inside a cell
+	// is cell CONTENT — cutting there is what split pf_remember's `base_strength`
+	// promise quote into two halves the recogniser could not see (aihub#604).
+	rows []span
 }
 
 // joinProse drops what the walk does not read and extracts every marker as it
@@ -990,6 +1055,14 @@ type walkOut struct {
 // is a cell list, not a clause of whatever prose surrounds it. Only the
 // |---|---| SEPARATOR rows stay outside: they are table syntax, not prose, the
 // way a fence line is.
+//
+// 🔴 And hard-bounded means ONE unit since aihub#611: the punctuation splitter
+// used to cut INSIDE a row too, so a cell holding two sentences became two
+// half-row fragments — measured on pf_remember's `base_strength` promise row,
+// whose K9-checked quote split at its internal period into a noun-phrase half
+// with no effect verb and an anchorless refusal half, both invisible to the
+// recogniser (aihub#604). The row spans recorded here are how splitSentences
+// knows where not to cut.
 func joinProse(prose string) (string, []Marker, walkOut) {
 	var sb strings.Builder
 	var markers []Marker
@@ -1034,6 +1107,9 @@ func joinProse(prose string) (string, []Marker, walkOut) {
 		sb.WriteString(clean)
 		if cutNext || isRow || bulletPrefix(clean) {
 			out.cuts = append(out.cuts, base)
+		}
+		if isRow {
+			out.rows = append(out.rows, span{base, base + len(clean)})
 		}
 		cutNext = isRow
 		for i := range found {
@@ -1261,8 +1337,11 @@ func parseMarker(raw, form, body string) Marker {
 }
 
 // splitSentences cuts on sentence-final punctuation followed by whitespace and a
-// sentence-start rune, and at every offset in forced (the list-item boundaries).
-// Hand-rolled because Go's regexp has no lookaround.
+// sentence-start rune, and at every offset in forced (the list-item boundaries) —
+// except strictly inside a protected span, which is how a table row stays ONE
+// unit whatever punctuation its cells hold (aihub#611; the forced cuts that
+// bound a row sit at span edges, never strictly inside, so only the punctuation
+// path needs the check). Hand-rolled because Go's regexp has no lookaround.
 //
 // 🔴 Closing formatting runes may sit between the punctuation and the whitespace
 // — `.**`, `.)`, `."` — and the cut happens anyway (aihub#591). Without this, a
@@ -1275,7 +1354,15 @@ func parseMarker(raw, form, body string) Marker {
 // fixed for bullets.
 var sentenceClosers = "*_\"')]`"
 
-func splitSentences(s string, forced []int) []span {
+func splitSentences(s string, forced []int, protected []span) []span {
+	inProtected := func(o int) bool {
+		for _, r := range protected {
+			if r.start < o && o < r.end {
+				return true
+			}
+		}
+		return false
+	}
 	rs := []rune(s)
 	offs := make([]int, len(rs)+1)
 	b := 0
@@ -1308,6 +1395,9 @@ func splitSentences(s string, forced []int) []span {
 		}
 		n := rs[j]
 		if !unicode.IsUpper(n) && !unicode.IsDigit(n) && !strings.ContainsRune(sentenceStarts, n) {
+			continue
+		}
+		if inProtected(offs[j]) {
 			continue
 		}
 		starts[offs[j]] = true
@@ -1365,6 +1455,25 @@ const (
 	NotCandidate Class = iota
 	// Cited is assertable and probed: it names its arm in its own prose.
 	Cited
+	// QuotePinned is a quoted-promise row (form d) whose every leading quote the
+	// tool's LIVE published prose contains verbatim — the custody chain K9 checks,
+	// applied as a classification (aihub#611).
+	//
+	// 🔴 It is neither Cited nor debt, and the distinction is the class's whole
+	// content. The pin holds that the card's copy EQUALS the publication; whether
+	// the publication itself is true is execution-side probe territory (aihub#604:
+	// TestPublishedBaseStrengthRangeIsTheEnforcedOne holds the base_strength row's
+	// truth, not any card sentence). Calling a pinned row Cited would oversell —
+	// no arm is named — and calling it debt would file 20+ permanent rows for
+	// claims whose card copy cannot silently drift, which buries live debt under
+	// bookkeeping. The drain path is unchanged: citing an execution arm in the
+	// row's trailing gloss moves it to Cited in a signed diff.
+	//
+	// A quoted row whose pin FAILS — the quote is not in the live publication and
+	// no marker or citation covers it — is Unclassified, i.e. DEBT_GROWTH. That is
+	// the mutation aihub#604 measured walking through this arm green: falsifying
+	// the quoted cell now moves a census column instead of only reddening K9.
+	QuotePinned
 	// Waived is assertable and unprobed, with a named marker. This is debt.
 	Waived
 	// ProseOnly is not assertable, with a `because` from the closed vocabulary.
@@ -1380,6 +1489,8 @@ func (c Class) String() string {
 		return "not-candidate"
 	case Cited:
 		return "cited"
+	case QuotePinned:
+		return "quote-pinned"
 	case Waived:
 		return "waived"
 	case ProseOnly:
@@ -1393,7 +1504,14 @@ func (c Class) String() string {
 // Classify decides one sentence and reports everything wrong with the markers on
 // it. The problems are about placement and consistency; Marker.Problems covers the
 // marker's own fields, and Classify calls it so one walk reports both.
-func Classify(s Sentence, idx ArmIndex) (Class, []string) {
+//
+// published is the tool's live published prose — description plus every string
+// value in the serialised InputSchema, the same haystack K9 checks quotes
+// against — and it is consulted ONLY to decide QuotePinned. "" means the
+// publication is unknown, in which direction the answer is deliberately the
+// strict one: nothing pins, and an unmarked quoted row is Unclassified rather
+// than silently held by a haystack nobody built.
+func Classify(s Sentence, idx ArmIndex, published string) (Class, []string) {
 	var problems []string
 	var waivers, proseOnly []Marker
 	for _, m := range s.Markers {
@@ -1451,6 +1569,28 @@ func Classify(s Sentence, idx ArmIndex) (Class, []string) {
 				"the entry. Drop the marker.", s.Card, truncate(s.Text)))
 	}
 
+	// Every leading quote in the unit must be live for the pin to hold — a row
+	// carrying one live and one stale quote is a row whose card copy has drifted,
+	// and half a custody chain is not one. Gated on IsQuotedPromiseRow, the same
+	// predicate that made the unit a candidate, so the class's candidacy and its
+	// classification cannot drift apart (measured under mutation: with the
+	// predicate cut and a bare LeadingQuotes here, verb-carrying quoted rows
+	// stayed pinned while the noun-phrase ones silently left the population).
+	quotePinned := false
+	if published != "" && IsQuotedPromiseRow(s.Text) {
+		quotePinned = true
+		for _, q := range LeadingQuotes(s.Text) {
+			if !strings.Contains(published, q) {
+				quotePinned = false
+				break
+			}
+		}
+	}
+
+	// The order is the classes' precedence: a marker is a signed statement and
+	// wins; a citation names the arm that holds the claim's TRUTH and outranks a
+	// pin that holds only its custody; the pin outranks nothing but the debt
+	// default.
 	switch {
 	case len(waivers) > 0:
 		return Waived, problems
@@ -1458,6 +1598,8 @@ func Classify(s Sentence, idx ArmIndex) (Class, []string) {
 		return ProseOnly, problems
 	case cited:
 		return Cited, problems
+	case quotePinned:
+		return QuotePinned, problems
 	default:
 		return Unclassified, problems
 	}
@@ -1505,6 +1647,14 @@ type Census struct {
 	Candidates int
 	// Cited is how many of those name their own arm in prose. Not debt.
 	Cited int
+	// QuotePinned is how many are quoted-promise rows whose every leading quote
+	// the live publication contains verbatim (aihub#611). Not debt — the pin
+	// holds the card copy's custody, and hop-1 truth belongs to the
+	// execution-side probes — but counted with its own column so a pin that
+	// BREAKS moves a number: the broken row falls to Unclassified, which is
+	// DEBT_GROWTH, where before aihub#611 it moved nothing (aihub#604's measured
+	// blind spot).
+	QuotePinned int
 	// Unclassified is assertable, unprobed and unmarked: the grandfathering
 	// escape. It must reach 0 to close a phase.
 	Unclassified int
@@ -1526,11 +1676,11 @@ type Census struct {
 // Same shape dbtestcov uses when it prints the manifest line it wants.
 func (d Census) Line(card string) string {
 	return fmt.Sprintf(
-		"\t%q: {Candidates: %d, Cited: %d, Unclassified: %d, PendingImplementation: %d, "+
-			"KnownDefect: %d, StructurallyUnreachable: %d, AcceptedUnprobed: %d, "+
-			"ProseOnly: %d},",
-		card, d.Candidates, d.Cited, d.Unclassified, d.PendingImplementation, d.KnownDefect,
-		d.StructurallyUnreachable, d.AcceptedUnprobed, d.ProseOnly)
+		"\t%q: {Candidates: %d, Cited: %d, QuotePinned: %d, Unclassified: %d, "+
+			"PendingImplementation: %d, KnownDefect: %d, StructurallyUnreachable: %d, "+
+			"AcceptedUnprobed: %d, ProseOnly: %d},",
+		card, d.Candidates, d.Cited, d.QuotePinned, d.Unclassified, d.PendingImplementation,
+		d.KnownDefect, d.StructurallyUnreachable, d.AcceptedUnprobed, d.ProseOnly)
 }
 
 // Balanced reports whether the classes account for the whole population. They are
@@ -1538,7 +1688,7 @@ func (d Census) Line(card string) string {
 // candidate and then classified into nothing — which today can happen only when a
 // waiver names a kind outside the closed set, or a kind kindCell does not map.
 func (d Census) Balanced() bool {
-	classified := d.Cited + d.Unclassified + d.ProseOnly
+	classified := d.Cited + d.QuotePinned + d.Unclassified + d.ProseOnly
 	for _, k := range WaiverKinds {
 		if cell := d.kindCell(k); cell != nil {
 			classified += *cell
@@ -1577,8 +1727,10 @@ type CardTally struct {
 	Problems  []string
 }
 
-// Tally reads one card and classifies every sentence in it.
-func Tally(card, prose string, idx ArmIndex) CardTally {
+// Tally reads one card and classifies every sentence in it. published is the
+// card's tool's live published prose, consulted only for the QuotePinned class
+// — see Classify.
+func Tally(card, prose string, idx ArmIndex, published string) CardTally {
 	read := ReadCard(card, prose)
 	t := CardTally{Sentences: len(read.Sentences)}
 
@@ -1612,7 +1764,7 @@ func Tally(card, prose string, idx ArmIndex) CardTally {
 	}
 
 	for _, s := range read.Sentences {
-		class, problems := Classify(s, idx)
+		class, problems := Classify(s, idx, published)
 		t.Problems = append(t.Problems, problems...)
 		if class != NotCandidate {
 			t.Census.Candidates++
@@ -1620,6 +1772,8 @@ func Tally(card, prose string, idx ArmIndex) CardTally {
 		switch class {
 		case Cited:
 			t.Census.Cited++
+		case QuotePinned:
+			t.Census.QuotePinned++
 		case Unclassified:
 			t.Census.Unclassified++
 		case ProseOnly:
@@ -1715,6 +1869,10 @@ func LedgerProblems(tallies map[string]CardTally, ledger map[string]Census, card
 // sentence now asserts something with neither a cited arm nor a named marker",
 // which is false in both halves. Only a rise in UNCLASSIFIED is new unheld debt.
 func classifyDrift(measured, recorded Census) (finding, explain string) {
+	// ⚠️ QuotePinned is deliberately NOT in this vector, for Cited's reason: both
+	// are held states, so their movement alone is the population/held split
+	// moving (POPULATION_MOVED, the default), while a pin that BREAKS puts its
+	// row into Unclassified and is reported as the growth it is.
 	classified := func(c Census) []int {
 		cells := make([]int, 0, len(WaiverKinds)+1)
 		for _, k := range WaiverKinds {
@@ -1765,10 +1923,10 @@ func classifyDrift(measured, recorded Census) (finding, explain string) {
 
 func describeCensus(d Census) string {
 	return fmt.Sprintf(
-		"candidates=%d cited=%d unclassified=%d pending-implementation=%d known-defect=%d "+
-			"structurally-unreachable=%d accepted-unprobed=%d prose-only=%d",
-		d.Candidates, d.Cited, d.Unclassified, d.PendingImplementation, d.KnownDefect,
-		d.StructurallyUnreachable, d.AcceptedUnprobed, d.ProseOnly)
+		"candidates=%d cited=%d quote-pinned=%d unclassified=%d pending-implementation=%d "+
+			"known-defect=%d structurally-unreachable=%d accepted-unprobed=%d prose-only=%d",
+		d.Candidates, d.Cited, d.QuotePinned, d.Unclassified, d.PendingImplementation,
+		d.KnownDefect, d.StructurallyUnreachable, d.AcceptedUnprobed, d.ProseOnly)
 }
 
 func sortedTallyKeys(m map[string]CardTally) []string {

@@ -247,7 +247,7 @@ func TestMarkerOnALineTheWalkDoesNotReadIsAnOrphan(t *testing.T) {
 			t.Errorf("orphans = %d, want 1 for:\n%s", len(read.Orphans), prose)
 		}
 	}
-	tally := Tally("fixture.md", "## hop 0-1 <!-- prose-only: because=history -->\n\nx\n", testIndex)
+	tally := Tally("fixture.md", "## hop 0-1 <!-- prose-only: because=history -->\n\nx\n", testIndex, "")
 	if !hasFinding(tally.Problems, "K12 MARKER_ORPHAN") {
 		t.Errorf("Tally did not report MARKER_ORPHAN: %v", tally.Problems)
 	}
@@ -351,7 +351,7 @@ func TestEveryMarkerFieldFindingFires(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prose := "A `path` entry derives a `file_scope` lock. " + tc.marker + "\n"
-			tally := Tally("fixture.md", prose, testIndex)
+			tally := Tally("fixture.md", prose, testIndex, "")
 			if !hasFinding(tally.Problems, tc.want) {
 				t.Errorf("no %s. A finding that cannot be triggered from a fixture is a "+
 					"finding nobody knows is broken until they rely on it.\ngot: %v",
@@ -372,7 +372,7 @@ func TestKindsThatNameNobodyAreAcceptedWithoutAWorkItem(t *testing.T) {
 			"citation=internal/server/queryparam.go, the /ui exemption note | " +
 			"reason=asserting this needs a second machine, which the harness cannot " +
 			"create from a unit test. -->\n"
-		tally := Tally("fixture.md", prose, testIndex)
+		tally := Tally("fixture.md", prose, testIndex, "")
 		if hasFinding(tally.Problems, "K12 WAIVER_NO_WORK_ITEM") {
 			t.Errorf("kind %s was required to name a work item: %v", kind, tally.Problems)
 		}
@@ -422,7 +422,7 @@ func TestClassificationConflictsFire(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tally := Tally("fixture.md", tc.prose, testIndex)
+			tally := Tally("fixture.md", tc.prose, testIndex, "")
 			if !hasFinding(tally.Problems, tc.want) {
 				t.Errorf("no %s\ngot: %v", tc.want, tally.Problems)
 			}
@@ -642,7 +642,7 @@ func TestTallyCountsEachKindIntoItsOwnColumn(t *testing.T) {
 		marker("structurally-unreachable", "a harness this repo cannot create") +
 		marker("accepted-unprobed", "the owner ruling of 2026-09-10")
 
-	tally := Tally("fixture.md", prose, testIndex)
+	tally := Tally("fixture.md", prose, testIndex, "")
 	if len(tally.Problems) != 0 {
 		t.Fatalf("well-formed markers produced findings, so the census below measures the "+
 			"wrong thing: %v", tally.Problems)
@@ -778,7 +778,7 @@ func TestAMarkerOnAShortFragmentIsReportedNotReassigned(t *testing.T) {
 			t.Errorf("the marker was reassigned to %q instead of being reported", s.Text)
 		}
 	}
-	if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_TARGET_DROPPED") {
+	if !hasFinding(Tally("fixture.md", prose, testIndex, "").Problems, "K12 MARKER_TARGET_DROPPED") {
 		t.Errorf("Tally did not report MARKER_TARGET_DROPPED")
 	}
 }
@@ -869,7 +869,7 @@ func TestARepeatedFieldIsReportedNotResolvedLastWins(t *testing.T) {
 		"<!-- probe-waiver: kind=known-defect | decided=2026-09-10 | citation=aihub#543 | " +
 		"kind=accepted-unprobed | reason=measured behaviour the repo does not want " +
 		"pinned right now. -->\n"
-	problems := Tally("fixture.md", prose, testIndex).Problems
+	problems := Tally("fixture.md", prose, testIndex, "").Problems
 	if !hasFinding(problems, "K12 DUPLICATE_FIELD") {
 		t.Errorf("no DUPLICATE_FIELD: %v", problems)
 	}
@@ -888,7 +888,7 @@ func TestAMisspelledMarkerIsReportedRatherThanInert(t *testing.T) {
 		"<!-- probewaiver: kind=known-defect -->",
 	} {
 		prose := "A `path` entry derives a `file_scope` lock. " + raw + "\n"
-		if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_NAME_UNRECOGNISED") {
+		if !hasFinding(Tally("fixture.md", prose, testIndex, "").Problems, "K12 MARKER_NAME_UNRECOGNISED") {
 			t.Errorf("%s went unreported", raw)
 		}
 	}
@@ -896,7 +896,7 @@ func TestAMisspelledMarkerIsReportedRatherThanInert(t *testing.T) {
 	// correctly-spelled one.
 	for _, raw := range []string{"<!-- historical -->", "<!-- prose-only: because=history -->"} {
 		prose := "Rule 2 used to return a `git_branch` lock. " + raw + "\n"
-		if hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 MARKER_NAME_UNRECOGNISED") {
+		if hasFinding(Tally("fixture.md", prose, testIndex, "").Problems, "K12 MARKER_NAME_UNRECOGNISED") {
 			t.Errorf("%s was reported as a misspelling", raw)
 		}
 	}
@@ -906,7 +906,7 @@ func TestAnUnknownFieldIsReported(t *testing.T) {
 	prose := "A `path` entry derives a `file_scope` lock. " +
 		"<!-- probe-waiver: kinds=known-defect | decided=2026-09-10 | citation=aihub#543 | " +
 		"reason=measured behaviour the repo does not want pinned right now. -->\n"
-	if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 UNKNOWN_FIELD") {
+	if !hasFinding(Tally("fixture.md", prose, testIndex, "").Problems, "K12 UNKNOWN_FIELD") {
 		t.Errorf("a misspelled key was dropped instead of reported")
 	}
 }
@@ -917,7 +917,7 @@ func TestADateShapedStringThatIsNotADateIsRefused(t *testing.T) {
 			"<!-- probe-waiver: kind=pending-implementation | decided=" + d + " | " +
 			"citation=aihub#543 | reason=the DB fixture for this derivation is not written " +
 			"yet, and this is the claim it will hold first. -->\n"
-		if !hasFinding(Tally("fixture.md", prose, testIndex).Problems, "K12 WAIVER_NO_DATE") {
+		if !hasFinding(Tally("fixture.md", prose, testIndex, "").Problems, "K12 WAIVER_NO_DATE") {
 			t.Errorf("decided=%s was accepted as a calendar date", d)
 		}
 	}
@@ -1048,7 +1048,7 @@ func TestTableRowsAreCountableAndWaivable(t *testing.T) {
 	if len(row.Markers) != 1 || row.Markers[0].Because != BecauseJudgement {
 		t.Fatalf("the in-cell marker did not attach to the row: %+v", row.Markers)
 	}
-	class, _ := Classify(row, testIndex)
+	class, _ := Classify(row, testIndex, "")
 	if class != ProseOnly {
 		t.Errorf("the marked row classified as %s, want prose-only — waivable means the "+
 			"classification machinery works on a row exactly as on a sentence", class)
@@ -1080,5 +1080,162 @@ func TestClosersEndSentencesAndScopeTheHistoryEjection(t *testing.T) {
 	if ok, why := IsCandidate(sentences[1].Text); !ok {
 		t.Errorf("the live half was ejected with the history (%s): %q — that is exactly the "+
 			"merged-bullet ejection this splitter change exists to end", why, sentences[1].Text)
+	}
+}
+
+// ───────────────────────── the aihub#611 widening ─────────────────────────────
+//
+// aihub#604 measured the gap these fixtures pin: pf_remember's `base_strength`
+// promise row — a K9-checked claimed-verbatim quote — split at the period inside
+// the quote, both halves failed the recogniser, and falsifying the cell left K12
+// green with candidates unchanged while K9 alone went red. Form (d) plus the
+// QuotePinned class close it; each fixture below is one leg of that closure.
+
+// baseStrengthRow is the measured miss itself, verbatim from the live card.
+const baseStrengthRow = "| `base_strength` | number | no | \"Initial strength, " +
+	"integer 1-5 (default 3). A fractional value is refused\" |"
+
+// baseStrengthLive is a haystack shaped the way liveSchemaProse builds one: the
+// published description among the tool's other published strings.
+const baseStrengthLive = "Associated work item\n" +
+	"Initial strength, integer 1-5 (default 3). A fractional value is refused\n" +
+	"Deduplication mode"
+
+func TestAQuotedPromiseRowIsOneUnitDespiteThePeriodInsideTheQuote(t *testing.T) {
+	// 🔴 The split is what made the promise invisible: cut at the quote's internal
+	// period, the range half is a quoted noun phrase with no effect verb and the
+	// refusal half has no anchor ("refused" is a participle attributionVerbs does
+	// not carry). A row is a cell list, so punctuation inside a cell is content,
+	// not a boundary.
+	prose := "## hop 0-1\n\n" +
+		"| param | type | required | hop 1 promise |\n" +
+		"|---|---|---|---|\n" +
+		baseStrengthRow + "\n\n" +
+		"A `path` entry derives a `file_scope` lock. `repo` entries derive none.\n"
+	sentences := ReadCard("fixture.md", prose).Sentences
+	if len(sentences) != 4 {
+		t.Fatalf("split %d unit(s), want 4 — header row, the promise row as ONE unit, and "+
+			"the two prose sentences:\n%+v", len(sentences), sentences)
+	}
+	row := sentences[1].Text
+	if !strings.Contains(row, "(default 3).") || !strings.Contains(row, "is refused") {
+		t.Fatalf("the promise row did not come through whole: %q", row)
+	}
+	if ok, why := IsCandidate(row); !ok {
+		t.Errorf("the whole promise row was not a candidate (%s): %q — form (d) exists "+
+			"because neither half of this row passes conditions 1-3, and a promise a caller "+
+			"reads first must be in the population", why, row)
+	}
+	if got := LeadingQuotes(row); len(got) != 1 ||
+		got[0] != "Initial strength, integer 1-5 (default 3). A fractional value is refused" {
+		t.Errorf("LeadingQuotes read %v — the quote is what the pin checks, so extracting "+
+			"anything else pins the wrong text", got)
+	}
+}
+
+func TestANounPhraseQuotedRowIsACandidateByFormAlone(t *testing.T) {
+	// 🔴 The fixture whose candidacy DEPENDS on form (d), kept separate from the
+	// base_strength row deliberately: that row also passes conditions 1-3 (anchor
+	// plus "is"), so deleting form (d) leaves every fixture built on it green.
+	// This is the pf_reinforce_memory shape — a quoted promise that is a pure
+	// noun phrase — and it is the population that vanished when form (d) was cut
+	// under mutation (14 cards' rows left the census as POPULATION_MOVED).
+	const row = `| ` + "`memory_id`" + ` | string | yes | "Memory ID" |`
+	if ok, why := IsCandidate(row); !ok {
+		t.Fatalf("a noun-phrase quoted row was not a candidate (%s): %q — no effect verb "+
+			"exists here to rescue it, so only form (d) can count it", why, row)
+	}
+	tally := Tally("fixture.md", "## hop 0-1\n\n"+row+"\n", testIndex, "Memory ID\nother strings")
+	want := Census{Candidates: 1, QuotePinned: 1}
+	if tally.Census != want {
+		t.Errorf("census = %+v, want %+v", tally.Census, want)
+	}
+}
+
+func TestQuotedPromiseRowsClassifyByTheLivePublication(t *testing.T) {
+	prose := "## hop 0-1\n\n" + baseStrengthRow + "\n"
+	cases := []struct {
+		name      string
+		published string
+		want      Census
+	}{
+		{
+			// The custody chain intact: card copy = live publication.
+			name:      "a live quote is counted and pinned",
+			published: baseStrengthLive,
+			want:      Census{Candidates: 1, QuotePinned: 1},
+		},
+		{
+			// 🔴 The aihub#604 mutation, at fixture scale: the publication no longer
+			// contains the quote, so the pin breaks and the row is DEBT — where before
+			// aihub#611 it was invisible and only K9 noticed.
+			name:      "a stale quote is counted as unclassified debt",
+			published: "Initial strength, (0-1). A fractional value is refused",
+			want:      Census{Candidates: 1, Unclassified: 1},
+		},
+		{
+			// "" means the publication is unknown, and unknown must not pin: answering
+			// quote-pinned with nothing checked would be a held state nobody verified.
+			name:      "an unknown publication pins nothing",
+			published: "",
+			want:      Census{Candidates: 1, Unclassified: 1},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tally := Tally("fixture.md", prose, testIndex, tc.published)
+			if tally.Census != tc.want {
+				t.Errorf("census = %+v, want %+v", tally.Census, tc.want)
+			}
+			if !tally.Census.Balanced() {
+				t.Errorf("census unbalanced: %+v", tally.Census)
+			}
+		})
+	}
+}
+
+func TestACitationOnAQuotedRowOutranksThePin(t *testing.T) {
+	// A citation names the arm that holds the claim's TRUTH; the pin holds only
+	// its custody. A row carrying both counts as Cited, so the drain path for
+	// quote-pinned rows — cite the execution-side probe in the trailing gloss —
+	// moves the number between columns in a signed diff.
+	prose := "## hop 0-1\n\n" +
+		"| `base_strength` | number | no | \"Initial strength, integer 1-5 (default 3). " +
+		"A fractional value is refused\" — held by `TestClaimRecordsRepoPins` |\n"
+	tally := Tally("fixture.md", prose, testIndex, baseStrengthLive)
+	want := Census{Candidates: 1, Cited: 1}
+	if tally.Census != want {
+		t.Errorf("census = %+v, want %+v", tally.Census, want)
+	}
+}
+
+func TestARowWithOneStaleQuoteAmongLiveOnesIsNotPinned(t *testing.T) {
+	// Half a custody chain is not one: every leading-quote CELL in the row must
+	// be live, or a drifted cell rides its neighbour's pin. (A quote in the
+	// middle of a cell is the author's own words — K9's distinction — and is not
+	// part of the pin: the first fixture written here put the stale quote
+	// mid-cell and measured the row still pinned, which is correct.)
+	prose := "## hop 0-1\n\n" +
+		"| `mode` | \"Deduplication mode\" | \"a promise nobody publishes\" |\n"
+	tally := Tally("fixture.md", prose, testIndex, baseStrengthLive)
+	want := Census{Candidates: 1, Unclassified: 1}
+	if tally.Census != want {
+		t.Errorf("census = %+v, want %+v — one live quote must not carry a stale one",
+			tally.Census, want)
+	}
+}
+
+func TestProseAboutQuotedCellsIsNotSweptIntoThePromiseClass(t *testing.T) {
+	// The control: LeadingQuotes is gated on the unit being a WHOLE row, so a
+	// prose sentence QUOTING the table syntax is not form (d) — and this one is
+	// no candidate at all, which is what keeps the class K9-shaped.
+	const s = `The syntax writes | "quoted" | cells into a table.`
+	if got := LeadingQuotes(s); got != nil {
+		t.Fatalf("LeadingQuotes(%q) = %v — a mid-prose quote is the author's own words, "+
+			"not a claimed-verbatim cell", s, got)
+	}
+	if ok, _ := IsCandidate(s); ok {
+		t.Errorf("IsCandidate(%q) = true — sweeping narration about tables into the "+
+			"population is the overreach form (d)'s row gate exists to refuse", s)
 	}
 }

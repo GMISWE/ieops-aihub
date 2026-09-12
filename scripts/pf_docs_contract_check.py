@@ -862,10 +862,13 @@ def check_c5_lock_cause_union(design_text: str, go_text: str) -> list[str]:
 #
 # Two deliberate DIVERGENCES from K6, both stated because silent divergence is
 # how the two gates would rot apart:
-#   - K6 leaves the paren-list form unresolved because card lists can name
-#     t.Run subtest names its resolver cannot see. The measured docs population
-#     has none, and all 3 live paren-lists resolve, so C6 gates the form. If a
-#     doc ever cites a subtest name, cite the test function instead.
+#   - K6 resolves t.Run subtest names; C6 does not. Card paren-lists cite
+#     subtest names, so K6's declaredNames became subtest-aware when it took
+#     the form on (aihub#622 — until then the whole paren-list form was
+#     unresolved on K6's side, and this bullet recorded that instead). The
+#     measured docs population has none, and go_declared_names scans
+#     declarations only: if a doc ever cites a subtest name, cite the test
+#     function instead.
 #   - K6 has no reverse form. The docs population is dominated by it in
 #     docs/audits/ (aihub#404 wrote most of its ~200 anchors symbol-first), so
 #     leaving it out would exempt precisely the population aihub#406 exists to

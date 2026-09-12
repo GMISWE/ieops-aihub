@@ -1092,10 +1092,11 @@ func TestPendingEscapeHatchIsWiredIntoTheArm(t *testing.T) {
 // ────────────────────────────────── K6 ───────────────────────────────────────
 
 // cardGoPathRef matches a backticked, path-qualified Go file, optionally followed
-// by a parenthesised backticked symbol:
+// by one or more parenthesised backticked symbols:
 //
 //	`internal/server/routes_step.go`
 //	`internal/server/routes_step.go` (`handleGetStep`)
+//	`internal/domain/lexical_test.go` (`TestLexicalTokens`, `TestLexicalPattern`)
 //
 // The same anchor form scripts/pf_docs_contract_check.py's C1 error message tells
 // authors to use. The path half is what C2 would check if it globbed this
@@ -1120,18 +1121,25 @@ func TestPendingEscapeHatchIsWiredIntoTheArm(t *testing.T) {
 // cardCommaSymItem. Each list item allows the same one-space-or-one-wrap
 // separator after its comma.
 //
-// ⚠️ Still invisible, deliberately left so (found while fixing the comma form,
-// aihub#612): the PAREN-LIST form `path` (`Sym1`, `Sym2`) — a comma-separated
-// list INSIDE the parens. The paren alternative below requires exactly one
-// symbol, so the whole list degrades to path-only. Distinct shape, and some of
-// its list items are t.Run subtest names (underscored), which declaredNames
-// cannot see — recognizing it without a subtest-aware resolver would turn real
-// citations red. Follow-up, not this regex.
-var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?:(?: |[ \\t]*\\n[ \\t]*)\\(`([\\w.]+)`\\)|((?:,(?: |[ \\t]*\\n[ \\t]*)`[\\w.]+`)+))?")
+// The paren alternative admits a LIST: `path` (`Sym1`, `Sym2`) — a
+// comma-separated list INSIDE the parens, each comma allowing the same
+// one-space-or-one-wrap separator. 🔴 Until aihub#622 the alternative required
+// exactly one symbol, so the whole list degraded to path-only: measured
+// 2026-09-12 on this tree, 20 citations carrying 45 symbols, all invisible
+// (aihub#612's PR measured 19 sites earlier the same day — it grows). The
+// deliberate blocker was that some list items are t.Run subtest names, which
+// a declarations-only resolver reads as missing — so declaredNames below is
+// now subtest-aware rather than the list staying unparsed. The inside of the
+// parens is captured whole (group 2), same RE2 reason as the comma tail, and
+// split with cardCommaSymItem. The grammar now matches C6_FORWARD in
+// scripts/pf_docs_contract_check.py, which gated this shape first (aihub#406)
+// — two gates recognising different anchor grammars over the same shape is
+// exactly the drift that file's C6 header warns about.
+var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?:(?: |[ \\t]*\\n[ \\t]*)\\((`[\\w.]+`(?:,(?: |[ \\t]*\\n[ \\t]*)`[\\w.]+`)*)\\)|((?:,(?: |[ \\t]*\\n[ \\t]*)`[\\w.]+`)+))?")
 
-// cardCommaSymItem extracts the backticked symbols from cardGoPathRef's comma
-// tail (group 3). Only ever applied to that tail — as a standalone pattern it
-// would match any backticked word.
+// cardCommaSymItem extracts the backticked symbols from cardGoPathRef's paren
+// list (group 2) and comma tail (group 3). Only ever applied to those — as a
+// standalone pattern it would match any backticked word.
 var cardCommaSymItem = regexp.MustCompile("`([\\w.]+)`")
 
 // cardBareGoFileRef matches a backticked Go filename with NO directory component,
@@ -1203,12 +1211,13 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 				continue
 			}
 			resolved++
-			// m[2] is the paren form's single symbol; m[3] is the comma form's
-			// whole tail, split here because RE2 keeps only the last iteration
-			// of a repeated capture group. The two alternatives are exclusive.
+			// m[2] is the paren form's symbol list; m[3] is the comma form's
+			// whole tail. Both are captured whole because RE2 keeps only the
+			// last iteration of a repeated capture group, and split here. The
+			// two alternatives are exclusive, so one loop is always a no-op.
 			var syms []string
-			if m[2] != "" {
-				syms = append(syms, m[2])
+			for _, sm := range cardCommaSymItem.FindAllStringSubmatch(m[2], -1) {
+				syms = append(syms, sm[1])
 			}
 			for _, sm := range cardCommaSymItem.FindAllStringSubmatch(m[3], -1) {
 				syms = append(syms, sm[1])
@@ -1224,12 +1233,14 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 			for _, sym := range syms {
 				symChecked++
 				// A dotted anchor (`Type.Method`) is resolved on its last segment,
-				// which is the method or field name the file declares.
+				// which is the method or field name the file declares. The whole
+				// anchor is tried first: a t.Run name may itself contain a dot,
+				// and splitting it would grade a real citation on a fragment.
 				leaf := sym
 				if i := strings.LastIndex(leaf, "."); i >= 0 {
 					leaf = leaf[i+1:]
 				}
-				if !names[leaf] {
+				if !names[sym] && !names[leaf] {
 					t.Errorf("K6 ANCHOR_SYMBOL_MISSING: %s/%s cites `%s` (`%s`), and that file "+
 						"declares no such symbol. A semantic anchor that resolves to nothing "+
 						"rots exactly as quietly as the line number it replaced — which is the "+
@@ -1249,7 +1260,12 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 }
 
 // declaredNames returns every top-level name a Go file declares: funcs and
-// methods, types, consts, vars, and struct field names.
+// methods, types, consts, vars, and struct field names. For a _test.go file it
+// also carries the file's t.Run subtest names (aihub#622): cards cite those as
+// anchors — measured 2026-09-12, four of the paren-list items are subtest
+// names, one of them table-driven — and a subtest renamed away rots a citation
+// exactly as quietly as a moved function. Restricted to _test.go so a
+// non-testing `.Run("…")` call in cited production code cannot mint names.
 func declaredNames(t *testing.T, path string) map[string]bool {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -1283,7 +1299,81 @@ func declaredNames(t *testing.T, path string) map[string]bool {
 			}
 		}
 	}
+	if strings.HasSuffix(path, "_test.go") {
+		subtestNames(f, names)
+	}
 	return names
+}
+
+// subtestNames adds every subtest name the file's Run calls statically carry:
+// a string-literal first argument (t.Run("x", …)), and — for table-driven
+// tests, where the argument is a field selector like tc.name — every string
+// literal assigned to a field of that name in a composite literal. Each name
+// is also added with spaces mapped to underscores, the form `go test` prints
+// and -run matches, so the form an author copies into a card.
+//
+// Anchored on positions, not occurrence: an arbitrary quoted string in the
+// file (an error message, a JSON key) is NOT admitted — the same rule the
+// Python mirror's go_declared_names states for its GO_NOISE stripping
+// (scripts/pf_docs_contract_check.py), because "the name appears somewhere in
+// the file" counts comments and strings as declarations. Blind spot, in the
+// false-RED direction only: a dynamically computed name (fmt.Sprintf, a
+// helper call) is invisible, so citing one goes red at authoring time — cite
+// the enclosing test function instead, the same guidance C6's header gives
+// doc authors.
+func subtestNames(f *ast.File, names map[string]bool) {
+	add := func(lit *ast.BasicLit) {
+		if lit.Kind != token.STRING {
+			return
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return
+		}
+		names[s] = true
+		names[strings.ReplaceAll(s, " ", "_")] = true
+	}
+
+	// First pass: literal Run names, plus the field names table-driven Run
+	// calls read their name from.
+	tableFields := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Run" {
+			return true
+		}
+		switch arg := call.Args[0].(type) {
+		case *ast.BasicLit:
+			add(arg)
+		case *ast.SelectorExpr:
+			tableFields[arg.Sel.Name] = true
+		}
+		return true
+	})
+	if len(tableFields) == 0 {
+		return
+	}
+
+	// Second pass: string literals assigned to one of those fields in a
+	// composite literal — the table rows the first pass's tc.name reads.
+	ast.Inspect(f, func(n ast.Node) bool {
+		kv, ok := n.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || !tableFields[key.Name] {
+			return true
+		}
+		if lit, ok := kv.Value.(*ast.BasicLit); ok {
+			add(lit)
+		}
+		return true
+	})
 }
 
 // ────────────────────────────────── K7 ───────────────────────────────────────

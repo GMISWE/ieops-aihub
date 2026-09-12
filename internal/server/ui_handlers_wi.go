@@ -1543,9 +1543,12 @@ func fetchArtifactLinks(ctx context.Context, pool *pgxpool.Pool, u *UserContext,
 	out := make([]artifactLink, 0, len(resp.Items))
 	seen := make(map[string]bool)
 	for _, m := range resp.Items {
-		// Skip private memories the caller can't read — recall already filters
-		// these out, but defense in depth.
-		if m.Visibility == "private" && m.AuthorUserID != u.UserID && u.Role != "admin" {
+		// Skip memories the caller can't read — recall already filters these
+		// out, but defense in depth. aihub#379: the shared memoryVisibleTo
+		// predicate, not an inline copy — the copy this replaces had already
+		// drifted (it skipped private-not-author rows but not admin-tier ones,
+		// so this second line of defense silently lacked one of the two arms).
+		if !memoryVisibleTo(u, &m.Memory) {
 			continue
 		}
 		link := artifactLink{

@@ -5316,6 +5316,26 @@ jobs:
           ! grep -q -- '--- SKIP' unblock_slug.log \
             || { echo "::error::an aihub#362 unblock slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#379: the per-memory visibility rule now has exactly two
+      # executable forms — memoryVisibleTo (Go) and memoryVisibilityScopeSQL
+      # (SQL, shared by every memory reader). This step is the behavioural
+      # anti-drift half: it seeds one row per visibility tier and requires
+      # Recall's SQL predicate, the Go predicate and handleGetMemory's HTTP
+      # answer to agree per (caller, row) — and every denial to be the shared
+      # 404, since aihub#379 unified visibility denials on existence-hiding.
+      # The structural half (TestMemoryVisibilitySQLPredicateHasOneCopy,
+      # internal/domain) is DB-free and already runs in the "Unit tests" step.
+      - name: aihub#379 memory-visibility parity DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestMemoryVisibilityParity_SQLAgreesWithGoPredicate$' -count=1 -v 2>&1 | tee memory_visibility_parity.log
+          grep -q -- '--- PASS: TestMemoryVisibilityParity_SQLAgreesWithGoPredicate (' memory_visibility_parity.log \
+            || { echo "::error::TestMemoryVisibilityParity_SQLAgreesWithGoPredicate did not run; the aihub#379 SQL/Go visibility parity is not actually verified against a database"; exit 1; }
+          ! grep -q -- '--- SKIP' memory_visibility_parity.log \
+            || { echo "::error::the aihub#379 parity test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

@@ -113,7 +113,12 @@ func TestHandleGetMemory_AuthzDenied_PrivateNotAuthor(t *testing.T) {
 		ProjectRoles: map[string]string{project: "viewer"},
 	}
 	c, rec := newGetMemoryRequest(t, memID, uc)
-	require.NoError(t, handleGetMemory(pool)(c))
+	// aihub#379: the denial now flows through checkMemoryVisibility, which
+	// commits the 404 to c and returns the error (the same convention
+	// handleArtifactHTML and handleUIMemoryDetail follow). The HTTP answer is
+	// unchanged — asserted on rec below — so only this Go-level return
+	// expectation moved, not the contract.
+	require.Error(t, handleGetMemory(pool)(c))
 	require.Equal(t, http.StatusNotFound, rec.Code,
 		"a private memory not authored by the caller must 404, not 403 or 200: %s", rec.Body.String())
 }

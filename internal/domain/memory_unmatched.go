@@ -128,20 +128,20 @@ func UnmatchedTypes(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest)
 	if req.IncludeArchived {
 		statusSet = "'active','archived'"
 	}
-	// Mirrors recallText's visibility predicate exactly — a type whose only rows are
-	// invisible to this caller genuinely has nothing for them, and saying "unmatched"
-	// is the honest answer rather than a leak that such rows exist.
+	// The same memoryVisibilityScopeSQL call recallText makes (aihub#379: one
+	// SQL copy, not a mirror that can drift) — a type whose only rows are
+	// invisible to this caller genuinely has nothing for them, and saying
+	// "unmatched" is the honest answer rather than a leak that such rows exist.
 	buildBase := func(startIdx int) (string, []any, int) {
 		base := fmt.Sprintf(`project = $1
 		AND status IN (%s)
 		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, statusSet)
 		args := []any{req.Project}
 		idx := startIdx
-		if req.CallerRole != "admin" {
-			base += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
-			args = append(args, req.CallerUserID)
-			idx++
-			base += ` AND visibility != 'admin'`
+		if clause, visArgs, nextIdx := memoryVisibilityScopeSQL(req.CallerRole, req.CallerUserID, idx); clause != "" {
+			base += clause
+			args = append(args, visArgs...)
+			idx = nextIdx
 		}
 		return base, args, idx
 	}

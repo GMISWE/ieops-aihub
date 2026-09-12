@@ -2709,11 +2709,12 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 
 	// Visibility: private memories only visible to author (C2 fix: 'personal' → 'private');
 	// admin-tier memories only visible to users with global role='admin'.
-	if req.CallerRole != "admin" {
-		where += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
-		args = append(args, req.CallerUserID)
-		idx++
-		where += ` AND visibility != 'admin'`
+	// aihub#379: rendered by memoryVisibilityScopeSQL — the one SQL copy of the
+	// rule, shared with the vector path — never inlined here again.
+	if clause, visArgs, nextIdx := memoryVisibilityScopeSQL(req.CallerRole, req.CallerUserID, idx); clause != "" {
+		where += clause
+		args = append(args, visArgs...)
+		idx = nextIdx
 	}
 
 	// Type filter with prefix matching. aihub#289 moved the rule into
@@ -2953,13 +2954,17 @@ func loadForwardRelations(ctx context.Context, pool *pgxpool.Pool, ids []string,
 	}
 	// Apply the SAME visibility/project scoping Recall enforces, so a related target
 	// cannot leak a private / admin / cross-project memory's id, type, or content
-	// snippet through the relation graph. Mirrors the predicate at Recall (the
-	// `CallerRole != "admin"` block).
+	// snippet through the relation graph — the same memoryVisibilityScopeSQL call
+	// Recall makes (aihub#379: one SQL copy, not a mirror that can drift). The
+	// clause's column references are unqualified and resolve to the memories
+	// side of this join: memory_relations has no visibility/author_user_id
+	// column, and if it ever grew one Postgres would refuse the query as
+	// ambiguous rather than silently mis-scoping.
 	where := "r.from_mem = ANY($1) AND m.project = $2 AND m.status != 'redacted' AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())"
 	args := []any{ids, project}
-	if callerRole != "admin" {
-		where += " AND (m.visibility != 'private' OR m.author_user_id = $3) AND m.visibility != 'admin'"
-		args = append(args, callerUserID)
+	if clause, visArgs, _ := memoryVisibilityScopeSQL(callerRole, callerUserID, 3); clause != "" {
+		where += clause
+		args = append(args, visArgs...)
 	}
 	rows, err := pool.Query(ctx, `
 		SELECT r.from_mem, r.to_mem, m.type, left(m.content, 120)

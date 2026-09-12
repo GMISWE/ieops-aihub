@@ -3,6 +3,12 @@
 #
 # Usage:  plugins/polyforge/pi/install.sh [<project-dir>]      (default: current directory)
 #
+# Env:    PI_AGENT_DIR               where the user-scope install goes (default ~/.pi/agent)
+#         POLYFORGE_PI_SKILL_SCOPE   both (default) | user. "user" installs only the
+#                                    user-scope skills copy, and retires an existing
+#                                    project-scope one by moving it aside (never deleting
+#                                    it). Any other value is a hard error.
+#
 # WHY A SCRIPT AND NOT "the plugin ships it".
 # pi's package mechanism does not carry agent definitions or extensions into a project.
 # Agents are discovered in exactly two places: ~/.pi/agent/agents/ (always loaded) and
@@ -12,16 +18,21 @@
 # land in the project layer and be ignored. So user-level installation is the only route,
 # and something has to copy the files there.
 #
-# Skills are installed TWICE, on purpose — see the two "skills ->" steps below. The
-# user-scope copy is the one pi actually loads by default; the project copy is kept because
-# it is what starts working the moment a user trusts the project, and because .agents/skills
-# is a cross-tool convention this script is not the only writer of.
+# Skills are installed TWICE by default — see the two "skills ->" steps below. The
+# user-scope copy is the one pi actually loads with no trust required; the project copy is
+# kept because it is what starts working the moment a user trusts the project. This header
+# used to give a second reason — that .agents/skills is a cross-tool convention this script
+# is not the only writer of — and no such second reader was ever found when it was finally
+# looked for. The measurement is at the second step, and it is why
+# POLYFORGE_PI_SKILL_SCOPE=user now exists to turn that copy off.
 #
 # Everything this writes is listed under "what this touches" in the summary at the end.
 # Re-running is safe: nothing is overwritten without a backup alongside it. Three cases are
 # not plain file copies and are handled explicitly —
 #   .mcp.json           is MERGED (other MCP servers in it are preserved), not replaced;
-#   .agents/skills/     is a tree, so the whole directory is backed up before it is refreshed;
+#   .agents/skills/     is a tree, so the whole directory is backed up before it is refreshed
+#                       — and under POLYFORGE_PI_SKILL_SCOPE=user it is MOVED ASIDE to the
+#                       same .bak-<stamp> name rather than refreshed or deleted;
 #   $PI_DIR/skills/     likewise.
 
 set -euo pipefail
@@ -29,6 +40,12 @@ set -euo pipefail
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PI_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 PROJECT_DIR="$(cd "${1:-$PWD}" && pwd)"
+# "both" (default, today's behaviour) writes the skills to user AND project scope; "user"
+# writes only the user-scope copy. Read here beside PI_AGENT_DIR, but VALIDATED below, after
+# die() exists — an unrecognised value must exit with a message naming the variable, not be
+# silently rounded to one of the two. Rounding it would make a typo look like a working
+# opt-out (or a working default), which is the whole failure this knob is supposed to avoid.
+PI_SKILL_SCOPE="${POLYFORGE_PI_SKILL_SCOPE:-both}"
 # $$ as well as the timestamp: date has one-second granularity, and two runs inside the
 # same second would otherwise have the second overwrite the first run's backup.
 STAMP="$(date +%Y%m%d%H%M%S)-$$"
@@ -37,6 +54,12 @@ say()  { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 warn() { printf '  ⚠️  %s\n' "$*" >&2; }
 die()  { printf '  ❌ %s\n' "$*" >&2; exit 1; }
+
+# Validate POLYFORGE_PI_SKILL_SCOPE before anything is written, so a typo costs nothing.
+case "$PI_SKILL_SCOPE" in
+  both|user) ;;
+  *) die "POLYFORGE_PI_SKILL_SCOPE must be \"both\" (default) or \"user\", got: $PI_SKILL_SCOPE" ;;
+esac
 
 # Back up an existing file before replacing it, so a re-run never destroys local edits.
 place() {
@@ -218,12 +241,66 @@ step "skills -> $PI_DIR/skills/  (the copy pi loads by default)"
 # and every skill would load twice.
 place_skills "$PI_DIR/skills" "skills" "$SKILL_COUNT"
 
-step "skills -> $PROJECT_DIR/.agents/skills/  (kept: used once the project is trusted)"
-# Deliberately NOT replaced by the step above. Two reasons: this copy is what pi loads the
-# moment a user runs /trust on the project, and .agents/skills is a cross-tool convention
-# (this box carries a .agents/.skill-lock.json written by something else entirely), so
-# deleting it would change behaviour for readers this script does not know about.
-place_skills "$PROJECT_DIR/.agents/skills" ".agents/skills" "$SKILL_COUNT"
+# Deliberately NOT replaced by the step above — but on ONE reason plus a bet, not the two
+# reasons this comment used to give.
+#
+# What it used to say: ".agents/skills is a cross-tool convention (this box carries a
+# .agents/.skill-lock.json written by something else entirely), so deleting it would change
+# behaviour for readers this script does not know about." That sentence was written from an
+# assumption and never checked. Checked since (aihub#617, 2026-09-12, on the box it was
+# written on):
+#   - $HOME/.agents holds .skill-lock.json and NOTHING else — no skills/ directory beside it.
+#     The lock file names 38 skills from a third-party repo whose files are not in that tree.
+#   - It is at HOME scope, and pi's own trust-manager (dist/core/trust-manager.js) carves
+#     $HOME/.agents/skills out as a USER resource. Only <project>/.agents/skills — the path
+#     THIS step writes — is the trust-requiring project resource. So the lock file is not
+#     evidence about this copy's readers even if something does read it.
+#   - Grepping the workspace for other readers of <project>/.agents/skills turned up only a
+#     vendored third-party scratch checkout, and none of the other agent CLIs installed there
+#     (claude, codex, opencode, goose) is configured to read it.
+#   - <project>/.agents/ is untracked in git, so the copy is not shared with other machines.
+# Removing it costs nothing measurable there either: with the project copy moved away, pi
+# loaded all 17 skills from the user copy in BOTH trust states (measured on 0.85.1 with the
+# get_commands probe printed under "verify" below).
+#
+# So the default keeps writing it on the first reason and an explicit bet, both stated:
+#   1. It is what starts working the moment a user runs /trust on the project — real, and
+#      unaffected by any of the above.
+#   2. .agents/ is a live convention, and "no second reader HERE" is not "no second reader".
+#      Another machine, another tool, or another account on a shared checkout is exactly the
+#      case a default should cover, and writing a duplicate tree is cheap to undo.
+# What the evidence does NOT support is making that bet unconditional, which is why
+# POLYFORGE_PI_SKILL_SCOPE=user exists. What that buys is the removal of the DEFAULT's
+# visible cost: one "skill collision" line per skill at every pi startup, because both copies
+# carry the same names and project scope wins.
+if [ "$PI_SKILL_SCOPE" = "user" ]; then
+  step "skills -> $PROJECT_DIR/.agents/skills/  (RETIRED: POLYFORGE_PI_SKILL_SCOPE=user)"
+  # Declining to REFRESH the tree is not enough, and getting this wrong would make the switch
+  # useless exactly where it was asked for. The box that wants it is the box that ALREADY has
+  # the project copy and has already trusted the project: skip the write and pi still finds
+  # the old copy, project scope still wins, and every collision line the switch exists to
+  # silence is still printed. It would look like a working opt-out in a clean sandbox and do
+  # nothing at all in the field.
+  #
+  # So the copy is retired, not merely skipped — and MOVED ASIDE rather than deleted, which is
+  # the same promise place_skills makes for every other tree this script manages. The backup
+  # is a SIBLING of .agents/skills, never a child, so pi does not discover it as a second
+  # skills root (pi looks for the exact path <ancestor>/.agents/skills).
+  if [ -d "$PROJECT_DIR/.agents/skills" ]; then
+    mv "$PROJECT_DIR/.agents/skills" "$PROJECT_DIR/.agents/skills.bak-$STAMP"
+    say "retired the existing .agents/skills -> .agents/skills.bak-$STAMP"
+    PROJECT_SKILLS_LINE="  $PROJECT_DIR/.agents/skills.bak-$STAMP  the retired project copy — nothing was deleted"
+  else
+    say "not written (there was no existing copy to retire)"
+    PROJECT_SKILLS_LINE="  $PROJECT_DIR/.agents/skills/    NOT written (POLYFORGE_PI_SKILL_SCOPE=user)"
+  fi
+  say "the user-scope copy above is what pi loads, with no trust required"
+  say "unset POLYFORGE_PI_SKILL_SCOPE and re-run to put it back"
+else
+  step "skills -> $PROJECT_DIR/.agents/skills/  (kept: used once the project is trusted)"
+  place_skills "$PROJECT_DIR/.agents/skills" ".agents/skills" "$SKILL_COUNT"
+  PROJECT_SKILLS_LINE="  $PROJECT_DIR/.agents/skills/    the same skills, for when the project is trusted"
+fi
 
 cat <<EOF
 
@@ -235,7 +312,7 @@ what this touches
   $PI_DIR/agents/pf-*.md          polyforge agent definitions
   $PI_DIR/skills/                 the polyforge skills — the copy pi loads by default
   $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings
-  $PROJECT_DIR/.agents/skills/    the same skills, for when the project is trusted
+$PROJECT_SKILLS_LINE
 
 verify
   cd "$PROJECT_DIR" && pi -p "list your tools"   # note: pi -p reads stdin, so add </dev/null

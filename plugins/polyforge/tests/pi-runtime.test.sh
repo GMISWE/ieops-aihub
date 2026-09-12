@@ -385,7 +385,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "== pi actually LOADS the skills install.sh installs =="
+echo "== pi actually LOADS the skills install.sh installs, under both skill scopes =="
 # THE ASSERTION IS "pi loaded it", NOT "the directory exists" — that distinction is the
 # whole defect (aihub#606). install.sh used to write the skills only to
 # <project>/.agents/skills, and pi reads that path only when the project is TRUSTED:
@@ -398,49 +398,115 @@ echo "== pi actually LOADS the skills install.sh installs =="
 # Measured on pi 0.85.1, this sandbox, trust the only variable: 0 skills loaded by default,
 # 17 with --approve. After the fix the user-scope copy loads with no --approve at all.
 #
-# LLM-free: `--mode rpc` + get_commands needs no API key and makes no model call, so this
-# runs anywhere pi is installed. Opportunistic like the event-name cross-check above — where
-# pi is absent (CI) it SKIPs loudly rather than passing.
+# TWO ARMS since aihub#617 added POLYFORGE_PI_SKILL_SCOPE:
+#   unset / both  -> user copy AND project copy written
+#   user          -> user copy only; <project>/.agents/skills must be ABSENT
+# The ABSENCE assertion is the load-bearing half. An install.sh that ignored the switch
+# outright would still write the user copy and still load all 17 skills, so every
+# presence-only assertion here passes on it — presence cannot distinguish a working opt-out
+# from a no-op.
+#
+# Nothing here was trusted until it was shown red. Five mutants, each reddening only the
+# assertions it should (aihub#617):
+#   switch ignored (project copy always written)  -> the scope=user ABSENCE check, and the
+#                                                    retire arm's SURVIVED check
+#   default stops writing the project copy        -> the default arm's presence check
+#   validation removed                            -> all three invalid-value checks
+#   skip-only, an existing copy left in place     -> the retire arm (see its own section)
+#   retire by deleting instead of moving aside    -> the retire arm's intact-backup check
+# Every one of those runs green against a presence-only version of this suite.
+#
+# The install and its filesystem assertions run EVERYWHERE — install.sh only warns when pi
+# is missing, so CI gets real coverage of the switch. Only the get_commands probe is
+# opportunistic, and where pi is absent it SKIPs loudly rather than passing.
+#
+# LLM-free: `--mode rpc` + get_commands needs no API key and makes no model call, so it
+# runs anywhere pi is installed.
 pi_bin="$(command -v pi || true)"
-if [ -z "$pi_bin" ]; then
-  skip "pi not installed here — skill loading not probed"
-elif ! command -v timeout >/dev/null 2>&1; then
-  skip "coreutils timeout unavailable — not running pi unbounded"
-else
+skill_count="$(find "$root/skills" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
+[ "$skill_count" -gt 0 ] || bad "no skills/<name>/SKILL.md found — every arm below would be vacuous"
+
+# $1 label, $2 POLYFORGE_PI_SKILL_SCOPE value ("" leaves it unset), $3 present|absent for
+# the project-scope tree.
+skill_scope_arm() {
+  local label="$1" scope="$2" want_project="$3" sandbox rc n_user n_proj
   sandbox="$(mktemp -d 2>/dev/null || true)"
   if [ -z "$sandbox" ] || [ ! -d "$sandbox" ]; then
-    bad "could not create a temp dir for the skill-loading probe"
+    bad "$label: could not create a temp dir for the install arm"
+    return
+  fi
+  trap 'rm -rf "$sandbox"' EXIT
+  mkdir -p "$sandbox/agent/npm/node_modules/pi-mcp-adapter" "$sandbox/proj"
+  # Stub the adapter so install.sh takes its "already installed" branch. Without this the
+  # test would run `pi install npm:pi-mcp-adapter` — a network fetch, in a test.
+  printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+    > "$sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
+  # Everything the installer writes is redirected into the sandbox: PI_AGENT_DIR is its own
+  # knob for the user scope, and the project dir is its argument. It must not touch the
+  # developer's real ~/.pi/agent.
+  if [ -z "$scope" ]; then
+    env PI_AGENT_DIR="$sandbox/agent" \
+      bash "$root/pi/install.sh" "$sandbox/proj" > "$sandbox/install.log" 2>&1 && rc=0 || rc=$?
   else
-    trap 'rm -rf "$sandbox"' EXIT
-    mkdir -p "$sandbox/agent/npm/node_modules/pi-mcp-adapter" "$sandbox/proj"
-    # Stub the adapter so install.sh takes its "already installed" branch. Without this the
-    # test would run `pi install npm:pi-mcp-adapter` — a network fetch, in a test.
-    printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
-      > "$sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
-    # Everything the installer writes is redirected into the sandbox: PI_AGENT_DIR is its
-    # own knob for the user scope, and the project dir is its argument. It must not touch
-    # the developer's real ~/.pi/agent.
-    if PI_AGENT_DIR="$sandbox/agent" bash "$root/pi/install.sh" "$sandbox/proj" \
-         > "$sandbox/install.log" 2>&1; then
-      ok "install.sh ran into a throwaway PI_AGENT_DIR"
+    env PI_AGENT_DIR="$sandbox/agent" POLYFORGE_PI_SKILL_SCOPE="$scope" \
+      bash "$root/pi/install.sh" "$sandbox/proj" > "$sandbox/install.log" 2>&1 && rc=0 || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ok "$label: install.sh ran into a throwaway PI_AGENT_DIR"
+  else
+    bad "$label: install.sh exited $rc in a throwaway dir:"
+    sed 's/^/      /' "$sandbox/install.log" >&2
+    rm -rf "$sandbox"; trap - EXIT; return
+  fi
+
+  # --- what landed on disk. No pi needed, so this half runs in CI too. -------------------
+  n_user="$(find "$sandbox/agent/skills" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null \
+            | wc -l | tr -d ' ')"
+  if [ "$n_user" -eq "$skill_count" ]; then
+    ok "$label: user-scope tree holds all $skill_count skills"
+  else
+    bad "$label: user-scope tree holds $n_user/$skill_count skills — the user copy is the one pi loads by default"
+  fi
+  if [ "$want_project" = "present" ]; then
+    n_proj="$(find "$sandbox/proj/.agents/skills" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null \
+              | wc -l | tr -d ' ')"
+    if [ "$n_proj" -eq "$skill_count" ]; then
+      ok "$label: project-scope tree holds all $skill_count skills"
     else
-      bad "install.sh failed in a throwaway dir:"
-      sed 's/^/      /' "$sandbox/install.log" >&2
+      bad "$label: project-scope tree holds $n_proj/$skill_count skills — the DEFAULT must keep writing both copies"
     fi
+  else
+    if [ -e "$sandbox/proj/.agents/skills" ]; then
+      bad "$label: <project>/.agents/skills exists — the opt-out was ignored, and every presence-only check here still passed"
+    else
+      ok "$label: <project>/.agents/skills is absent, which is what the opt-out asks for"
+    fi
+  fi
+
+  # --- what pi actually LOADED. Opportunistic. -------------------------------------------
+  if [ -z "$pi_bin" ]; then
+    skip "$label: pi not installed here — skill loading not probed"
+  elif ! command -v timeout >/dev/null 2>&1; then
+    skip "$label: coreutils timeout unavailable — not running pi unbounded"
+  else
     # The pipe IS pi's input channel here — do NOT add </dev/null, which would close stdin
     # before the request arrives and hang the probe out to its timeout.
     printf '{"id":1,"type":"get_commands"}\n' \
       | (cd "$sandbox/proj" && PI_CODING_AGENT_DIR="$sandbox/agent" \
            timeout 120 "$pi_bin" --mode rpc --no-session 2>/dev/null) \
       > "$sandbox/probe.out" || true
-    probe_out="$(python3 - "$root/skills" "$sandbox/agent/skills" "$sandbox/probe.out" <<'PY'
+    local probe_out
+    probe_out="$(python3 - "$root/skills" "$sandbox/agent/skills" "$sandbox/probe.out" "$label" <<'PY'
 import json, os, sys
-skills_src, user_skills_dir, probe_path = sys.argv[1], sys.argv[2], sys.argv[3]
+skills_src, user_skills_dir, probe_path, label = sys.argv[1:5]
+
+def emit(verdict, msg):
+    print("%s|%s: %s" % (verdict, label, msg))
 
 expected = sorted(d for d in os.listdir(skills_src)
                   if os.path.isfile(os.path.join(skills_src, d, "SKILL.md")))
 if not expected:
-    print("FAIL|no skills/<name>/SKILL.md found to expect — the probe would be vacuous")
+    emit("FAIL", "no skills/<name>/SKILL.md found to expect — the probe would be vacuous")
     raise SystemExit
 
 resp = None
@@ -456,11 +522,11 @@ for line in open(probe_path, errors="replace").read().splitlines():
     if obj.get("type") == "response" and obj.get("command") == "get_commands":
         resp = obj
 if resp is None:
-    print("FAIL|pi returned no get_commands response — the probe did not run, so nothing "
-          "about skill loading was verified")
+    emit("FAIL", "pi returned no get_commands response — the probe did not run, so nothing "
+                 "about skill loading was verified")
     raise SystemExit
 if not resp.get("success"):
-    print("FAIL|pi answered get_commands with success=false"); raise SystemExit
+    emit("FAIL", "pi answered get_commands with success=false"); raise SystemExit
 
 loaded = [c for c in (resp.get("data") or {}).get("commands", []) if c.get("source") == "skill"]
 prefix = os.path.join(user_skills_dir, "")
@@ -473,29 +539,145 @@ for c in loaded:
 missing = [n for n in expected if n not in from_user]
 if missing:
     shown = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
-    print("FAIL|pi loaded %d/%d installed skills from %s — missing: %s (it loaded %d skill(s) "
-          "in total, from: %s)"
-          % (len(from_user), len(expected), user_skills_dir, shown, len(loaded),
-             ", ".join(sorted({((c.get('sourceInfo') or {}).get('path') or '?').rsplit('/', 2)[0]
-                               for c in loaded})) or "nowhere"))
+    emit("FAIL", "pi loaded %d/%d installed skills from %s — missing: %s (it loaded %d skill(s) "
+                 "in total, from: %s)"
+                 % (len(from_user), len(expected), user_skills_dir, shown, len(loaded),
+                    ", ".join(sorted({((c.get('sourceInfo') or {}).get('path') or '?').rsplit('/', 2)[0]
+                                      for c in loaded})) or "nowhere"))
 else:
-    print("PASS|pi loaded all %d installed skills, from the copy install.sh made at %s"
-          % (len(expected), user_skills_dir))
+    emit("PASS", "pi loaded all %d installed skills, from the copy install.sh made at %s"
+                 % (len(expected), user_skills_dir))
 
-# The project copy is still written (install.sh is additive) but must not be what is doing
-# the work here: this sandbox was never trusted. If this ever flips, the user-scope install
-# has stopped being load-bearing and the assertion above has quietly changed meaning.
+# In the default arm the project copy is written but must not be what is doing the work:
+# this sandbox was never trusted. If that ever flips, the user-scope install has stopped
+# being load-bearing and the assertion above has quietly changed meaning. In the opt-out arm
+# there is no project copy at all, so this is a free negative control.
 project_scoped = [c for c in loaded if ((c.get("sourceInfo") or {}).get("scope")) == "project"]
-print(("FAIL|%d skill(s) loaded at project scope in an untrusted sandbox — the probe is no "
-       "longer proving the user-scope copy works" % len(project_scoped)) if project_scoped
-      else "PASS|nothing loaded from the untrusted project copy, so the user-scope copy is "
-           "what pi used")
+emit("FAIL", "%d skill(s) loaded at project scope in an untrusted sandbox — the probe is no "
+             "longer proving the user-scope copy works" % len(project_scoped)) if project_scoped \
+    else emit("PASS", "nothing loaded from the untrusted project copy, so the user-scope copy "
+                      "is what pi used")
 PY
 )"
     verdicts <<< "$probe_out"
-    rm -rf "$sandbox"
-    trap - EXIT
   fi
+  rm -rf "$sandbox"
+  trap - EXIT
+}
+
+skill_scope_arm "default scope" ""     present
+skill_scope_arm "scope=user"    "user" absent
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== the opt-out RETIRES a project copy that is already there =="
+# Both arms above start from an empty project dir, where "skip the write" and "retire the
+# tree" are indistinguishable. The box that actually wants this switch is the opposite case:
+# it already HAS the project copy and has already trusted the project, which is why it sees
+# the collision lines at all. An opt-out that only declines to refresh leaves pi finding the
+# stale copy, project scope still winning, and every collision line still printed — a switch
+# that passes every clean-sandbox assertion and does nothing in the field. This arm is the
+# one that tells those two implementations apart, so it installs TWICE into ONE sandbox:
+# default first (which writes the copy), opt-out second.
+#
+# It also pins the non-destructive half. Retiring the tree must not delete it — install.sh
+# promises everywhere else that nothing it manages is destroyed without a copy alongside it,
+# and a user may have edited that tree.
+retire_sandbox="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$retire_sandbox" ] || [ ! -d "$retire_sandbox" ]; then
+  bad "could not create a temp dir for the retire arm"
+else
+  trap 'rm -rf "$retire_sandbox"' EXIT
+  mkdir -p "$retire_sandbox/agent/npm/node_modules/pi-mcp-adapter" "$retire_sandbox/proj"
+  printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+    > "$retire_sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
+  env PI_AGENT_DIR="$retire_sandbox/agent" \
+    bash "$root/pi/install.sh" "$retire_sandbox/proj" > "$retire_sandbox/first.log" 2>&1 \
+    && first_rc=0 || first_rc=$?
+  n_first="$(find "$retire_sandbox/proj/.agents/skills" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null \
+             | wc -l | tr -d ' ')"
+  # Precondition, asserted rather than assumed: without a project copy in place first, the
+  # retire assertion below would pass on an installer that does nothing at all.
+  if [ "$first_rc" -eq 0 ] && [ "$n_first" -eq "$skill_count" ]; then
+    ok "retire arm: the default run left a project copy of all $skill_count skills to retire"
+  else
+    bad "retire arm: setup failed — default run exited $first_rc leaving $n_first/$skill_count skills, so the retire assertion would be vacuous"
+  fi
+  env PI_AGENT_DIR="$retire_sandbox/agent" POLYFORGE_PI_SKILL_SCOPE=user \
+    bash "$root/pi/install.sh" "$retire_sandbox/proj" > "$retire_sandbox/second.log" 2>&1 \
+    && second_rc=0 || second_rc=$?
+  if [ "$second_rc" -eq 0 ]; then
+    ok "retire arm: the opt-out re-run succeeded over an existing project copy"
+  else
+    bad "retire arm: the opt-out re-run exited $second_rc over an existing project copy:"
+    sed 's/^/      /' "$retire_sandbox/second.log" >&2
+  fi
+  if [ -e "$retire_sandbox/proj/.agents/skills" ]; then
+    bad "retire arm: <project>/.agents/skills SURVIVED the opt-out — pi still loads it, project scope still wins, and the collision lines the switch exists to silence are still printed"
+  else
+    ok "retire arm: the pre-existing <project>/.agents/skills is gone after the opt-out"
+  fi
+  # Non-destructive: the retired tree must still be on disk, intact, beside where it was.
+  n_bak=0
+  for d in "$retire_sandbox/proj/.agents/skills.bak-"*; do
+    [ -d "$d" ] || continue
+    n_bak="$(find "$d" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+  done
+  if [ "$n_bak" -eq "$skill_count" ]; then
+    ok "retire arm: the retired copy is intact at .agents/skills.bak-<stamp> ($skill_count skills), not deleted"
+  else
+    bad "retire arm: no intact .agents/skills.bak-<stamp> after the opt-out (found $n_bak/$skill_count skills) — the pre-existing copy was not moved aside intact"
+  fi
+  # The backup must be a SIBLING of the search path, never a child: pi looks for the exact
+  # path <ancestor>/.agents/skills, and a backup nested inside it would be discovered as
+  # skills in its own right — the same trap place_skills documents for $PI_DIR/skills.
+  if [ -e "$retire_sandbox/proj/.agents/skills" ]; then
+    bad "retire arm: cannot check backup placement — .agents/skills still exists"
+  else
+    ok "retire arm: the backup is a sibling of .agents/skills, so pi finds no second skills root"
+  fi
+  rm -rf "$retire_sandbox"
+  trap - EXIT
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== an unrecognised POLYFORGE_PI_SKILL_SCOPE fails loudly and writes nothing =="
+# A two-valued knob has exactly one interesting failure mode: rounding an unrecognised value
+# to one of the two. `POLYFORGE_PI_SKILL_SCOPE=usr` silently treated as "both" is a typo that
+# reads as a working opt-out; treated as "user" it is a typo that silently drops the project
+# copy. Neither is detectable from the installer's output, so the value has to be rejected.
+# Needs no pi, so unlike the arms above this one really does run in CI.
+bogus_sandbox="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$bogus_sandbox" ] || [ ! -d "$bogus_sandbox" ]; then
+  bad "could not create a temp dir for the invalid-scope arm"
+else
+  trap 'rm -rf "$bogus_sandbox"' EXIT
+  mkdir -p "$bogus_sandbox/agent/npm/node_modules/pi-mcp-adapter" "$bogus_sandbox/proj"
+  printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+    > "$bogus_sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
+  env PI_AGENT_DIR="$bogus_sandbox/agent" POLYFORGE_PI_SKILL_SCOPE="sideways" \
+    bash "$root/pi/install.sh" "$bogus_sandbox/proj" > "$bogus_sandbox/log" 2>&1 \
+    && bogus_rc=0 || bogus_rc=$?
+  if [ "$bogus_rc" -ne 0 ]; then
+    ok "install.sh refuses POLYFORGE_PI_SKILL_SCOPE=sideways (exit $bogus_rc)"
+  else
+    bad "install.sh accepted POLYFORGE_PI_SKILL_SCOPE=sideways — an unrecognised value was rounded to one of the two"
+  fi
+  if grep -q "POLYFORGE_PI_SKILL_SCOPE" "$bogus_sandbox/log"; then
+    ok "the refusal names the variable it is complaining about"
+  else
+    bad "the refusal does not name POLYFORGE_PI_SKILL_SCOPE, so a caller cannot tell what to fix"
+  fi
+  # Fails BEFORE writing: an installer that dies halfway leaves a half-install behind, which
+  # is worse than either accepted value.
+  if [ -e "$bogus_sandbox/agent/skills" ] || [ -e "$bogus_sandbox/proj/.agents" ]; then
+    bad "the refused run still wrote a skills tree — validation happens after the installer starts writing"
+  else
+    ok "the refused run wrote no skills tree at either scope"
+  fi
+  rm -rf "$bogus_sandbox"
+  trap - EXIT
 fi
 
 echo ""

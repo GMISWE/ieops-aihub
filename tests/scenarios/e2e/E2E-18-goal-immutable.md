@@ -2,7 +2,12 @@
 
 Tests that pf_update_work_item(goal=...) is rejected — goal is immutable
 per design (CLAUDE.md: "goal is immutable — pf_update_work_item rejects it").
-Reference: domain/work_items.go FnUpdateWorkItem — goal not in patchable fields.
+Reference: `internal/domain/work_items.go` (`UpdateWorkItem`) — a goal update
+without `goal_change_reason` is rejected with 400.
+NOTE: goal is no longer unconditionally immutable — supplying
+`goal_change_reason` (min 10 chars) makes it editable. This scenario's bare
+`goal=` update, with no reason, must still 4xx, so the steps below still hold;
+only the original "not in patchable fields" framing is stale.
 
 ## Users
 - ADMIN_KEY=$ADMIN_KEY

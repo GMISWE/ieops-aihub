@@ -2,7 +2,15 @@
 
 Tests that claiming a wi returns 503 SERVICE_UNAVAILABLE when the
 scenario_phase_configs row for the wi's scenario has been deleted.
-Reference: run_attempts.go:199-204 — config lookup returns 503 if missing.
+Reference: the config lookup this scenario exercised lived in run_attempts.go
+of the tree this scenario was written against; the scenario_phase_configs
+table has since been REMOVED (aihub#38), and a claim now falls back to a named
+constant instead of a lookup — `internal/domain/run_attempts.go`
+(`defaultRequiresHumanSession`) documents the removal.
+
+NOTE: OBSOLETE against the current server — the 503-on-missing-config path no
+longer exists, because the table it read no longer exists. Kept as a record of
+what the scenario verified; do not run it against a current build.
 
 NOTE: This is an edge-case/operational scenario. It requires deleting a
 scenario_phase_configs row, which is a destructive admin operation.

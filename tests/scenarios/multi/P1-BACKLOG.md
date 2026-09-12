@@ -10,7 +10,7 @@ saying "not implemented" so the header claim stays checkable.
 ## P1-1 — Writer cross-user takeover rejected (403)
 Bob (writer) tries to force_takeover Alice's RUNNING wi without admin/maintainer role.
 Must return 403. Confirms cross-user takeover permission enforcement.
-Reference: domain/run_attempts.go FnForceTakeover — cross-user requires maintainer/admin.
+Reference: `internal/domain/run_attempts.go` (`FnForceTakeover`) — cross-user requires maintainer/admin.
 Status (2026-09-11): implemented — P1-01-writer-takeover-rejected.md.
 
 ## P1-2 — Pause retains lock; second agent blocked
@@ -36,13 +36,13 @@ Admin calls GET /memories — result SHOULD contain it.
 NOTE: Admin visibility filter implemented in internal/domain/memory.go
 (`recallText`; the forward-relations enrichment applies the same filter in
 `loadForwardRelations`). This scenario now passes.
-Reference: domain/memory.go Recall — visibility filter complete.
+Reference: `internal/domain/memory.go` (`Recall`) — visibility filter complete.
 Status (2026-09-11): implemented — P1-04-admin-visibility-memory.md.
 
 ## P1-5 — Multi-blocker dependency (AND semantics)
 WI_C blocked_by=[WI_A, WI_B]. Only WI_A wraps; WI_C must stay blocked.
 After WI_B also wraps, WI_C unblocks and appears in ready queue.
-Reference: domain/run_attempts.go unblockDependentWI — checks all blockers resolved.
+Reference: `internal/domain/run_attempts.go` (`unblockDependentWI`) — checks all blockers resolved.
 Status (2026-09-11): implemented — P1-05-multi-blocker-and-semantics.md.
 
 ## P1-6 — Cross-project memory isolation

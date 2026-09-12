@@ -166,8 +166,9 @@ var detailsWriterCensus = map[string]detailsWriter{
 		},
 		Verdict: "existing.goal is DB-capped at 500 runes (work_items_goal_check), worst case 1582 compacted bytes — " +
 			"the largest count-BOUNDED envelope, and what sized client.DetailsRenderLimit (aihub#375). candidates is " +
-			"count-scaled (its query LIMITs at 50, ~16KB worst, in no particular order) and deliberately rides the " +
-			"render-cap backstop: each entry names a wi the caller can look up, so the cut costs a lookup, not data",
+			"count-scaled (its query LIMITs at 50, ~16KB worst, most-similar-first since aihub#628) and deliberately " +
+			"rides the render-cap backstop: each entry names a wi the caller can look up, so the cut costs a lookup, " +
+			"not data, and the aihub#628 ordering means what it cuts is the least similar tail",
 	},
 	"projects.go:undeclaredMemberRemovalErr": {
 		Shapes: []string{"{expected_removals,retryable,stored_member_count,submitted_member_count,undeclared_removals}"},

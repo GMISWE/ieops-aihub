@@ -5336,6 +5336,30 @@ jobs:
           ! grep -q -- '--- SKIP' memory_visibility_parity.log \
             || { echo "::error::the aihub#379 parity test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#628: checkDedup's candidate query was LIMIT 50 with no ORDER BY,
+      # so on a project with more than 50 live work items both truncations
+      # (the SQL LIMIT, then pkg/client's DetailsRenderLimit byte cap over the
+      # candidates envelope, aihub#375) cut ARBITRARY rows instead of the
+      # least relevant ones. The fix orders the query by deterministic
+      # relevance proxies (label overlap, resource containment, recency) and
+      # sorts the envelope by the real composite score. These arms need more
+      # rows than the LIMIT, i.e. a real database, so they are DB-gated; the
+      # ordering claim per arm is the greps below.
+      - name: aihub#628 dedup candidate ordering DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestCheckDedupOrdersCandidatesBeforeTruncation$' -count=1 -v 2>&1 | tee dedup_order.log
+          for want in 'TestCheckDedupOrdersCandidatesBeforeTruncation/limit_drops_the_oldest_not_an_arbitrary_row' \
+                      'TestCheckDedupOrdersCandidatesBeforeTruncation/label_overlap_outranks_recency' \
+                      'TestCheckDedupOrdersCandidatesBeforeTruncation/details_orders_most_similar_first'; do
+            grep -q -- "--- PASS: $want (" dedup_order.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#628 dedup candidate ordering is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' dedup_order.log \
+            || { echo "::error::an aihub#628 dedup ordering test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

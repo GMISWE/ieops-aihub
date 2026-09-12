@@ -937,6 +937,36 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 	// Don't use labels && $2 when $2 is empty — that would give a type-cast error.
 	// When declared_resources is empty [], @> $3::jsonb is trivially true for every row,
 	// so we guard with a non-empty check.
+	//
+	// aihub#628: both queries ORDER BY before their LIMIT 50, so on a project
+	// with more than 50 live work items the rows that get truncated away are
+	// the least relevant by a DETERMINISTIC key, not whichever rows the heap
+	// happened to return first. The composite similarity score itself (goal
+	// 3-gram Jaccard, candidateScore) is computed in Go and has no SQL
+	// counterpart here -- no pg_trgm in the migrations, and the pgvector
+	// embeddings are written asynchronously after creation, so the incoming
+	// request has nothing to compare against inside this transaction. The
+	// ORDER BY therefore ranks by the closest deterministic proxies instead:
+	//
+	//   - label overlap count (labeled branch only): set-semantics
+	//     intersection size with the request's labels -- the direct analogue
+	//     of the score's 0.2-weight label component, and the predicate that
+	//     admitted the row in the first place;
+	//   - resource containment (labeled branch only): the other admission
+	//     predicate, a coarse proxy for the 0.2-weight resource component
+	//     (COALESCEd to 0 so a NULL $3 cannot sort NULLS FIRST above real
+	//     matches);
+	//   - seq DESC (both branches): recency. Duplicates cluster in time --
+	//     the typical collision is a re-file of something recent, not of the
+	//     oldest paused item in the project. seq is immutable and unique per
+	//     project (slug = project || '#' || seq is UNIQUE), so it also makes
+	//     the whole ordering total: same table state, same 50 rows, always.
+	//
+	// The trade-off, stated plainly: a goal-similar candidate with no label or
+	// resource overlap and a low seq can still be truncated away on a project
+	// with >50 live work items. Ranking by the real goal similarity in SQL
+	// would need pg_trgm or a synchronous embedding, both out of scope here;
+	// recency is the best deterministic stand-in this schema offers.
 	var rows pgx.Rows
 	var err error
 	if len(labels) == 0 {
@@ -946,6 +976,7 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 			FROM work_items
 			WHERE project = $1
 			  AND status IN ('queued','running','paused','blocked')
+			ORDER BY seq DESC
 			LIMIT 50`,
 			req.Project,
 		)
@@ -956,6 +987,9 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 			WHERE project = $1
 			  AND status IN ('queued','running','paused','blocked')
 			  AND (labels && $2::text[] OR declared_resources @> $3::jsonb)
+			ORDER BY cardinality(ARRAY(SELECT UNNEST(labels) INTERSECT SELECT UNNEST($2::text[]))) DESC,
+			         COALESCE((declared_resources @> $3::jsonb)::int, 0) DESC,
+			         seq DESC
 			LIMIT 50`,
 			req.Project, labels, req.DeclaredResources,
 		)
@@ -1066,6 +1100,18 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 	}
 
 	if len(partials) > 0 {
+		// aihub#628: most-similar-first, by the REAL composite score this time
+		// (candidateScore ran on every scanned row, so it is available here).
+		// The candidates envelope deliberately rides pkg/client's
+		// DetailsRenderLimit byte cap (aihub#375, the census entry for this
+		// function): when that cap cuts the rendered details, it cuts from the
+		// END, so ordering the array here is what makes the second truncation
+		// drop the least similar candidates rather than arbitrary ones. The
+		// sort is STABLE so equal scores keep the query's deterministic
+		// relevance order, keeping the whole envelope reproducible.
+		sort.SliceStable(partials, func(i, j int) bool {
+			return partials[i].Similarity > partials[j].Similarity
+		})
 		candidates := make([]map[string]any, len(partials))
 		for i, p := range partials {
 			candidates[i] = map[string]any{

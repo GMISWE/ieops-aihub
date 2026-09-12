@@ -4564,9 +4564,9 @@ jobs:
           bash plugins/polyforge/tests/using-polyforge-payload.test.sh 2>&1 | tee payload_gate.log
           for want in "PASS: payload " \
                       "PASS: the hook did not have to degrade this payload" \
-                      "PASS: IR1 — inside preview window" \
-                      "PASS: IR2 — inside preview window" \
-                      "PASS: IR3 — inside preview window" \
+                      "PASS: IR1 - inside preview window" \
+                      "PASS: IR2 - inside preview window" \
+                      "PASS: IR3 - inside preview window" \
                       "PASS: IR3 falls out of the window when iron-rules.md is moved last" \
                       "PASS: post-claim-routing.md not injected" \
                       "PASS: dispatch rule: " \

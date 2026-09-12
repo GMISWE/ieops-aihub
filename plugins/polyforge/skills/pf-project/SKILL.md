@@ -5,21 +5,21 @@ description: >
   a project access identifier.
 ---
 
-# pf-project — Project Management
+# pf-project - Project Management
 
 ## Usage
 
-**Purpose**: Manage polyforge projects — create, update, rotate access identifier, or list.
+**Purpose**: Manage polyforge projects - create, update, rotate access identifier, or list.
 
 **Pattern**: `/pf-project { create | update | rotate | list } [<name>] [--description <text>] [--visible | --private] [--scenario <name>] [--repos <json>]`
 
 **Required**: a sub-mode (see below)
 
 **Flags**:
-- `--description <text>` — project description
-- `--visible` / `--private` — visibility toggle (default visible on create)
-- `--scenario <name>` — scenario type, e.g. `coding`
-- `--repos <json>` — array of `{name, url, github_owner_repo, description}` entries
+- `--description <text>` - project description
+- `--visible` / `--private` - visibility toggle (default visible on create)
+- `--scenario <name>` - scenario type, e.g. `coding`
+- `--repos <json>` - array of `{name, url, github_owner_repo, description}` entries
 - `rotate` is destructive: existing identifier is invalidated and a new one is issued
 
 ## When to use
@@ -31,7 +31,7 @@ description: >
 
 ## Mechanic
 
-### Mode A — Create project
+### Mode A - Create project
 
 ```
 pf_create_project(
@@ -44,10 +44,10 @@ pf_create_project(
 ```
 
 - Any writer+ can create
-- `visible=false` → private project; access must be granted to others via the identifier
+- `visible=false` -> private project; access must be granted to others via the identifier
 - name is globally unique and cannot be changed after creation
 
-### Mode B — Update project
+### Mode B - Update project
 
 ```
 pf_update_project(
@@ -61,7 +61,7 @@ pf_update_project(
 - Only owner/admin can perform this
 - Within a project, repo name/url must be unique
 
-### Mode C — Rotate identifier
+### Mode C - Rotate identifier
 
 ```
 result = pf_rotate_identifier(name=<project name>)
@@ -70,7 +70,7 @@ result = pf_rotate_identifier(name=<project name>)
 
 - Only owner/admin can perform this
 - After rotation the old identifier is **invalidated immediately**
-- `plain` is the plaintext token, **shown only once** — tell the user to save it immediately
+- `plain` is the plaintext token, **shown only once** - tell the user to save it immediately
 - `prefix` identifies this token (useful if it is used in multiple places)
 
 **Show to the user:**
@@ -80,7 +80,7 @@ Token: pi_xxxxxxxxxxxxx...  <- save it now; it cannot be viewed again
 Prefix: pi_ab12
 ```
 
-### Mode D — List projects
+### Mode D - List projects
 
 ```
 projects = pf_list_projects()

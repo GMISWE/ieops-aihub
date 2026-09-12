@@ -195,7 +195,7 @@ fi
 
 echo
 echo "2. Iron Rules reach the model even under truncation"
-for ir in "IR1 —" "IR2 —" "IR3 —"; do
+for ir in "IR1 -" "IR2 -" "IR3 -"; do
   case "$ctx" in *"$ir"*) ok "$ir present in payload";; *) bad "$ir missing from payload entirely";; esac
   case "$vis" in *"$ir"*) ok "$ir inside preview window";; *) bad "$ir outside preview window — @include iron-rules.md earlier in SKILL.md";; esac
 done
@@ -262,7 +262,7 @@ else
   fi
   # ...and the control must still be a working payload, or "markers gone" is explained by
   # the hook having failed rather than by the fragment being empty.
-  case "$dctl_ctx" in *"IR1 —"*) ok "control build is otherwise intact (IR1 still present)";;
+  case "$dctl_ctx" in *"IR1 -"*) ok "control build is otherwise intact (IR1 still present)";;
                       *) bad "control build lost IR1 too — the hook broke, so the marker check proves nothing";; esac
 fi
 fi
@@ -343,7 +343,7 @@ else
     *)             ok "control build no longer carries '$STATE_WS' — the presence check can fire";;
   esac
   case "$sctl_ctx" in
-    *"IR1 —"*) ok "state-scan control build is otherwise intact (IR1 still present)";;
+    *"IR1 -"*) ok "state-scan control build is otherwise intact (IR1 still present)";;
     *)         bad "state-scan control build lost IR1 too — the hook broke, so neither direction proves anything";;
   esac
 fi
@@ -426,11 +426,11 @@ PY
 ctl_ctx="$(assemble "$ctl")"
 ctl_vis="$(printf '%s' "$ctl_ctx" | tle)"
 case "$ctl_ctx" in
-  *"IR3 —"*) ok "control build still contains IR3 (only its position changed)";;
-  *)         bad "control build lost IR3 — the control is broken, not the ordering";;
+  *"IR3 -"*) ok "control build still contains IR3 (only its position changed)";;
+  *)         bad "control build lost IR3 - the control is broken, not the ordering";;
 esac
 case "$ctl_vis" in
-  *"IR3 —"*) bad "IR3 still inside the window with iron-rules.md moved LAST — the window check has no discriminating power";;
+  *"IR3 -"*) bad "IR3 still inside the window with iron-rules.md moved LAST — the window check has no discriminating power";;
   *)         ok "IR3 falls out of the window when iron-rules.md is moved last (check discriminates)";;
 esac
 
@@ -529,7 +529,7 @@ case "$over_ctx" in
   *"$BANNER_MARK"*) ok "degraded payload carries the over-budget banner";;
   *)                bad "degraded payload has no banner — the omission is silent, which is the aihub#285 failure mode";;
 esac
-for ir in "IR1 —" "IR2 —" "IR3 —"; do
+for ir in "IR1 -" "IR2 -" "IR3 -"; do
   case "$over_ctx" in *"$ir"*) ok "$ir survives degradation";; *) bad "$ir dropped by degradation — Iron Rules must be the last thing to go";; esac
 done
 if grep -q "over the $HARNESS_HARD_LIMIT-char harness limit" "$over_err"; then
@@ -581,7 +581,7 @@ case "$on_ctx"  in *"$SENTINEL"*) ok "condition met -> fragment IS assembled";;
 case "$off_ctx" in *"$SENTINEL"*) bad "condition NOT met but the sentinel fragment is still in the payload — \`when:\` is inert, so the worst-case size measurement in assertion 0 means nothing";;
                    *) ok "condition unmet -> fragment is NOT assembled";; esac
 # ...and the off-direction must not be "absent because nothing assembled at all".
-case "$off_ctx" in *"IR1 —"*) ok "the unmet build is otherwise intact (IR1 still present)";;
+case "$off_ctx" in *"IR1 -"*) ok "the unmet build is otherwise intact (IR1 still present)";;
                    *) bad "the unmet build lost IR1 too — the sentinel's absence proves nothing";; esac
 
 echo

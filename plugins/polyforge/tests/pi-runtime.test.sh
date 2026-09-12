@@ -299,14 +299,14 @@ print(("FAIL|allowlist grants polyforge tool(s) that are not on the read-only li
 # The prompt tells the agent to read polyforge state. Because the allowlist also filters
 # extension-registered tools, dropping these would not error — it would silently leave the
 # agent unable to read any polyforge state at all.
-reading = re.search(r"Reading\s*—(.*?)—\s*is fine", body, re.S)
+reading = re.search(r"Reading\s*-(.*?)-\s*is fine", body, re.S)
 if not reading:
-    print("FAIL|pf-explore.md's body no longer carries the 'Reading — ... — is fine' list, "
+    print("FAIL|pf-explore.md's body no longer carries the 'Reading - ... - is fine' list, "
           "so the allowlist cannot be checked against what the prompt promises")
 else:
     named = re.findall(r"`(\w*pf_\w+)`", reading.group(1))
     if not named:
-        print("FAIL|the 'Reading — ... — is fine' sentence names no pf_* tool")
+        print("FAIL|the 'Reading - ... - is fine' sentence names no pf_* tool")
     else:
         absent = [n for n in named if not any(t.endswith(n) for t in tools)]
         print(("FAIL|the body tells the agent to use %s, which the allowlist does not grant"

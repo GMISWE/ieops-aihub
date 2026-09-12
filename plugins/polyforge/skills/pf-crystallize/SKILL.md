@@ -6,7 +6,7 @@ description: >
   automatically by pf-stop --wrap, not invoked directly by the user.
 ---
 
-# pf-crystallize — Workflow Crystallization
+# pf-crystallize - Workflow Crystallization
 
 ## Usage
 
@@ -17,8 +17,8 @@ description: >
 **Required**: `<source_wi_id>` (the wrapped wi) and `<wi_type_name>` (snake_case `\w+`)
 
 **Flags**:
-- `--project <name>` — produce project-scoped `{wi_type}.{project}.md`; omit (or pass `generic`) for project-agnostic `{wi_type}.md`
-- Not user-invokable directly — dispatched by `/pf-stop --wrap` after the user opts in
+- `--project <name>` - produce project-scoped `{wi_type}.{project}.md`; omit (or pass `generic`) for project-agnostic `{wi_type}.md`
+- Not user-invokable directly - dispatched by `/pf-stop --wrap` after the user opts in
 
 ## When to use
 
@@ -35,8 +35,8 @@ Not for direct user invocation.
 Collect the following information:
 - `wi_type`: already obtained from the trigger input (only `\w+` characters, e.g. `deploy`, `data_migration`)
 - `project` (optional):
-  - User enters a project name → produce `{wi_type}.{project}.md`
-  - Press Enter to skip / enter "generic" → produce `{wi_type}.md` (no project suffix)
+  - User enters a project name -> produce `{wi_type}.{project}.md`
+  - Press Enter to skip / enter "generic" -> produce `{wi_type}.md` (no project suffix)
 - `requires_human_session` (default false): ask the user whether human intervention is required
 
 **Early-exit guard**: if the user decides not to crystallize at this point (enters "skip" / "no" / presses Enter), immediately output "Crystallization skipped." and end without performing the subsequent steps.
@@ -71,7 +71,7 @@ Extract step names and artifact_summary from `step_completed` events.
 **3b. AI in-context window**
 If invoked within the same session (operation details are remembered in-session), supplement the details missing from pf_read_events.
 
-> ⚠️ When invoked across sessions, the in-context window is unavailable; rely on pf_read_events only, and output quality depends on how rich the events are.
+> When invoked across sessions, the in-context window is unavailable; rely on pf_read_events only, and output quality depends on how rich the events are.
 
 Combining both, extract an ordered step list:
 - Each step `## Step: <id>` (underscore naming, e.g. `prepare_context`, `deploy_staging`)
@@ -80,22 +80,22 @@ Combining both, extract an ordered step list:
 ### Step 4: Common skill extraction
 
 For each step, scan the `<scenario_path>/common/` directory and use LLM judgment to assess the match
-(`scenario_path` is the project's own scenario clone, resolved as in pf-execute §0 — do NOT hardcode
+(`scenario_path` is the project's own scenario clone, resolved as in pf-execute §0 - do NOT hardcode
 an org, two orgs can have same-named scenario repos):
 
 **a. Matches an existing common/ skill (>80% overlap)**
-→ Replace with `@include: common/<name>/SKILL.md`
-→ If applicable, append a `level:` parameter (e.g. `level: quick` for review)
+-> Replace with `@include: common/<name>/SKILL.md`
+-> If applicable, append a `level:` parameter (e.g. `level: quick` for review)
 
 **b. New reusable logic**
-→ Ask the user:
+-> Ask the user:
 ```
 Step "<name>" looks like it could be extracted into a common skill. Write it to common/<name>/SKILL.md?
 ```
-→ User confirms → generate `common/<name>/SKILL.md` and change the step to `@include:`
+-> User confirms -> generate `common/<name>/SKILL.md` and change the step to `@include:`
 
 **c. Dedicated logic**
-→ Write it inline inside the `## Step:` content
+-> Write it inline inside the `## Step:` content
 
 ### Step 5: Generate the draft and present it
 
@@ -129,7 +129,7 @@ Confirm write (Enter) / Revise (enter revision notes) / Cancel (skip):
 The scenario repo (polyforge-coding) holds fleet-executable prompt content, so it must land
 via a PR, not a direct push to `main` -- use the crystallize chore wi's own claim (from Step
 2; its worktree is `pf.<project>-<seq>/polyforge-coding/`, branch
-`polyforge/<project>-<seq>-<short-kebab-goal>` — never assume the name, read it with
+`polyforge/<project>-<seq>-<short-kebab-goal>` - never assume the name, read it with
 `git -C <worktree> rev-parse --abbrev-ref HEAD`, since older claims are still on
 `polyforge/<ulid8>`. See pf-work's "Task branch naming").
 
@@ -138,7 +138,7 @@ After the user confirms:
 1. Write `{wi_type}[.{project}].md` (and any new `common/` files) into the polyforge-coding worktree.
 2. Commit, push, and open a PR through the chore wi's own claim -- ONE call, not three
    (pass `paths=` so only the target files are staged; the worktree parent may hold
-   `.pf_*` scratch). ⚠️ `pf_ship` pushes to origin, and that push is a force-push:
+   `.pf_*` scratch). `pf_ship` pushes to origin, and that push is a force-push:
    ```
    pf_ship(work_item_id=<crystallize chore wi_id>, repo="polyforge-coding",
            workspace_root=<ws>, paths=[<the new/changed .md files only>],

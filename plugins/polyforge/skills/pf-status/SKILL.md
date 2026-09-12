@@ -5,7 +5,7 @@ description: >
   project ready queue, or which items are stalled, blocked, or need attention.
 ---
 
-# pf-status — Work Item Status & Ready Queue
+# pf-status - Work Item Status & Ready Queue
 
 ## Usage
 
@@ -13,14 +13,14 @@ description: >
 
 **Pattern**: `/pf-status [--all]`
 
-**Required**: none (no-arg inside a claimed wi → single-wi view; no-arg outside → global view; `--all` forces global)
+**Required**: none (no-arg inside a claimed wi -> single-wi view; no-arg outside -> global view; `--all` forces global)
 
 **Flags**:
-- `--all` — force global LCRS view even when a wi is currently claimed
+- `--all` - force global LCRS view even when a wi is currently claimed
 
 ## When to use
 
-Any time the user wants to know what is happening — current wi progress, team-wide
+Any time the user wants to know what is happening - current wi progress, team-wide
 ready queue, or which items are stalled/blocked.
 
 ## Mechanic
@@ -34,7 +34,7 @@ ready queue, or which items are stalled/blocked.
    )
    ```
 
-   > Since aihub#280 `ids` is a real filter and `project` is correctly omitted —
+   > Since aihub#280 `ids` is a real filter and `project` is correctly omitted -
    > an id already names one wi. Before that, `ids` reached no forwarding table
    > and no `project` was sent, so this call was a hard 400 and never ran.
 
@@ -60,39 +60,39 @@ ready queue, or which items are stalled/blocked.
 2. Render LCRS (Layer-3 Concurrent Ready State) view:
 
 ```
-📋 LCRS — project: <name>
+LCRS - project: <name>
 ──────────────────────────────────────────────────
-🏃 running      (2): wi_xxx "fix login bug" [Alice, last active 4min ago]
-                     wi_yyy "add rate limiting" [Bot-1, last active 2h ago]
-⚡ items         (5): wi_aaa (urgent) "critical DB migration" [queued]
-                     wi_bbb (high)   "auth refactor" [queued]
-                     ... +3 more
-⚠️  stalled       (1): wi_ccc "upgrade deps" blocked by: wi_ddd
-⏸  paused        (0):
-👤 needs you     (1): wi_eee "design new billing API" [requires_human_session]
-❓ unclassified   (2): wi_fff (wi_type not set — run /pf-work <slug> to classify)
-                     wi_ggg
-🧟 stale running  (1): wi_hhh "migrate search index" [running, untouched >24h]
+running       (2): wi_xxx "fix login bug" [Alice, last active 4min ago]
+                   wi_yyy "add rate limiting" [Bot-1, last active 2h ago]
+items         (5): wi_aaa (urgent) "critical DB migration" [queued]
+                   wi_bbb (high)   "auth refactor" [queued]
+                   ... +3 more
+stalled       (1): wi_ccc "upgrade deps" blocked by: wi_ddd
+paused        (0):
+needs you     (1): wi_eee "design new billing API" [requires_human_session]
+unclassified  (2): wi_fff (wi_type not set - run /pf-work <slug> to classify)
+                   wi_ggg
+stale running (1): wi_hhh "migrate search index" [running, untouched >24h]
 ```
 
 3. Highlight segments needing attention:
-   - `needs you` → bold, shown first
-   - `stalled` → show blocker wi slug
+   - `needs you` -> bold, shown first
+   - `stalled` -> show blocker wi slug
    - Idle `running` detection is server-side: >24h untouched arrives as its own
      `stale_running` segment (ownership has no lease, so there is nothing to expire client-side)
 
 4. Output three-segment format. "Next steps" section suggests the most important next action
-   (e.g., "2 items need human-led sessions — run `/pf-work <slug>` to start").
+   (e.g., "2 items need human-led sessions - run `/pf-work <slug>` to start").
 
 ## Output format notes
 
-- `running`: show attempt owner (display name) and last-active age — the segment carries
+- `running`: show attempt owner (display name) and last-active age - the segment carries
   `id/slug/goal/owner_display/last_active_at` and nothing else (no attempt number, no expiry:
   the lease family was deleted in v1.21)
 - `items` (ready queue): show priority, truncated goal (60 chars), status
 - `stalled`: show which wi_id is blocking
 - `needs you`: these are `requires_human_session=true` wi's awaiting a human session
-- `stale_running`: running but untouched for >24h — candidates for takeover via `/pf-work`
+- `stale_running`: running but untouched for >24h - candidates for takeover via `/pf-work`
 - `unclassified`: wi's with `wi_type=NULL` that cannot be claimed until classified
 
 ## NL Triggers

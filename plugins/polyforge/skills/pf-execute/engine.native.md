@@ -1,25 +1,26 @@
-# pf-execute — native engine (Wi Agent main loop)
+# pf-execute - native engine (Wi Agent main loop)
 
 > Injected when `superpowers` is absent; bracket / ship / wrap come from `_common/lifecycle.md`.
-> 📄 **`Read @@PLUGIN_ROOT@@/skills/pf-execute/references/engine-native-details.md` before step 1**
-> — startup commands, the `@include` rule, the rhs=true loop, older-binary fallbacks.
+> **`Read @@PLUGIN_ROOT@@/skills/pf-execute/references/engine-native-details.md` before step 1**
+> - startup commands, the `@include` rule, the rhs=true loop, older-binary fallbacks.
 
-## Startup — 🔴 run the on-demand file §0 first
+## Startup - run the on-demand file §0 first
 
 §0 carries all six startup steps verbatim: the scenario clone at
 `<workspace_root>/.repo/<owner>__<repo>/`, **pinning its SHA** into `.pf_meta.json`, template
-resolution, section scan, `@include` expansion at that sha. `Read` it — the fallback chain, the
+resolution, section scan, `@include` expansion at that sha. `Read` it - the fallback chain, the
 pinning and the `@include`/`level:` pair rule are each easy to get subtly wrong.
 
-Prior-step context = `pf_get_step` → `completed_steps`; nothing writes a worktree step file.
+Prior-step context = `pf_get_step` -> `completed_steps`; nothing writes a worktree step file.
 
 ## Execute (rhs=false, auto mode)
 
 ```python
 # Model tier by STEP KIND (aihub#338): review steps dispatch on the raised tier, every other
-# step on the default. Keyed on the step id, never on `level:` — that is review DEPTH, a
+# step on the default. Keyed on the step id, never on `level:` - that is review DEPTH, a
 # different parameter that happens to share the key name (§0f has the mapping and its gate).
-DEFAULT_TIER, RAISED_TIER = "sonnet", "opus"
+# The models live ONLY in the agent files (agents/*.md); the loop picks WHICH agent.
+STEP_AGENT, REVIEW_AGENT = "polyforge:step-executor", "polyforge:step-reviewer"
 def is_review(sid):
     return sid.endswith("_review") or sid in ("review", "code_review", "release_review")
 
@@ -29,10 +30,10 @@ pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_p
 for i, (step_id, content) in enumerate(sections):
     expanded = expand_includes(content, sha)
 
-    # Dispatch by copying §0b's Agent-call template VERBATIM. `model` is a REQUIRED argument
-    # of that template, filled with the literal tier name — an omitted model is NOT the
-    # default tier, it silently inherits the session's model (aihub#544 measured 3/3).
-    dispatch Agent(model=RAISED_TIER if is_review(step_id) else DEFAULT_TIER, prompt=§0b)
+    # Dispatch by copying §0b's Agent-call template VERBATIM. subagent_type is the ONLY
+    # model channel: the agent file carries the model, and an explicit model argument
+    # silently OVERRIDES the file (aihub#555 measured) - NEVER pass one.
+    dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT, prompt=§0b)
 
     if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
         break   # stop the loop; no retry, and do NOT call pf_complete_attempt (§0e)
@@ -59,12 +60,12 @@ for i, (step_id, content) in enumerate(sections):
 ```
 
 **`parse_review_result(output)`** = the LAST `<!-- REVIEW_RESULT: (PASS|WARN|FAIL) -->` match;
-no marker → warn it is missing and return `WARN`, never an auto-fail.
+no marker -> warn it is missing and return `WARN`, never an auto-fail.
 
-**The model tier is keyed on the step's KIND, never on `level:`** — §0f has the contract, the
+**The model tier is keyed on the step's KIND, never on `level:`** - §0f has the contract, the
 mapping and its gate.
 
 ## Execute (rhs=true, interactive mode)
 
-Same bracket and completion call; you present each step instead of dispatching. 📄 **`Read` §1
-first** — `skip` **completes** the step (§1b), and §0d has the startup three-segment values.
+Same bracket and completion call; you present each step instead of dispatching. **`Read` §1
+first** - `skip` **completes** the step (§1b), and §0d has the startup three-segment values.

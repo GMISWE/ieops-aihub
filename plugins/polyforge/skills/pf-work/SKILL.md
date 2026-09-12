@@ -6,24 +6,24 @@ description: >
   agent.
 ---
 
-# pf-work — Work Item Lifecycle Entry
+# pf-work - Work Item Lifecycle Entry
 
 ## Usage
 
-**Purpose**: Enter the wi lifecycle — create a new wi, claim a queued one, resume a paused one, or force-takeover a stalled one.
+**Purpose**: Enter the wi lifecycle - create a new wi, claim a queued one, resume a paused one, or force-takeover a stalled one.
 
 **Pattern**: `/pf-work [<slug>] [--resume | --force]`
 
 **Required**: none (no-arg = create-new dialog; with `<slug>` = claim/resume/takeover)
 
 **Flags**:
-- `--resume` — resume a paused wi (Mode C)
-- `--force` — force-takeover an idle/expired wi (Mode D); destructive against current claimer, requires `reason`
-- `--silent` / silent-mode trigger — Mode A: create + queue without prompting to claim (NL trigger, not a literal CLI flag)
+- `--resume` - resume a paused wi (Mode C)
+- `--force` - force-takeover an idle/expired wi (Mode D); destructive against current claimer, requires `reason`
+- `--silent` / silent-mode trigger - Mode A: create + queue without prompting to claim (NL trigger, not a literal CLI flag)
 
 ## When to use
 
-Any time the user wants to begin working on something — new task, picking up a queued
+Any time the user wants to begin working on something - new task, picking up a queued
 item, resuming yesterday's work, or taking over a stalled wi from another agent.
 
 ## Architecture rules
@@ -40,13 +40,13 @@ Invocation modes:
 
 ### Post-claim routing
 
-Two fragments own the two branches, and their names are nearly identical — do not reach for
+Two fragments own the two branches, and their names are nearly identical - do not reach for
 the wrong one:
 
 | after a claim, if `requires_human_session` is | authority | tier |
 |---|---|---|
-| `true` — you will emit three-segment output | `fragments/post-claim-routing.md` | on-demand, **`Read` it** |
-| `false` — you will not | `fragments/post-claim-dispatch.md` | resident, already in context |
+| `true` - you will emit three-segment output | `fragments/post-claim-routing.md` | on-demand, **`Read` it** |
+| `false` - you will not | `fragments/post-claim-dispatch.md` | resident, already in context |
 
 `## Post-claim Next steps Routing` is the **single source of truth** for what to suggest in
 "Next steps" **on the `true` branch**, and applies to **all** skills that emit three-segment
@@ -54,16 +54,16 @@ output (not just `pf-work`). It lives in `fragments/post-claim-routing.md` under
 `using-polyforge` skill directory. It says nothing about the `false` branch, which emits no
 "Next steps" at all.
 
-🔴 **`Read` that file before emitting the list — do not answer from session context.** It is
+**`Read` that file before emitting the list - do not answer from session context.** It is
 deliberately NOT part of the auto-injected session-start payload (that payload has a hard
 size budget; see `using-polyforge/references/manifest-notes.md`), so it is *not* already
 in your context.
 This SKILL.md previously claimed the backreference "resolves reliably" because
-`using-polyforge` is auto-loaded; that was false — the section sat at character 5,856 of an
+`using-polyforge` is auto-loaded; that was false - the section sat at character 5,856 of an
 18,286-character payload that the harness truncated to a ~2,000-character preview, so it
 reached no model at all (aihub#285). Resolve it by reading the file, not by recall.
 
-### Mode A — New wi (default, triggered by intent to start something new)
+### Mode A - New wi (default, triggered by intent to start something new)
 
 1. **Memory-First** (using-polyforge handles this at session start; surface results).
 
@@ -73,7 +73,7 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ```bash
    scenario_url  = project.scenario  // from .polyforge.yaml
    owner, repo   = <the last two path segments of the URL, strip .git>
-                   // "git@github.com:GMISWE/polyforge-coding.git" → "GMISWE", "polyforge-coding"
+                   // "git@github.com:GMISWE/polyforge-coding.git" -> "GMISWE", "polyforge-coding"
                    // a URL with only ONE path segment has no owner: use the bare repo name
    scenario_path = <workspace_root>/.repo/<owner>__<repo>/
                    // Owner-qualified. Keying on the repo name alone gave two orgs'
@@ -89,7 +89,7 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
           as scenario_url (ignore scheme, credentials and .git):
            scenario_path = legacy
        else:
-           STOP: "⚠️ Scenario repo not cloned at <scenario_path>; please run polyforge init first."
+           STOP: "Scenario repo not cloned at <scenario_path>; please run polyforge init first."
            // Never read a legacy directory whose origin is a different repo: an
            // unguarded fallback re-opens the silent cross-owner mix-up.
 
@@ -132,19 +132,19 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ```
 
    AI infers wi_type from goal description + complexity, **matching against available_wi_types**:
-   - Bug, root cause clear, small change → `fix_bug`
-   - Bug, large impact or root cause unknown → `critical_bug`
-   - Feature needing design decisions → `feature`
-   - Simple maintenance, no design needed → `chore`
+   - Bug, root cause clear, small change -> `fix_bug`
+   - Bug, large impact or root cause unknown -> `critical_bug`
+   - Feature needing design decisions -> `feature`
+   - Simple maintenance, no design needed -> `chore`
    - …other wi_types defined by .md files in the project's scenario repo
 
    **If no project scenario configured** OR **validate_wi_type returns "error"**:
-   → Fall back to built-in `default` wi_type (`requires_human_session=true`, steps=[]).
-   Notify user: "⚠️ Could not match wi_type, using default (requires human session)."
+   -> Fall back to built-in `default` wi_type (`requires_human_session=true`, steps=[]).
+   Notify user: "Could not match wi_type, using default (requires human session)."
 
    **If validate_wi_type returns "warn"**:
-   → Proceed with the generic .md flow; notify user:
-   "⚠️ {wi_type}.{project}.md not found, will use the generic flow {wi_type}.md."
+   -> Proceed with the generic .md flow; notify user:
+   "{wi_type}.{project}.md not found, will use the generic flow {wi_type}.md."
 
 2b. **AI extracts content draft from conversation**:
     From the current session conversation, extract a content draft describing the problem:
@@ -152,12 +152,12 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
     - Context: relevant information, known constraints, related discussions
     - Do NOT include solution approach (that belongs in spec/plan)
 
-    **Split the facts into two labelled groups — every claim goes in one of them:**
-    - **Measured** — you ran it or read it this session; cite the command, or the file plus
-      the symbol (`internal/domain/memory.go` (`UpdateMemory`)). **Never a line number** —
+    **Split the facts into two labelled groups - every claim goes in one of them:**
+    - **Measured** - you ran it or read it this session; cite the command, or the file plus
+      the symbol (`internal/domain/memory.go` (`UpdateMemory`)). **Never a line number** -
       wi bodies are not C1-gated, so an anchor written here rots with nothing going red
       (README "How docs cite code"; aihub#411 T1-13 named this line as the source).
-    - **Unverified / inferred** — say so, and name the one command that would settle it.
+    - **Unverified / inferred** - say so, and name the one command that would settle it.
 
     A plausible reading that was never run is the usual way a wi ships a spec whose premise
     is false; the executing agent then either loses the run to it or delivers a no-op that
@@ -178,9 +178,9 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ```
    pf_predict_conflicts(declared_resources=<new wi's resources>, dry_run=true)
    ```
-   Show impact. If hard conflict → stop and explain. Severity ceiling (aihub#416): repo and
+   Show impact. If hard conflict -> stop and explain. Severity ceiling (aihub#416): repo and
    service entries derive no lock, so a repo/service-only declaration can never report
-   `hard_block` — a repo overlap reports `soft_block`, a service overlap `info`, both from a
+   `hard_block` - a repo overlap reports `soft_block`, a service overlap `info`, both from a
    join on other running wi's declarations. Both are advisory and do not stop creation:
    show them and let the human judge. Read `info` as "somebody else declares it, judge for
    yourself", NOT as "checked, no conflict".
@@ -197,16 +197,16 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
      content=<confirmed draft>
    )
    ```
-   - `400 PROJECT_NOT_FOUND` → prompt to create project first
-   - `409 DUPLICATE` → show existing wi, ask: "Continue new / Claim existing / Cancel"
-   - `409 CANDIDATES` → show candidate list, ask user to choose
+   - `400 PROJECT_NOT_FOUND` -> prompt to create project first
+   - `409 DUPLICATE` -> show existing wi, ask: "Continue new / Claim existing / Cancel"
+   - `409 CANDIDATES` -> show candidate list, ask user to choose
 
 5. **Interactive confirmation** (dialog mode) / **Silent** (silent mode):
 
    **dialog mode** (default):
    Output: "Created <slug> (<goal[:40]>). Claim and start working on it now?"
    
-   → human says "yes" / "do it" / "claim" → claim directly (skip predict_conflicts, the wi was just created and has no locks):
+   -> human says "yes" / "do it" / "claim" -> claim directly (skip predict_conflicts, the wi was just created and has no locks):
      ```
      pf_claim_work_item(
        work_item_id=<wi_id>,
@@ -217,24 +217,24 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
      ```
      pf_recall(project=<wi.project>, work_item_id=<wi_id>, top_k=10)
      ```
-     ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
+     No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
      where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
      **rhs routing** (wi.requires_human_session):
-     - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+     - `false` -> **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
        for this branch** and is injected at session start on all three harnesses
        (hooks/hooks.json, codex-hooks.json, copilot-hooks.json). If it is NOT in your
-       context — you are a subagent — `Read` it before acting.
-     - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
+       context - you are a subagent - `Read` it before acting.
+     - `true`  -> emit three-segment output ("Next steps" decided per the Post-claim routing table - `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
    
-   → human says "no" / "not now" / "leave it" → emit three-segment output, wi stays on the queue.
+   -> human says "no" / "not now" / "leave it" -> emit three-segment output, wi stays on the queue.
 
    **silent mode** (state "use silent mode" or "silent create" when invoking):
    emit three-segment output directly, do not ask, do not claim, wi stays on the queue.
 
    **Filing several at once (silent mode only)**: use `pf_batch_create_work_items` instead of
-   one `pf_create_work_item` per item — repeated single calls cost one MCP round-trip each,
+   one `pf_create_work_item` per item - repeated single calls cost one MCP round-trip each,
    and a round-trip costs the whole request prefix rather than the size of its response
-   (aihub#290: 134 measured adjacent create→create pairs, 0.171% of billed input).
+   (aihub#290: 134 measured adjacent create->create pairs, 0.171% of billed input).
 
    ```
    pf_batch_create_work_items(
@@ -247,27 +247,27 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    ```
 
    - Items are created independently; one failure does not stop the rest. Read `created` and
-     `failed` separately — **`ok:true` is not implied by the call returning**.
+     `failed` separately - **`ok:true` is not implied by the call returning**.
    - Each `failed` entry carries its `index`, so retry by resending only those items. Do not
      resend the whole array: the ones that already landed would then trip dedup.
    - Duplicate detection still runs per item, so a `409 DUPLICATE` / `409 CANDIDATES` on one
-     item is a normal per-item outcome — surface it the same way Step 4 does for a single wi.
+     item is a normal per-item outcome - surface it the same way Step 4 does for a single wi.
    - This is silent mode only. Dialog mode confirms one draft at a time, so batching there
      would skip the confirmation each wi is supposed to get.
    - **Compatibility**: if `pf_batch_create_work_items` is not among the available tools, the
-     server binary predates aihub#290 — fall back to one `pf_create_work_item` per item.
+     server binary predates aihub#290 - fall back to one `pf_create_work_item` per item.
 
 6. Output three-segment format.
 
 ---
 
-### Mode B — Claim existing queued wi (`/pf-work <slug>`)
+### Mode B - Claim existing queued wi (`/pf-work <slug>`)
 
-1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` → conflict preview. Since aihub#564
+1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` -> conflict preview. Since aihub#564
    the preview excludes this wi's own locks and declarations, so any soft_block/hard_block it
-   shows is held by somebody else — do not dismiss one as "probably my own earlier attempt".
+   shows is held by somebody else - do not dismiss one as "probably my own earlier attempt".
 2. `pf_claim_work_item(work_item_id=<slug>, ...)`
-3. After successful claim — recall wi-linked memories:
+3. After successful claim - recall wi-linked memories:
    ```python
    wi_memories = pf_recall(
      project=<wi.project>,
@@ -278,45 +278,45 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    Display any results so the agent has full historical context for this wi.
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
-   ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
+   No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 4. **rhs routing** (wi.requires_human_session):
-   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+   - `false` -> **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
      for this branch** and is injected at session start on all three harnesses
      (hooks/hooks.json, codex-hooks.json, copilot-hooks.json). If it is NOT in your
-     context — you are a subagent — `Read` it before acting.
-   - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
+     context - you are a subagent - `Read` it before acting.
+   - `true`  -> emit three-segment output ("Next steps" decided per the Post-claim routing table - `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 
-### Mode C — Resume paused wi (`/pf-work <slug> --resume`)
+### Mode C - Resume paused wi (`/pf-work <slug> --resume`)
 
 1. ```
    pf_claim_work_item(
      work_item_id=<slug>,
      idempotency_key=<client ULID>
-     // Do NOT pass scenario_ref — COALESCE on server preserves the original pinned SHA
+     // Do NOT pass scenario_ref - COALESCE on server preserves the original pinned SHA
    )
    ```
    **There is no resume flag, and resuming needs none.** Step state lives server-side in
    `wi_step_state`, keyed by work item and not by attempt, so *every* claim of this wi sees
-   the same `current_step` and the same completed history — read it with `pf_get_step`, whose
+   the same `current_step` and the same completed history - read it with `pf_get_step`, whose
    `completed_steps[]` is the authoritative record. The prepared workspace comes back the same
    way: the claim reuses the existing `pf.<project>-<seq>/<repo>/` worktree if it is still
    there, and otherwise attaches to the branch that already holds the work (see §Which branch
    a claim attaches to).
 
-   > ⚠️ This skill used to send `mode="resume"` here and promise that it "restores step state
-   > from the previous attempt". The parameter selected nothing — both values ran the identical
-   > server path — so the sentence credited a flag for something the work item's own state was
+   > This skill used to send `mode="resume"` here and promise that it "restores step state
+   > from the previous attempt". The parameter selected nothing - both values ran the identical
+   > server path - so the sentence credited a flag for something the work item's own state was
    > doing. `mode` was withdrawn from the schema in aihub#394. Do not reintroduce it: the
    > claim gate (`internal/mcp/claim_param_contract_test.go`) fails any published claim
    > parameter the server's claim path does not act on.
 
-   > ⚠️ If this wi was originally claimed on a different machine, the pinned
+   > If this wi was originally claimed on a different machine, the pinned
    > `scenario_ref` SHA may not exist in the local clone. pf-execute will auto-fetch
    > if needed, but verify local scenario clone is current: `polyforge init`.
-2. After successful claim — recall wi-linked memories:
+2. After successful claim - recall wi-linked memories:
    ```python
    wi_memories = pf_recall(
      project=<wi.project>,
@@ -327,19 +327,19 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
    Display any results so the agent has full historical context for this wi.
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
-   ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
+   No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 3. Show step progress: "Resuming at step 2/4 (review)".
 4. **rhs routing** (wi.requires_human_session):
-   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+   - `false` -> **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
      for this branch** and is injected at session start on all three harnesses
      (hooks/hooks.json, codex-hooks.json, copilot-hooks.json). If it is NOT in your
-     context — you are a subagent — `Read` it before acting.
-   - `true`  → emit three-segment output (including step progress; "Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
+     context - you are a subagent - `Read` it before acting.
+   - `true`  -> emit three-segment output (including step progress; "Next steps" decided per the Post-claim routing table - `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 
-### Mode D — Force takeover (`/pf-work <slug> --force`)
+### Mode D - Force takeover (`/pf-work <slug> --force`)
 
 Permission rules:
 - `writer` can take over any running wi (claim is static ownership; takeover is always explicit)
@@ -347,8 +347,8 @@ Permission rules:
 
 Steps:
 1. `pf_force_takeover(work_item_id=<slug>, reason=<user input>)`
-2. `pf_claim_work_item(...)` — a normal claim; there is no mode to pass.
-4. After successful claim — recall wi-linked memories:
+2. `pf_claim_work_item(...)` - a normal claim; there is no mode to pass.
+4. After successful claim - recall wi-linked memories:
    ```python
    wi_memories = pf_recall(
      project=<wi.project>,
@@ -359,21 +359,21 @@ Steps:
    Display any results so the agent has full historical context for this wi.
    This call is made in ALL claim modes (A/B/C/D) to ensure memories linked by previous
    claimers (including after force_takeover) are always surfaced.
-   ⚠️ No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
+   No `fields="brief"` on any claim path (aihub#313): these are wi-scoped handoff notes
    where the BODY is the payload. Briefing them makes a resuming agent fetch all ten by id.
 5. **rhs routing** (wi.requires_human_session):
-   - `false` → **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
+   - `false` -> **`fragments/post-claim-dispatch.md` in `using-polyforge` is authoritative
      for this branch** and is injected at session start on all three harnesses
      (hooks/hooks.json, codex-hooks.json, copilot-hooks.json). If it is NOT in your
-     context — you are a subagent — `Read` it before acting.
-   - `true`  → emit three-segment output ("Next steps" decided per the Post-claim routing table — `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
+     context - you are a subagent - `Read` it before acting.
+   - `true`  -> emit three-segment output ("Next steps" decided per the Post-claim routing table - `Read` `fragments/post-claim-routing.md` in `using-polyforge`, it is NOT in context (see §Post-claim routing above)), wait for human session.
 
 ---
 
 ### State file management
 
 After a successful claim, `<workspace>/.polyforge/state/<wi_id>.json` holds the
-`config.StateFile` struct — these keys and no others:
+`config.StateFile` struct - these keys and no others:
 ```json
 {
   "wi_id": "wi_xxx",
@@ -392,13 +392,13 @@ After a successful claim, `<workspace>/.polyforge/state/<wi_id>.json` holds the
 Every key except `wi_id`, `attempt_id`, `claim_epoch`, `session_secret` and
 `claimed` is `omitempty`, so it is absent rather than empty when unset.
 
-⚠️ This block used to list `workspace_root`, `repo` and `task_branch`. **None of
-the three has ever been a key of `StateFile`** — the workspace root is resolved
+This block used to list `workspace_root`, `repo` and `task_branch`. **None of
+the three has ever been a key of `StateFile`** - the workspace root is resolved
 at use time from `POLYFORGE_WORKSPACE_ROOT` or by walking up for
 `.polyforge.yaml`; a claim covers every repo in the project, so the per-repo
 paths live in `worktrees`; and `task_branch` is a field of a `declared_resources`
-entry, not of this file. The names do occur elsewhere — `workspace_root` is a
-parameter on the `pf_*` coding tools — so do not go looking for them here.
+entry, not of this file. The names do occur elsewhere - `workspace_root` is a
+parameter on the `pf_*` coding tools - so do not go looking for them here.
 
 ### Task branch naming
 
@@ -409,12 +409,12 @@ The claim creates one worktree per project repo at
 polyforge/<project>-<seq>-<short-kebab-goal>     e.g. polyforge/aihub-322-readable-task-branch-names
 ```
 
-It is **computed at claim time and stored nowhere** — not in the state file, not
+It is **computed at claim time and stored nowhere** - not in the state file, not
 on the work item. Nothing downstream re-derives it either: `pf_ship`, `pf_pr`,
 `pf_push` and `pf_wrap` all read the current branch out of the worktree with
 `git rev-parse --abbrev-ref HEAD`.
 
-Degradations, in order — the goal is free text and frequently Chinese, and the
+Degradations, in order - the goal is free text and frequently Chinese, and the
 result must always be a legal git ref:
 
 | Situation | Branch |
@@ -430,7 +430,7 @@ one repo may be listed under two projects in `.polyforge.yaml`.
 
 ### Which branch a claim attaches to
 
-Branches created before plugin 1.1.18 are named `polyforge/<ulid8>` — the last 8
+Branches created before plugin 1.1.18 are named `polyforge/<ulid8>` - the last 8
 characters of the wi id. **They keep those names.** And because the name above is
 derived from the goal, which is editable, the name a claim computes today need
 not be the name the branch was created under. So every claim first looks for a
@@ -442,7 +442,7 @@ one glob comes last:
 
 1. the current name, `polyforge/<project>-<seq>-<kebab goal>`;
 2. the legacy `polyforge/<ulid8>`;
-3. the bare `polyforge/<project>-<seq>` — table row 2, which a Chinese-only goal
+3. the bare `polyforge/<project>-<seq>` - table row 2, which a Chinese-only goal
    produces, and which is common rather than exotic. It comes *after* the legacy
    name because a stem-shaped branch has a second producer: the
    `declared_resources[].task_branch` field is set by hand, and work items do
@@ -451,7 +451,7 @@ one glob comes last:
    created by this system for this work item;
 4. any **single** branch matching `polyforge/<project>-<seq>-*`. This covers a
    goal edited after the claim. Note it does **not** match the bare
-   `polyforge/<project>-<seq>` — a glob with a trailing `-*` never can — which is
+   `polyforge/<project>-<seq>` - a glob with a trailing `-*` never can - which is
    exactly why step 3 exists as its own exact lookup. Two matches means the goal
    was edited twice, and the lookup declines rather than guess. Skipped entirely
    unless *both* `<project>` and `<seq>` survived: half a stem is not an identity,
@@ -465,9 +465,9 @@ a branch found via `origin/` that also exists locally is checked out rather than
 re-created.
 
 Mapping the table onto the steps, so the two sections cannot drift apart: row 1
-→ step 1, row 2 → step 3, row 5 (`polyforge/<ulid8>`) → step 2. Rows 3 and 4 —
+-> step 1, row 2 -> step 3, row 5 (`polyforge/<ulid8>`) -> step 2. Rows 3 and 4 -
 `polyforge/<project>[-<kebab goal>]` and `polyforge/<seq>[-<kebab goal>]`, one
-component unusable — are reached by step 1 only, since that degraded form *is*
+component unusable - are reached by step 1 only, since that degraded form *is*
 the name computed today. Step 4 is skipped for them, so for those two rows alone
 a goal edited after the claim is **not** recoverable and the claim starts a new
 branch. That bites specifically on the **goal-bearing** variant: with no goal
@@ -476,14 +476,14 @@ lose. It is the accepted cost of a work item whose project or seq contains no
 `[a-z0-9]` at all; the earlier branch still exists under its own name and
 nothing is lost from it.
 
-⚠️ This applies on **every** claim — a first claim, a resume and a force takeover
+This applies on **every** claim - a first claim, a resume and a force takeover
 alike. It is decided from what exists in the clone, and there is nothing a caller
 can pass to steer it. That was already true when `pf_claim_work_item` still took a
 `mode` argument (aihub#322 stopped keying the branch decision on it); aihub#394 then
 withdrew the argument itself, because selecting nothing was all it ever did.
 
 None of this is reached while the worktree directory
-`<workspace>/pf.<project>-<seq>/<repo>/` still exists — that is reused as-is,
+`<workspace>/pf.<project>-<seq>/<repo>/` still exists - that is reused as-is,
 whatever branch it happens to be on.
 
 ## NL Triggers

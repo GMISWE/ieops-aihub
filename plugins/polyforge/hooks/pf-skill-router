@@ -112,15 +112,15 @@ TARGETS = {
         "(with TDD / systematic-debugging / code-review / verification as sub-engines per step). "
         "**Stop before `superpowers:finishing-a-development-branch`** — commit/PR/wrap/CI go back to polyforge.\n\n"
         # aihub#557: the tier names below are @@…@@ placeholders, NOT literals. This pointer used
-        # to hand-copy "sonnet"/"opus", making it a copy of the mapping that nothing compared to
-        # the DEFAULT_TIER/RAISED_TIER constants (the three copies inside pf-execute's own docs
-        # are pinned to each other by internal/cli/engine_native_dispatch_model_test.go; this one
-        # was pinned only by output greps, which stay green through a re-tier). subst() now
-        # renders both from the SAME declaration the native branch executes — engine.native.md's
-        # constants line — so a re-tier moves both engine branches together.
-        # NOTE: aihub#555 (queued, gated) may later move the whole mapping into harness-native
-        # agent files; that supersedes this derivation. Single-sourcing here reduces what that
-        # move has to carry — it does not pre-empt it.
+        # to hand-copy the model names, making it a copy of the mapping that nothing compared to
+        # the declaration of record (the copies inside pf-execute's own docs are pinned to each
+        # other by internal/cli/engine_native_dispatch_model_test.go; this one was pinned only by
+        # output greps, which stay green through a re-tier). subst() renders both from the SAME
+        # source the harness reads — since aihub#555 that is the agent definition files'
+        # `model:` frontmatter (agents/*.md), the mapping's single copy — so a re-tier moves
+        # both engine branches together. The explicit `model` steering below stays correct for
+        # THIS branch only: superpowers' subagent-driven-development dispatches generic
+        # subagents, not the polyforge agent files, so there is no file to override here.
         "**Model policy for dispatched subagents.** subagent-driven-development selects a model per role by "
         "relative tier (cheap / standard / most-capable); resolve those tiers to concrete models and pass "
         "`model` explicitly on every Task dispatch:\n"
@@ -144,16 +144,24 @@ mode, step_id, artifact_type, recall_type, sp_pointer = TARGETS[base]
 plugin_root = os.environ.get("PF_PLUGIN_ROOT", "")
 skills_dir = os.path.join(plugin_root, "skills")
 
-# --- model-tier single source (aihub#557) ---------------------------------------------------
-# The mapping's declaration of record is engine.native.md's constants line — the text the
-# native branch executes. The regex is the same shape the Go gate uses
-# (internal/cli/engine_native_dispatch_model_test.go, tierConstantsRe), so what that gate pins
-# is exactly what this hook reads. TIERS is None when the line is missing or moved; subst()
-# turns that into an inert exit IF a fragment actually needs the values, so a tree without the
-# constants degrades to the stub fallback rather than emitting raw @@…@@ placeholders.
-TIER_RE = re.compile(r'DEFAULT_TIER, RAISED_TIER = "([a-z][a-z0-9.-]*)", "([a-z][a-z0-9.-]*)"')
-_tier_m = TIER_RE.search(read(os.path.join(skills_dir, "pf-execute", "engine.native.md")) or "")
-TIERS = (_tier_m.group(1), _tier_m.group(2)) if _tier_m else None
+# --- model-tier single source (aihub#557, re-sourced by aihub#555) --------------------------
+# The mapping's declaration of record is the agent definition files' `model:` frontmatter
+# (agents/step-executor.md = default tier, agents/step-reviewer.md = raised tier) — the text
+# the HARNESS reads when the native loop dispatches those agents, so this hook and the
+# dispatch share one source. The same files are pinned by the Go gate
+# (internal/cli/engine_native_dispatch_model_test.go, agentModelRe), so what that gate pins is
+# exactly what this hook reads. TIERS is None when either file or its model line is missing;
+# subst() turns that into an inert exit IF a fragment actually needs the values, so a tree
+# without the agent files degrades to the stub fallback rather than emitting raw @@…@@
+# placeholders.
+AGENT_MODEL_RE = re.compile(r'(?m)^model:[ \t]*([a-z][a-z0-9.-]*)[ \t]*$')
+def _agent_model(fname):
+    txt = read(os.path.join(plugin_root, "agents", fname)) or ""
+    fm = re.match(r"\A---\n(.*?)\n---", txt, re.S)  # frontmatter block only, never the body
+    m = AGENT_MODEL_RE.search(fm.group(1)) if fm else None
+    return m.group(1) if m else None
+_tiers = (_agent_model("step-executor.md"), _agent_model("step-reviewer.md"))
+TIERS = _tiers if (_tiers[0] and _tiers[1]) else None
 
 # --- detect superpowers: walk payload.cwd up to .polyforge.yaml, scan 4 settings layers ---
 def find_ws(start):
@@ -217,9 +225,9 @@ def subst(txt):
     out = (txt.replace("@@RECALL_TYPE@@", rendered)
               .replace("@@ARTIFACT_TYPE@@", artifact_type)
               .replace("@@PLUGIN_ROOT@@", plugin_root))
-    # @@DEFAULT_TIER@@ / @@RAISED_TIER@@ render from engine.native.md's constants line
-    # (aihub#557, see TIERS above). Guarded by presence, not by mode: any fragment that
-    # names a tier gets the derived value, and if the source line is gone the hook goes
+    # @@DEFAULT_TIER@@ / @@RAISED_TIER@@ render from the agent files' model frontmatter
+    # (aihub#557/aihub#555, see TIERS above). Guarded by presence, not by mode: any fragment
+    # that names a tier gets the derived value, and if the source files are gone the hook goes
     # inert (fail-silent, the stub fallback takes over) rather than shipping a payload
     # with raw placeholders where a model name should be.
     if "@@DEFAULT_TIER@@" in out or "@@RAISED_TIER@@" in out:

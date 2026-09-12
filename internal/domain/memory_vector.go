@@ -99,12 +99,12 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	args = append(args, embProvider.ModelID())
 	idx++
 
-	// Visibility scoping — mirrors Recall's predicate exactly.
-	if req.CallerRole != "admin" {
-		where += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
-		args = append(args, req.CallerUserID)
-		idx++
-		where += ` AND visibility != 'admin'`
+	// Visibility scoping — the same memoryVisibilityScopeSQL call Recall's text
+	// path makes (aihub#379: one SQL copy, not a mirror that can drift).
+	if clause, visArgs, nextIdx := memoryVisibilityScopeSQL(req.CallerRole, req.CallerUserID, idx); clause != "" {
+		where += clause
+		args = append(args, visArgs...)
+		idx = nextIdx
 	}
 
 	// Type filter with prefix matching.

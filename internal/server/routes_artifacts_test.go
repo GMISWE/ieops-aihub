@@ -78,9 +78,17 @@ func TestArtifactHTML_RouteParamPlain(t *testing.T) {
 	}
 }
 
-// TestArtifactHTML_VisibilityPrivate_Forbidden verifies the inline-visibility
-// helper rejects a private memory when the caller is not the author.
-func TestArtifactHTML_VisibilityPrivate_Forbidden(t *testing.T) {
+// TestArtifactHTML_VisibilityPrivate_NotFound verifies the shared visibility
+// gate rejects a private memory when the caller is not the author.
+//
+// aihub#379 CONTRACT CHANGE — this expectation moved from 403 to 404 on
+// purpose, it is not a red test adjusted to green. checkMemoryVisibility used
+// to answer 403 "this memory is private to its author", which confirmed to a
+// project member both that the row exists and which tier hides it, while
+// handleGetMemory answered the identical condition with the shared 404 and
+// every list path silently dropped the row. The denial is now errNotVisible():
+// byte-identical to "no such id".
+func TestArtifactHTML_VisibilityPrivate_NotFound(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_x/html", nil)
 	rec := httptest.NewRecorder()
@@ -95,8 +103,11 @@ func TestArtifactHTML_VisibilityPrivate_Forbidden(t *testing.T) {
 	if err := checkMemoryVisibility(c, otherViewerUser(), mem); err == nil {
 		t.Fatalf("expected error for non-author on private memory")
 	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status: got %d, want 403", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want 404 (aihub#379: visibility denials are existence-hiding)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), notVisibleMessage) {
+		t.Fatalf("body must carry the shared notVisibleMessage, got: %s", rec.Body.String())
 	}
 }
 
@@ -119,9 +130,13 @@ func TestArtifactHTML_VisibilityPrivate_AuthorOK(t *testing.T) {
 	}
 }
 
-// TestArtifactHTML_VisibilityAdmin_NonAdminForbidden asserts admin-only
+// TestArtifactHTML_VisibilityAdmin_NonAdminNotFound asserts admin-only
 // visibility blocks writers.
-func TestArtifactHTML_VisibilityAdmin_NonAdminForbidden(t *testing.T) {
+//
+// aihub#379 CONTRACT CHANGE — moved from 403 ("this memory requires admin
+// role") to the shared 404, deliberately; see
+// TestArtifactHTML_VisibilityPrivate_NotFound for the rationale.
+func TestArtifactHTML_VisibilityAdmin_NonAdminNotFound(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts/mem_x/html", nil)
 	rec := httptest.NewRecorder()
@@ -129,10 +144,13 @@ func TestArtifactHTML_VisibilityAdmin_NonAdminForbidden(t *testing.T) {
 
 	mem := &domain.Memory{Visibility: "admin", Project: "testproj"}
 	if err := checkMemoryVisibility(c, authorUser(), mem); err == nil {
-		t.Fatalf("expected forbidden for non-admin on admin-visibility memory")
+		t.Fatalf("expected denial for non-admin on admin-visibility memory")
 	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status: got %d, want 403", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want 404 (aihub#379: visibility denials are existence-hiding)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), notVisibleMessage) {
+		t.Fatalf("body must carry the shared notVisibleMessage, got: %s", rec.Body.String())
 	}
 }
 
@@ -2088,9 +2106,13 @@ func TestArtifactHTML_UI_AnnotationCommit_PreservesExactMarker_RoundTrip(t *test
 
 // TestArtifactHTML_UI_ExactVersionMarker_DoesNotBypassAuthorization pins AC12
 // of the amended spec: pf_exact must not widen what is authorized. A caller
-// denied the REQUESTED record (private, not the author) must still get 403
+// denied the REQUESTED record (private, not the author) must still be denied
 // even when the request carries ?pf_exact=1 — checkProjectAccess and
 // checkMemoryVisibility run unconditionally before the marker is ever read.
+//
+// aihub#379 CONTRACT CHANGE: the denial's shape moved from 403 to the shared
+// 404 (errNotVisible) — what AC12 pins is that the marker does not bypass the
+// gate, and that property is unchanged.
 func TestArtifactHTML_UI_ExactVersionMarker_DoesNotBypassAuthorization(t *testing.T) {
 	mem := &domain.Memory{
 		ID:           "mem_denied_exact",
@@ -2111,8 +2133,8 @@ func TestArtifactHTML_UI_ExactVersionMarker_DoesNotBypassAuthorization(t *testin
 	if err := handleArtifactHTML(nil)(c); err == nil {
 		t.Fatalf("expected an error for a denied record even with pf_exact=1")
 	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status: got %d, want 403 — pf_exact must not bypass authorization on the requested record (AC12); body=%s",
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status: got %d, want 404 — pf_exact must not bypass authorization on the requested record (AC12; aihub#379 moved the denial shape from 403 to the shared 404); body=%s",
 			rec.Code, excerptStr(rec.Body.String()))
 	}
 	if strings.Contains(rec.Body.String(), "secret") {

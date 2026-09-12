@@ -226,9 +226,9 @@ func handleArtifactHTML(pool *pgxpool.Pool) echo.HandlerFunc {
 		// The head is re-authorized here with the PURE predicates
 		// hasProjectAccess/memoryVisibleTo, never the side-effecting
 		// checkProjectAccess/checkMemoryVisibility above: those commit a
-		// 403/401 response to c on denial, which would leak "a newer version
-		// exists but you can't see it" on the very path meant to silently fall
-		// back to mem. UpdateMemory lets a new version's Visibility (and, in
+		// 404/401 response to c on denial, which would deny the caller a
+		// record they ARE authorized to read (mem) on the very path meant to
+		// silently fall back to it. UpdateMemory lets a new version's Visibility (and, in
 		// principle, Project) diverge from its predecessor's, so reusing the
 		// authorization decision already made for mem would be a privilege
 		// escalation onto the head. Any failure to resolve or authorize the
@@ -689,10 +689,11 @@ type sideRailMeta struct {
 // TestWIDetailVersionRail_OmitsLineageMembersTheCallerCannotSee. Adding a THIRD
 // renderer of a lineage means calling this, not re-deriving the rule.
 //
-// Still hand-inlined there: the visibility half of the rule for the artifact
-// HEADS fetchArtifactLinks lists (ui_handlers_wi.go, the `m.Visibility ==
-// "private"` guard). That one is defence in depth behind Recall's own filter,
-// not the sole gate, so it is a duplication rather than a hole.
+// The artifact HEADS fetchArtifactLinks lists (ui_handlers_wi.go) also go
+// through memoryVisibleTo since aihub#379 — the inline `m.Visibility ==
+// "private"` guard it used to carry was defence in depth behind Recall's own
+// filter rather than the sole gate, but it had drifted anyway: it lacked the
+// admin-tier arm.
 //
 // The partial *domain.Memory is the one sharp edge. memoryVisibleTo reads
 // Visibility and AuthorUserID and nothing else today, so every field it
@@ -1314,13 +1315,33 @@ func handleUnshareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 	}
 }
 
-// checkMemoryVisibility enforces the per-row visibility rules that recall
-// applies inline (memory.go ~L412-417). Extracted so handleArtifactHTML can
-// reuse the exact same policy.
+// checkMemoryVisibility is the ONE response-writing gate for per-memory
+// visibility: the verdict comes from memoryVisibleTo (the single Go copy of
+// the rule; its SQL twin is domain's memoryVisibilityScopeSQL), and a denial
+// is errNotVisible() — the same 404 bytes a nonexistent id earns.
 //
 //   - visibility='private' → only the author can read
 //   - visibility='admin'   → only global admin role
 //   - visibility='project' / 'team' → relies on the upstream project access check
+//
+// aihub#379, and this is a CONTRACT CHANGE, not a cleanup: this function used
+// to answer 403 with a tier-naming message ("this memory is private to its
+// author" / "this memory requires admin role") while handleGetMemory answered
+// the same condition with 404. The 404 side is the documented design —
+// handleGetMemory's header ("returns 404, never 403, so the endpoint can't be
+// used to probe for the existence of a memory the caller may not see",
+// aihub#249) — and it is the semantics every list path already implements:
+// Recall's text and vector predicates drop the row, the /ui memory list drops
+// it, and the artifact side rail renumbers version history precisely so a
+// member cannot tell a hidden version exists (aihub#248 W1/minor 4). A 403
+// naming the tier confirmed both existence and classification of a row every
+// other reader hides, so it was the drifted copy, not the norm. Intra-project
+// ROLE shortfalls on actions (share as viewer, write as viewer) keep their
+// explanatory 403 — that distinction is membership+role, not row visibility
+// (see r2Forbidden's positive control in project_visibility_gate_test.go).
+//
+// The unauthenticated branch stays 401: "who are you" is an authentication
+// answer, carries no fact about the row, and /ui's cookie flow depends on it.
 func checkMemoryVisibility(c echo.Context, u *UserContext, mem *domain.Memory) error {
 	if u == nil {
 		ae := domain.NewErr(domain.ErrUnauthorized, "not authenticated")
@@ -1330,11 +1351,7 @@ func checkMemoryVisibility(c echo.Context, u *UserContext, mem *domain.Memory) e
 	if memoryVisibleTo(u, mem) {
 		return nil
 	}
-	msg := "this memory is private to its author"
-	if mem.Visibility == "admin" {
-		msg = "this memory requires admin role"
-	}
-	ae := domain.NewErr(domain.ErrForbidden, msg)
+	ae := errNotVisible()
 	writeError(c, ae) //nolint:errcheck
 	return ae
 }

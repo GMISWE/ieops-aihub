@@ -599,7 +599,7 @@ func hasProjectAccess(u *UserContext, project, minRole string) bool {
 // Returns the full memory object (including status and latest_id, which the
 // list endpoint's lite scan omits). Applies the IDENTICAL project-access +
 // visibility/private filtering that domain.Recall's text-path predicate
-// applies (memory.go's `req.CallerRole != "admin"` block: private memories are
+// applies (memoryVisibilityScopeSQL since aihub#379: private memories are
 // visible only to their author, admin-tier memories only to admins) — a
 // caller who cannot see a memory via GET /v1/memories must not be able to see
 // it here either.
@@ -619,7 +619,11 @@ func handleGetMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "memory id is required"))
 		}
 
-		mem, aerr := domain.GetMemoryByID(ctx, pool, memID)
+		// loadMemoryFn is production-wired to domain.GetMemoryByID; the seam is
+		// shared with handleArtifactHTML/handleUIMemoryDetail so the three
+		// memory-reading entries can be driven through one override in tests
+		// (aihub#379's uniformity suite does exactly that).
+		mem, aerr := loadMemoryFn(ctx, pool, memID)
 		if aerr != nil {
 			// domain.GetMemoryByID already returns ErrNotFound for a missing or
 			// redacted row (its own 404), and ErrInternalError otherwise —
@@ -636,17 +640,16 @@ func handleGetMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// per-endpoint fingerprint: a caller who knows this endpoint says one thing
 		// and the wi endpoints say another can still tell which kind of object an
 		// id belonged to.
-		notFound := errNotVisible()
 		if !hasProjectAccess(u, mem.Project, "viewer") {
-			return writeError(c, notFound)
+			return writeError(c, errNotVisible())
 		}
-		if u.Role != "admin" {
-			if mem.Visibility == "private" && mem.AuthorUserID != u.UserID {
-				return writeError(c, notFound)
-			}
-			if mem.Visibility == "admin" {
-				return writeError(c, notFound)
-			}
+		// aihub#379: the per-row verdict comes from checkMemoryVisibility — the
+		// same single gate the artifact-HTML and /ui memory-detail handlers use —
+		// instead of a third inline copy of the private/admin rule. Its denial is
+		// errNotVisible(), so this handler keeps its documented property: every
+		// denial is byte-identical to "no such id".
+		if err := checkMemoryVisibility(c, u, mem); err != nil {
+			return err
 		}
 
 		return c.JSON(http.StatusOK, mem)

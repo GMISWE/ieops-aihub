@@ -80,6 +80,12 @@ const (
 	recallVectorPathFile = "memory_vector.go"
 )
 
+// recallVisibilityBuilderFile holds the ONE SQL copy of the visibility
+// predicate both paths share since aihub#379 (memoryVisibilityScopeSQL).
+// The presence arm reads the literal there; the both-paths arm then asserts
+// each path CALLS the builder with the caller's own role and id.
+const recallVisibilityBuilderFile = "memory_visibility.go"
+
 // readRecallCard returns the card's PROSE with every run of whitespace collapsed
 // to one space.
 //
@@ -225,6 +231,17 @@ func domainSQLStrings(t *testing.T, file string) []string {
 //	M4  the card rewords the predicate to `visibility <> 'private'`   RED (publication)
 //	M5  green control: reword the prose AROUND the two quoted
 //	    predicates without touching them                              GREEN
+//
+// aihub#379 moved the predicate into ONE shared builder
+// (memoryVisibilityScopeSQL, memory_visibility.go), so the arms were re-aimed:
+// presence/publication reads the builder file, and a new both-paths arm
+// requires each recall path to CALL the builder with CallerRole/CallerUserID.
+// The mutants' modern equivalents, applied to the reshaped tree and run
+// (2026-09-12):
+//
+//	M1' memory_vector.go drops its memoryVisibilityScopeSQL call      RED (both-paths)
+//	M2' a call site feeds the builder req.Query as the role           RED (both-paths args)
+//	M4' unchanged                                                     RED (publication)
 func TestRecallVisibilityScopingIsCallerDerivedOnBothPaths(t *testing.T) {
 	// The card quotes both predicates in backticks. `$n` is the card's spelling
 	// of a bind placeholder, so the comparison stops at the `$`: the index is a
@@ -236,28 +253,81 @@ func TestRecallVisibilityScopingIsCallerDerivedOnBothPaths(t *testing.T) {
 			"against, and this arm would assert only that the SQL matches itself.",
 			recallCardPath, len(quoted), quoted)
 	}
-	for _, path := range []string{recallTextPathFile, recallVectorPathFile} {
-		lits := strings.ToLower(strings.Join(domainSQLStrings(t, path), "\n"))
-		for _, want := range quoted {
-			// Cut at the bind placeholder; `$n` in the card is `$%d` in the source.
-			needle := strings.ToLower(want)
-			if i := strings.Index(needle, "$"); i >= 0 {
-				needle = needle[:i]
-			}
-			if !strings.Contains(lits, needle) {
-				t.Errorf("%s: no SQL literal carries the predicate %s publishes as %q. Both "+
-					"recall paths are supposed to scope identically, so a predicate present on "+
-					"one and missing from the other hands one path's callers rows the other "+
-					"path withholds — and the response is byte-identical in shape either way.",
-					path, recallCardPath, want)
-			}
+	// Presence/publication: since aihub#379 the predicate exists in ONE SQL
+	// copy — memoryVisibilityScopeSQL — so the card's backticked spelling is
+	// compared against that file, not against each path.
+	lits := strings.ToLower(strings.Join(domainSQLStrings(t, recallVisibilityBuilderFile), "\n"))
+	for _, want := range quoted {
+		// Cut at the bind placeholder; `$n` in the card is `$%d` in the source.
+		needle := strings.ToLower(want)
+		if i := strings.Index(needle, "$"); i >= 0 {
+			needle = needle[:i]
+		}
+		if !strings.Contains(lits, needle) {
+			t.Errorf("%s: no SQL literal carries the predicate %s publishes as %q — either the "+
+				"shared builder was reworded without the card, or the card without the builder.",
+				recallVisibilityBuilderFile, recallCardPath, want)
 		}
 	}
 
-	// Derived from the CALLER: every visibility predicate sits under a guard that
-	// reads CallerRole, and the private half binds CallerUserID.
-	guards := 0
+	// Both paths scope identically: each recall path file must CALL the shared
+	// builder, and hand it the caller's own role and id — not some other value
+	// wearing the parameter's position. This is the arm the pre-aihub#379
+	// mutant M1 (vector path drops `AND visibility != 'admin'`) now lands on:
+	// dropping the scoping today means dropping the call.
 	for _, path := range []string{recallTextPathFile, recallVectorPathFile} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		calls := 0
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fn, ok := call.Fun.(*ast.Ident)
+			if !ok || fn.Name != "memoryVisibilityScopeSQL" {
+				return true
+			}
+			calls++
+			var argIdents strings.Builder
+			for _, a := range call.Args {
+				ast.Inspect(a, func(inner ast.Node) bool {
+					if id, isID := inner.(*ast.Ident); isID {
+						argIdents.WriteString(id.Name)
+						argIdents.WriteString(" ")
+					}
+					return true
+				})
+			}
+			// Case-insensitive on the NAME: Recall passes req.CallerRole,
+			// loadForwardRelations the plain callerRole parameter carrying the
+			// same value.
+			got := strings.ToLower(argIdents.String())
+			if !strings.Contains(got, "callerrole") || !strings.Contains(got, "calleruserid") {
+				t.Errorf("%s:%d: memoryVisibilityScopeSQL is called with (%s), which does not "+
+					"read CallerRole/CallerUserID. The card calls these clauses authorization "+
+					"scoping the server derives from the caller's own role and id — feeding the "+
+					"builder anything else is a caller-facing filter wearing an authorization "+
+					"clause's clothes.",
+					path, fset.Position(call.Pos()).Line, strings.TrimSpace(argIdents.String()))
+			}
+			return true
+		})
+		if calls == 0 {
+			t.Errorf("%s: no call to memoryVisibilityScopeSQL — this recall path no longer applies "+
+				"the visibility scoping the card publishes, which hands its callers rows the other "+
+				"path withholds, in a response byte-identical in shape either way.", path)
+		}
+	}
+
+	// Derived from the CALLER: inside the builder, the visibility predicate
+	// sits under a guard that reads the caller's role, and the private half
+	// binds the caller's user id.
+	guards := 0
+	for _, path := range []string{recallVisibilityBuilderFile} {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
@@ -287,11 +357,10 @@ func TestRecallVisibilityScopingIsCallerDerivedOnBothPaths(t *testing.T) {
 			})
 
 			guards++
-			// Matched case-insensitively on the NAME, not on `req.CallerRole`
-			// exactly: loadForwardRelations takes the same value as a plain
-			// `callerRole` parameter and its own comment says it mirrors this
-			// predicate, so an exact-spelling check would report the one site in
-			// the file that copied the rule correctly.
+			// Matched case-insensitively on the NAME: inside the builder the
+			// guard reads the plain `callerRole` parameter, whose value every
+			// call site is separately required (above) to supply from
+			// CallerRole.
 			if !strings.Contains(strings.ToLower(cond.String()), "callerrole") {
 				t.Errorf("%s:%d: a visibility predicate is emitted under `if %s`, which does not "+
 					"read CallerRole. The card calls these clauses authorization scoping the "+
@@ -304,9 +373,10 @@ func TestRecallVisibilityScopingIsCallerDerivedOnBothPaths(t *testing.T) {
 		})
 	}
 	if guards == 0 {
-		t.Fatal("not one visibility predicate was found inside an if-statement in either recall " +
-			"path. The walk found nothing, so the caller-derived half of this arm asserted " +
-			"nothing — and a query with no visibility scoping at all would pass it.")
+		t.Fatal("not one visibility predicate was found inside an if-statement in " +
+			recallVisibilityBuilderFile + ". The walk found nothing, so the caller-derived " +
+			"half of this arm asserted nothing — and a builder with no role guard at all " +
+			"would pass it.")
 	}
 
 	// "rather than the caller's filter": no field a caller could bind.

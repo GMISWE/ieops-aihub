@@ -435,8 +435,8 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 		// from its predecessor's. hasProjectAccess/memoryVisibleTo are the pure
 		// (non-response-writing) mirrors of checkProjectAccess/checkMemoryVisibility
 		// — calling the side-effecting originals against head would commit a
-		// 403/401 to c even on the "fall back to mem" path, leaking that a newer,
-		// inaccessible version exists. Any failure to resolve or authorize the
+		// 404/401 to c even on the "fall back to mem" path, denying the caller
+		// the record they ARE authorized to read. Any failure to resolve or authorize the
 		// head — including a genuinely nonexistent lineage — silently falls back
 		// to rendering the originally-requested mem exactly as today.
 		//
@@ -536,9 +536,18 @@ func handleUIMemoryDetail(pool *pgxpool.Pool, tmpl *template.Template) echo.Hand
 	}
 }
 
-// memoryVisibleTo mirrors checkMemoryVisibility without touching c — used in
-// the list path where each excluded row should silently drop instead of
-// short-circuiting the response.
+// memoryVisibleTo is THE Go copy of the per-memory visibility rule — the pure
+// predicate checkMemoryVisibility wraps a response around, and the one every
+// list/redirect/lineage path consults directly where an excluded row should
+// silently drop instead of short-circuiting the response.
+//
+// Its SQL twin is domain's memoryVisibilityScopeSQL (memory_visibility.go),
+// which Recall's text and vector paths share. aihub#379: do not add another
+// copy of this decision in either language —
+// TestMemoryVisibilityParity_SQLAgreesWithGoPredicate (DB-gated) fails when
+// the two sides disagree on real rows, and the uniformity suite in
+// memory_visibility_uniform_test.go fails when any response-writing entry
+// stops answering a denial with errNotVisible()'s bytes.
 func memoryVisibleTo(u *UserContext, mem *domain.Memory) bool {
 	if u == nil {
 		return false

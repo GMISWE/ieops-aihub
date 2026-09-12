@@ -491,7 +491,12 @@ var r2Forbidden = map[string]string{
 	"router.go:handleClaimWorkItem":                  "cross-user force_takeover needs maintainer/admin; caller is already a project writer",
 	"router.go:handleBootstrap":                      "bootstrap key / already-bootstrapped; pre-membership",
 	"routes_artifacts.go:shareRefusal":               "memory type not shareable, or visibility narrower than the project — a property of the object, not of the caller",
-	"routes_artifacts.go:checkMemoryVisibility":      "private-not-author / admin-tier. INTRA-project author tiering, not membership: the caller IS a member and is entitled to know the artifact exists. Tracked as aihub#379, which will decide 403-vs-404 for it repo-wide",
+	// routes_artifacts.go:checkMemoryVisibility used to sit here ("Tracked as
+	// aihub#379, which will decide 403-vs-404 for it repo-wide"). aihub#379
+	// decided: 404 (errNotVisible). Per-row visibility is existence-hiding —
+	// every list path already drops the row silently — so it no longer builds
+	// ErrForbidden at all. Role shortfalls on ACTIONS keep their 403; row
+	// READ visibility does not.
 	"routes_memory.go:handleRemember":                "methodology.* requires the target wi's attempt credentials",
 	"routes_memory.go:enforceMethodologyAttemptGate": "methodology.* artifact not bound to a wi, or missing attempt credentials",
 	"routes_memory.go:handleReinforceMemory":         "cannot reinforce a redacted memory — object state, not caller identity",

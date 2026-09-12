@@ -96,14 +96,14 @@ func recallLexical(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) 
 		AND status IN (%s)
 		AND (expires_at IS NULL OR expires_at > clock_timestamp())`, statusSet)
 
-	// Visibility scoping — mirrors recallText's predicate exactly. This is
+	// Visibility scoping — the same memoryVisibilityScopeSQL call recallText
+	// makes (aihub#379: one SQL copy, not a mirror that can drift). This is
 	// authorization, so it is the one part of the semantic predicate the
 	// lexical section must never relax.
-	if req.CallerRole != "admin" {
-		where += fmt.Sprintf(` AND (visibility != 'private' OR author_user_id = $%d)`, idx)
-		args = append(args, req.CallerUserID)
-		idx++
-		where += ` AND visibility != 'admin'`
+	if clause, visArgs, nextIdx := memoryVisibilityScopeSQL(req.CallerRole, req.CallerUserID, idx); clause != "" {
+		where += clause
+		args = append(args, visArgs...)
+		idx = nextIdx
 	}
 
 	if clause, clauseArgs, nextIdx := typeFilterClause(req.Types, idx); clause != "" {

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3763,7 +3764,19 @@ func verifyAttemptCredentialSimple(ctx context.Context, pool *pgxpool.Pool, wi *
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return dbErr(err, "failed to load run_attempt credential")
 	}
-	if err != nil || storedHash != secretHash {
+	// aihub#621: constant-time, like the transactional twin's guard
+	// (run_attempts.go) and BearerAuth (internal/auth/bearer.go). A plain
+	// string != short-circuits at the first differing byte, leaking how much
+	// of the hash prefix a guessed secret matched. Both operands are the
+	// lowercase sha256 hex that hashSecretInternal emits, so the hex forms are
+	// compared directly — the twin decodes to bytes only because it separates
+	// a corrupt stored hash into its own ErrStaleCredential answer, a
+	// distinction this lightweight verifier deliberately folds into the
+	// mismatch arm. Accept/refuse behaviour is byte-for-byte identical to the
+	// old comparison; only the timing profile changed. `err != nil` here can
+	// only be ErrNoRows (anything else returned above): a missing attempt row
+	// IS an invalid credential and keeps the mismatch answer (aihub#607).
+	if err != nil || subtle.ConstantTimeCompare([]byte(storedHash), []byte(secretHash)) != 1 {
 		return NewErr(ErrAttemptMismatch, "invalid session_secret")
 	}
 	return nil

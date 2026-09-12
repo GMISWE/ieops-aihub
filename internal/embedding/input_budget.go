@@ -11,23 +11,41 @@ import (
 // provider. domain.MemoryEmbedInput / domain.WorkItemEmbedInput are its only
 // consumers; see internal/domain/embed_input.go.
 //
-// 🔴 Where this number came from, stated plainly because the honest answer is
-// not flattering: it was chosen for cmd/aihub-embed-backfill, which has to
-// survive rows over 300 KB, and aihub#361 then propagated it to the live write
-// path so both writers embed the same bytes. Only "there must be SOME cap" was
-// forced by the fix; 6000 in particular was INHERITED, not derived. It has
-// never been reconciled against any provider's real context length — grep
-// internal/embedding for a context-length constant and you will find none,
-// because none exists.
+// DERIVED 2026-09-12 (aihub#504) against the production embedding service, not
+// inherited. The predecessor value, 6000, was chosen for cmd/aihub-embed-backfill
+// and propagated to the live path by aihub#361 for cross-writer parity; its own
+// comment admitted it had never been reconciled against any provider's real
+// context length. The reconciliation has now been done, and this is it:
 //
-// The live path therefore gives up headroom it may well have had: before
-// aihub#361 it embedded up to whatever the provider actually accepted. That is
-// a knowingly conservative trade of recall fidelity for cross-writer parity,
-// not a measurement. Re-deriving it needs the configured provider's real
-// context length, which is why this is now a knob (EMBEDDING_INPUT_MAX_RUNES)
-// instead of a constant: whoever learns that number can raise it without
-// touching code, and raising it moves BOTH writers at once or neither.
-const DefaultInputMaxRunes = 6000
+//   - The deployed provider is text-embeddings-inference 1.7.2 serving
+//     Qwen/Qwen3-Embedding-0.6B. Its /info reports max_input_length=32768
+//     tokens, but the EFFECTIVE per-input ceiling is max_batch_tokens=16384:
+//     probed 2026-09-12 with length-increasing requests, an input of 16,382
+//     tokens embeds in ~1.5s, 16,492 tokens HANGS FOREVER (never schedulable —
+//     a single queue entry larger than max_batch_tokens fits in no batch, so
+//     the request sits until the client's EMBEDDING_TIMEOUT), and 32,992
+//     tokens is rejected immediately with HTTP 413 "must have less than 32768
+//     tokens". The hang zone between the two limits is why the margin below
+//     is generous rather than tight.
+//   - This budget is in runes, the ceiling is in tokens. Measured on the real
+//     corpus (every over-budget memories row, 39 rows, mostly Chinese
+//     technical markdown, via the provider's own /tokenize): prefix ratios run
+//     0.24-0.62 tokens/rune, worst observed 0.620; a pure common-CJK synthetic
+//     measures 0.533. 16000 runes at the worst observed ratio is ~9,900
+//     tokens — 39% headroom under the 16,384-token ceiling. Crossing the
+//     ceiling would take >= 1.024 tokens/rune, outside every sample measured
+//     from this corpus; content that adversarial (a measured rare-CJK
+//     synthetic hits 1.833) fails to embed after EMBEDDING_TIMEOUT and stores
+//     emb_vector NULL — the pre-existing, logged degraded mode, now visible
+//     per row via embedded_len (migration 0039).
+//
+// If the serving config changes — in particular if max_batch_tokens is raised
+// to match max_input_length, which removes the hang zone entirely — re-run the
+// probe and re-derive; that is what the knob below is for. Raising it moves
+// BOTH writers at once or neither, and re-embedding the stored corpus after a
+// raise is required to keep one embedding semantics per emb_model (see
+// cmd/aihub-embed-backfill).
+const DefaultInputMaxRunes = 16000
 
 // InputMaxRunes reads EMBEDDING_INPUT_MAX_RUNES into the embedding input budget.
 //

@@ -51,13 +51,11 @@ import (
 // Runes, not bytes: a byte-sliced cap would split a multi-byte rune and feed
 // the provider invalid UTF-8.
 //
-// 🔴 The VALUE is inherited, not derived. It was picked for the backfill (which
-// must survive rows over 300 KB) and aihub#361 propagated it to the live path so
-// both writers embed identical bytes. The fix forced "there must be some cap";
-// it did not force this number, and nothing in internal/embedding holds a
-// provider context length to check it against. Read
-// embedding.DefaultInputMaxRunes for the full statement of what is and is not
-// known here.
+// The VALUE was inherited (picked for the backfill, propagated by aihub#361)
+// until aihub#504 derived it from the production provider's measured per-input
+// ceiling on 2026-09-12. Read embedding.DefaultInputMaxRunes for the
+// derivation — the measured token ceiling, the measured tokens-per-rune band
+// of the real corpus, and the margin between them.
 //
 // Resolved once at package init from EMBEDDING_INPUT_MAX_RUNES so the server,
 // cmd/aihub-embed-backfill and cmd/aihub-embed-verify all read the same

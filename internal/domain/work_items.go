@@ -487,7 +487,7 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	if req.Content != nil {
 		wiContent = *req.Content
 	}
-	embVecLit, embModel, embDims := embedWorkItemBestEffort(ctx, req.Goal, wiContent)
+	embVecLit, embModel, embDims, embEmbeddedLen := embedWorkItemBestEffort(ctx, req.Goal, wiContent)
 
 	// aihub#316: sampled BEFORE pool.Begin, and that ordering is the whole
 	// point. Reading ctx.Err() AFTER Begin returns cannot tell "the context was
@@ -604,18 +604,18 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 			requires_human_session, milestone, labels, status,
 			declared_resources, reporter_user_id, reporter_display,
 			parent_work_item_id, attrs, content,
-			emb_model, emb_dims, emb_vector
+			emb_model, emb_dims, emb_vector, embedded_len
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, 'queued',
 			$12, $13, $14,
 			$15, $16, $17,
-			$18, $19, $20::vector
+			$18, $19, $20::vector, $21
 		)`,
 		wiID, seq, req.Project, req.Scenario, req.Goal, req.Source, wiType, req.Priority,
 		requiresHumanSession, req.Milestone, req.Labels, req.DeclaredResources,
 		callerUserID, callerDisplay, parentID, req.Attrs, req.Content,
-		embModel, embDims, embVecLit,
+		embModel, embDims, embVecLit, embEmbeddedLen,
 	)
 	if err != nil {
 		return nil, dbErrCause(err, "failed to insert work_item")

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,26 +21,33 @@ import (
 // now call WorkItemEmbedInput in embed_input.go, so the composition and the
 // budget cannot drift apart again.
 
-// embedWorkItemBestEffort returns the pgvector literal / model / dims for the
-// given wi text, or (nil, nil, nil) when embedding is disabled, the input is
-// empty, or the provider fails.
-func embedWorkItemBestEffort(ctx context.Context, goal, content string) (vecLit, model *string, dims *int) {
+// embedWorkItemBestEffort returns the pgvector literal / model / dims /
+// embedded rune count for the given wi text, or all-nil when embedding is
+// disabled, the input is empty, or the provider fails.
+//
+// embeddedLen (aihub#504, migration 0039) is the rune count of the composed
+// goal+content input the vector actually embeds — WorkItemEmbedInput truncates
+// at the input budget, and before this value was recorded that truncation was
+// visible nowhere on the row. Returned alongside the vector so no writer can
+// store one without the other.
+func embedWorkItemBestEffort(ctx context.Context, goal, content string) (vecLit, model *string, dims, embeddedLen *int) {
 	if isNoopProvider(embProvider) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	in := WorkItemEmbedInput(goal, content)
 	if in == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	vec, err := embProvider.Embed(ctx, in)
 	if err != nil || len(vec) == 0 {
 		fmt.Fprintf(os.Stderr, "work_items: embed failed (leaving emb_vector NULL): %v\n", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	lit := vecToPGLiteral(vec)
 	m := embProvider.ModelID()
 	d := embProvider.Dims()
-	return &lit, &m, &d
+	n := utf8.RuneCountInString(in)
+	return &lit, &m, &d, &n
 }
 
 // refreshWorkItemEmbeddingBestEffort recomputes the embedding for a wi whose
@@ -59,13 +67,13 @@ func refreshWorkItemEmbeddingBestEffort(ctx context.Context, pool *pgxpool.Pool,
 	if content != nil {
 		c = *content
 	}
-	vecLit, model, dims := embedWorkItemBestEffort(ctx, goal, c)
+	vecLit, model, dims, embeddedLen := embedWorkItemBestEffort(ctx, goal, c)
 	if vecLit == nil {
 		return
 	}
 	if _, err := pool.Exec(ctx,
-		`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3 WHERE id = $4`,
-		*vecLit, *model, *dims, wiID); err != nil {
+		`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4 WHERE id = $5`,
+		*vecLit, *model, *dims, *embeddedLen, wiID); err != nil {
 		fmt.Fprintf(os.Stderr, "work_items: embed refresh write failed id=%s: %v\n", wiID, err)
 	}
 }

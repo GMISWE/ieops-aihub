@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_remember",
-  "description_sha256": "bec195df7750ddb2b3b4714765c5ded5e0a03f968e184a781d347c9e3f553fc7",
+  "description_sha256": "17bc65c8f97840767b49cbab31ab72ba366e95bded21840f8bff0529df13ae27",
   "input_schema_sha256": "3fd891dcc03b4c9d2e44114fda3f92df709e272b774679404d6a8ae352e55e00",
   "params": {
     "attrs": {
@@ -353,6 +353,17 @@ why callers in this repo use either — asserted on a live 201 by
 `internal/server/remember_work_item_scope_db_test.go`
 (`TestRememberRejectsCrossProjectWorkItem`), because K10 only fails on a live key the
 card does NOT declare and so cannot see a key that stops being sent.
+
+`embedded_len` (aihub#504, 2026-09-12) is a CONDITIONAL key: present iff the
+stored vector embeds a strict prefix of the content — the embedding input budget
+(`internal/embedding/input_budget.go`, `DefaultInputMaxRunes`) truncated it —
+valued at how many leading runes the vector covers, with the presence rule in
+`internal/domain/memory.go` (`finalizeEmbeddedLen`) and its two directions
+calibrated by `internal/domain/embedded_len_test.go`
+(`TestFinalizeEmbeddedLen_KeepsAStrictPrefix`) /
+(`TestFinalizeEmbeddedLen_SuppressesFullCoverage`). It is absent from the corpus
+record above because it postdates the aihub#412 corpus, whose calls also never
+stored over-budget content.
 
 ## Policy
 

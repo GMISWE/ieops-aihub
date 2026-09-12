@@ -18,7 +18,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_remember
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_remember",
-		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact.",
+		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact. A response carrying embedded_len is a truncation warning: only the first embedded_len runes of the stored content were vector-embedded (the embedding input budget), so semantic recall will never match anything past that point — split the document or accept that the tail is text-search-only.",
 		InputSchema: rememberSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -43,7 +43,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest.",
+		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest. Separately, an item carrying embedded_len was vector-embedded from only its first embedded_len runes (the embedding input budget): semantic ranking saw that prefix alone, and content past it is findable only by text search.",
 		InputSchema: recallSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -95,7 +95,7 @@ func (s *Server) registerMemoryTools() {
 	// complete it. This is the tool half of that escape hatch.
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_get_memory",
-		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true.",
+		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true. If the response carries embedded_len, the stored vector embeds only the first embedded_len runes of this content: semantic recall cannot see the rest.",
 		InputSchema: getMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

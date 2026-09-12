@@ -72,7 +72,8 @@ package domain
 // ─── aihub#277: similar_to uses the STORED vector, not a re-embedding ───────
 //
 // A one-line text query is an order of magnitude worse than the document it
-// stands for, because emb_vector embeds goal+content (up to 6000 runes).
+// stands for, because emb_vector embeds goal+content (up to the input budget,
+// embedding.DefaultInputMaxRunes).
 // Measured 2026-09-03 against production: ieops#316 queried with its own goal
 // text verbatim retrieves ITSELF at rank 81/100 (sim 0.5507, whole page
 // compressed into 0.5390–0.6475), while the same work item's stored vector

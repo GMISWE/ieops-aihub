@@ -1366,7 +1366,12 @@ func TestContractCardsMatchTheCorpusResponseKeys(t *testing.T) {
 // do carry pipes (`private|project|team|admin`), so that is a false red waiting
 // for the first card that quotes one. It also makes the separator row a non-match
 // for free, since |---|---| holds no quotes.
-var cardQuotedCell = regexp.MustCompile(`\|\s*"([^"\n]+)"`)
+//
+// 🔴 Single-sourced from cardclaims since aihub#611, because K12 now classifies
+// the same leading-quote cells (its quote-pinned class): two private copies of
+// this pattern could drift, and a row K12 pins that K9 never checks is a pin
+// claim with no pinner behind it.
+var cardQuotedCell = cardclaims.LeadingQuoteCell
 
 // cardHistoricalMarker exempts ONE hop 0-1 table row whose quote is deliberately
 // no longer live — a parameter whose published description changed, where the card
@@ -2923,51 +2928,51 @@ const k12ContractCards = 45
 // ready to paste, which is the dbtestcov shape and exists so a number is never
 // re-derived by hand.
 var k12Ledger = map[string]cardclaims.Census{
-	"pf_acquire_locks":           {Candidates: 16, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_activate_memory":         {Candidates: 4, Cited: 4, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_batch_create_work_items": {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_cancel_work_item":        {Candidates: 12, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_claim_work_item":         {Candidates: 29, Cited: 26, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_commit":                  {Candidates: 9, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_complete_attempt":        {Candidates: 18, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_api_key":          {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_dependency":       {Candidates: 9, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_create_project":          {Candidates: 12, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_create_user":             {Candidates: 23, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_create_work_item":        {Candidates: 30, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
-	"pf_diff":                    {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_emit_event":              {Candidates: 28, Cited: 24, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_force_takeover":          {Candidates: 21, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_get_memory":              {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_get_ready_queue":         {Candidates: 27, Cited: 19, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
-	"pf_get_step":                {Candidates: 20, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_get_work_item":           {Candidates: 21, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_list_dependencies":       {Candidates: 13, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_list_projects":           {Candidates: 14, Cited: 9, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_list_users":              {Candidates: 10, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_list_work_items":         {Candidates: 27, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_pause_attempt":           {Candidates: 17, Cited: 15, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_pr":                      {Candidates: 13, Cited: 10, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_predict_conflicts":       {Candidates: 27, Cited: 23, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_push":                    {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_read_events":             {Candidates: 15, Cited: 13, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_recall":                  {Candidates: 47, Cited: 38, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
-	"pf_redact_memory":           {Candidates: 8, Cited: 7, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_reinforce_memory":        {Candidates: 32, Cited: 27, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_remember":                {Candidates: 53, Cited: 44, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
-	"pf_remove_dependency":       {Candidates: 7, Cited: 6, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_resolve_commit":          {Candidates: 10, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_revoke_api_key":          {Candidates: 5, Cited: 5, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_rotate_identifier":       {Candidates: 8, Cited: 8, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
-	"pf_save_artifact":           {Candidates: 27, Cited: 25, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_ship":                    {Candidates: 7, Cited: 5, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_memory":           {Candidates: 18, Cited: 16, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_update_project":          {Candidates: 17, Cited: 14, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_step":             {Candidates: 21, Cited: 17, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_update_user":             {Candidates: 23, Cited: 18, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_update_work_item":        {Candidates: 66, Cited: 54, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
-	"pf_whoami":                  {Candidates: 13, Cited: 11, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_wrap":                    {Candidates: 3, Cited: 3, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_acquire_locks":           {Candidates: 16, Cited: 13, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_activate_memory":         {Candidates: 5, Cited: 4, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_batch_create_work_items": {Candidates: 18, Cited: 16, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_cancel_work_item":        {Candidates: 12, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_claim_work_item":         {Candidates: 29, Cited: 26, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_commit":                  {Candidates: 9, Cited: 7, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_complete_attempt":        {Candidates: 18, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_api_key":          {Candidates: 8, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_dependency":       {Candidates: 9, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_create_project":          {Candidates: 12, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_create_user":             {Candidates: 23, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_create_work_item":        {Candidates: 30, Cited: 23, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
+	"pf_diff":                    {Candidates: 8, Cited: 7, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_emit_event":              {Candidates: 28, Cited: 24, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_force_takeover":          {Candidates: 21, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_get_memory":              {Candidates: 9, Cited: 7, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_get_ready_queue":         {Candidates: 29, Cited: 19, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
+	"pf_get_step":                {Candidates: 21, Cited: 15, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_get_work_item":           {Candidates: 22, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_list_dependencies":       {Candidates: 14, Cited: 9, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_list_projects":           {Candidates: 14, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_list_users":              {Candidates: 10, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_list_work_items":         {Candidates: 27, Cited: 23, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_pause_attempt":           {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_pr":                      {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_predict_conflicts":       {Candidates: 28, Cited: 23, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_push":                    {Candidates: 8, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_read_events":             {Candidates: 17, Cited: 13, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_recall":                  {Candidates: 47, Cited: 38, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
+	"pf_redact_memory":           {Candidates: 10, Cited: 7, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_reinforce_memory":        {Candidates: 33, Cited: 26, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_remember":                {Candidates: 54, Cited: 44, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
+	"pf_remove_dependency":       {Candidates: 7, Cited: 6, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_resolve_commit":          {Candidates: 12, Cited: 8, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_revoke_api_key":          {Candidates: 5, Cited: 5, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_rotate_identifier":       {Candidates: 9, Cited: 8, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_save_artifact":           {Candidates: 27, Cited: 25, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_ship":                    {Candidates: 7, Cited: 5, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_memory":           {Candidates: 19, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_project":          {Candidates: 17, Cited: 14, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_update_step":             {Candidates: 21, Cited: 17, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_update_user":             {Candidates: 24, Cited: 18, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_update_work_item":        {Candidates: 66, Cited: 54, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
+	"pf_whoami":                  {Candidates: 13, Cited: 11, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_wrap":                    {Candidates: 3, Cited: 3, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 }
 
 const (
@@ -3012,6 +3017,13 @@ const (
 func TestContractCardClaimsAreClassified(t *testing.T) {
 	cards := readCards(t)
 
+	// The live publication per tool, for the quote-pinned class alone (aihub#611):
+	// the same haystack K9 checks claimed-verbatim quotes against, so the two arms
+	// cannot disagree about what "live" means. A tool this map does not carry
+	// contributes "" and pins nothing, which errs toward debt rather than toward a
+	// held state nobody verified (K2 reports the missing publication itself).
+	published := liveSchemaProse(t)
+
 	// 🔴 Built once, and a failure to build it is a FAILURE rather than a skip. Every
 	// citation resolves against this index, so an empty one makes every cited
 	// sentence read as debt — which would be a loud wrong answer, but the opposite
@@ -3053,7 +3065,7 @@ func TestContractCardClaimsAreClassified(t *testing.T) {
 
 	scoped := make(map[string]bool, len(k12Cards))
 	tallies := make(map[string]cardclaims.CardTally, len(k12Cards))
-	sentences, candidates, cited := 0, 0, 0
+	sentences, candidates, cited, quotePinned := 0, 0, 0, 0
 
 	for _, name := range k12Cards {
 		c, ok := cards[name]
@@ -3064,7 +3076,7 @@ func TestContractCardClaimsAreClassified(t *testing.T) {
 			continue
 		}
 		scoped[name] = true
-		tally := cardclaims.Tally(c.path, c.prose, armIndex)
+		tally := cardclaims.Tally(c.path, c.prose, armIndex, published[name])
 
 		// 🔴 Tally walks the PROSE, which starts after the machine block. A marker
 		// before or inside that block is invisible to it, and the out-of-scope arm
@@ -3084,6 +3096,7 @@ func TestContractCardClaimsAreClassified(t *testing.T) {
 		sentences += tally.Sentences
 		candidates += tally.Census.Candidates
 		cited += tally.Census.Cited
+		quotePinned += tally.Census.QuotePinned
 
 		for _, p := range tally.Problems {
 			t.Error(p)
@@ -3126,9 +3139,10 @@ func TestContractCardClaimsAreClassified(t *testing.T) {
 		total.ProseOnly += d.ProseOnly
 	}
 	t.Logf("K12: %d sentence(s) read across %d scoped card(s), %d candidate-assertable, "+
-		"%d citing an arm, arm-index=%d; debt unclassified=%d pending-implementation=%d "+
-		"known-defect=%d structurally-unreachable=%d accepted-unprobed=%d, prose-only=%d",
-		sentences, len(scoped), candidates, cited, len(armIndex.Funcs),
+		"%d citing an arm, %d quote-pinned, arm-index=%d; debt unclassified=%d "+
+		"pending-implementation=%d known-defect=%d structurally-unreachable=%d "+
+		"accepted-unprobed=%d, prose-only=%d",
+		sentences, len(scoped), candidates, cited, quotePinned, len(armIndex.Funcs),
 		total.Unclassified, total.PendingImplementation, total.KnownDefect,
 		total.StructurallyUnreachable, total.AcceptedUnprobed, total.ProseOnly)
 }

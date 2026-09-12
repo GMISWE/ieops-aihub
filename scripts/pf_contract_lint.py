@@ -18,6 +18,11 @@
 # run fails with STALE_BASELINE_ENTRY (see audit_stale_entries). This is the
 # Python half of the double ratchet the Go gate gets from assertNoStaleEntries
 # in internal/mcp/universal_contract_gate_test.go. Re-apply on refresh.
+# aihub#629 modification (2026-09-12): main() refuses a run that collected zero
+# .md files (exit 1) instead of printing "No .md files found" and exiting 0.
+# The old exit sat before the baseline stale audit, so a typo'd --target plus a
+# non-empty baseline scanned nothing, checked nothing, and read as green (see
+# empty_scan_error). Re-apply on refresh.
 #
 # Rules
 # -----
@@ -52,8 +57,9 @@
 # Output
 # ------
 #   <file>:<line> [RULE] description
-# Exit code 1 if any un-baselined violations or stale baseline entries;
-# 0 otherwise.
+# Exit code 1 if any un-baselined violations or stale baseline entries, or when
+# the run cannot vouch at all: unusable schema, unloadable baseline, or zero
+# .md files collected (aihub#629). 0 only when checks actually ran and passed.
 #
 # Usage
 # -----
@@ -490,6 +496,45 @@ def collect_md_files(targets: list) -> list:
     return sorted(files)
 
 
+def empty_scan_error(targets: list, files: list) -> Optional[str]:
+    """Return the refusal message when a run collected zero .md files, else None.
+
+    Zero files means zero checks, and this script used to read that as a PASS:
+    print "No .md files found in specified targets." and exit 0, BEFORE the
+    baseline stale audit ever ran. So a typo'd --target plus a non-empty
+    baseline scanned nothing, checked nothing, and still went green in CI
+    (aihub#629) — the same "an absent check reads as a passing one" shape
+    aihub#599 closed for a count-less schema and aihub#619 closed for stale
+    baseline entries.
+
+    The two ways the list goes empty get DIFFERENT messages but the same
+    nonzero exit. A target that does not exist is almost certainly a typo —
+    os.walk on a missing path silently yields nothing — so that message routes
+    to fixing the path. An existing target with no .md files may be
+    legitimately empty, but an empty run still vouches for nothing (aihub#619's
+    rule for partial --target runs: a run that never looked cannot judge), so
+    the repair is to drop the target from the invocation, not to let the run
+    pass.
+    """
+    if files:
+        return None
+    missing = [t for t in targets if not os.path.exists(t)]
+    if missing:
+        return (
+            "ERROR: no .md files found, and these --target path(s) do not "
+            f"exist: {', '.join(missing)}. A mistyped target scans zero files "
+            "and checks nothing, and until aihub#629 that read as a passing "
+            "run. Fix the path."
+        )
+    return (
+        f"ERROR: the --target path(s) ({', '.join(targets)}) exist but "
+        "contain no .md files, so zero checks ran and this run can vouch for "
+        "nothing — an absent check is not a passing one. If the target is "
+        "legitimately empty now, remove it from the invocation rather than "
+        "letting an empty scan stand in for a green one."
+    )
+
+
 def lint_file(file_path: str, schema: dict) -> list[Violation]:
     """Run both rule sets on a single file."""
     try:
@@ -776,6 +821,64 @@ def run_self_test():
             else:
                 failures.append(f"FAIL {name}: audit errors: {audit_errors!r}")
 
+        # ── Empty-scan refusal (aihub#629) ──
+        # main()-level like the stale audit. Unit-check the two message shapes
+        # and the non-refusal on a real file list, then prove END TO END that
+        # main() wires the refusal to a nonzero exit. The negative control
+        # these pin is the old behaviour: "No .md files found in specified
+        # targets." on stderr and exit 0 — a typo'd --target plus a non-empty
+        # baseline read as a passing run, with the stale audit never reached.
+        typo_target = os.path.join(tmpdir, "no_such_dir")
+        empty_dir = os.path.join(tmpdir, "genuinely_empty")
+        os.makedirs(empty_dir)
+        typo_msg = empty_scan_error([typo_target], [])
+        empty_dir_msg = empty_scan_error([empty_dir], [])
+        empty_checks = [
+            ("empty_scan_typo_target_refused",
+             typo_msg is not None and "do not exist" in typo_msg
+             and typo_target in typo_msg),
+            ("empty_scan_existing_empty_dir_refused",
+             empty_dir_msg is not None
+             and "contain no .md files" in empty_dir_msg),
+            # The two shapes must not collapse into one message, or the typo
+            # case loses its "fix the path" routing.
+            ("empty_scan_shapes_distinguished", typo_msg != empty_dir_msg),
+            ("empty_scan_nonempty_run_not_refused",
+             empty_scan_error([tmpdir], scanned) is None),
+        ]
+        for name, ok in empty_checks:
+            if ok:
+                passed += 1
+            else:
+                failures.append(
+                    f"FAIL {name}: typo={typo_msg!r} empty={empty_dir_msg!r}"
+                )
+
+        # End to end through a real process: the refusal must reach the EXIT
+        # CODE, not just a message — a guard main() never consults is the
+        # exact no-op shape this fixture exists to keep red.
+        import subprocess
+        schema_path = os.path.join(tmpdir, "e2e_schema.json")
+        with open(schema_path, "w") as f:
+            json.dump(_MINIMAL_SCHEMA, f)
+        proc = subprocess.run(
+            [sys.executable, os.path.abspath(__file__),
+             "--schemas", schema_path, "--target", typo_target],
+            capture_output=True, text=True,
+        )
+        e2e_checks = [
+            ("empty_scan_e2e_exit_nonzero", proc.returncode != 0),
+            ("empty_scan_e2e_message_on_stderr",
+             "no .md files" in proc.stderr.lower()),
+        ]
+        for name, ok in e2e_checks:
+            if ok:
+                passed += 1
+            else:
+                failures.append(
+                    f"FAIL {name}: rc={proc.returncode} stderr={proc.stderr!r}"
+                )
+
     if failures:
         print(f"self-test: {len(failures)} failure(s):")
         for f in failures:
@@ -843,11 +946,14 @@ def main():
         print(f"ERROR: failed to load baseline: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Collect files.
+    # Collect files. Zero files is a refusal, not a pass (aihub#629): the old
+    # sys.exit(0) here sat BEFORE the baseline stale audit, so a run that
+    # scanned nothing could never turn red no matter what the baseline held.
     files = collect_md_files(args.targets)
-    if not files:
-        print("No .md files found in specified targets.", file=sys.stderr)
-        sys.exit(0)
+    refusal = empty_scan_error(args.targets, files)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        sys.exit(1)
 
     all_violations = []
     for fpath in files:

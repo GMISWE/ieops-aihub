@@ -4836,6 +4836,12 @@ jobs:
                       "PASS: tool_call -> hooks/pf-commit-guard exists and is executable" \
                       "PASS: unsets PLUGIN_ROOT so pi is not misread as Codex" \
                       "PASS: does not gate on tool_execution_start" \
+                      "PASS: default scope: project-scope tree holds all " \
+                      "PASS: scope=user: <project>/.agents/skills is absent" \
+                      "PASS: retire arm: the pre-existing <project>/.agents/skills is gone after the opt-out" \
+                      "PASS: retire arm: the retired copy is intact at .agents/skills.bak-<stamp>" \
+                      "PASS: install.sh refuses POLYFORGE_PI_SKILL_SCOPE=sideways" \
+                      "PASS: the refused run wrote no skills tree at either scope" \
                       "ALL PASS"; do
             grep -qF -- "$want" pi_runtime.log \
               || { echo "::error::pi-runtime.test.sh did not report '$want' — the pi IR1 configuration is not actually gated"; exit 1; }
@@ -4845,9 +4851,29 @@ jobs:
           # design when pi is absent (it is, on CI) and is deliberately not asserted here.
           ! grep -q '^SKIP: python3' pi_runtime.log \
             || { echo "::error::pi-runtime.test.sh SKIPped for want of python3 — this step would be a green no-op"; exit 1; }
+          # Floor raised 30 -> 44 by aihub#617, which added POLYFORGE_PI_SKILL_SCOPE and
+          # fourteen PASS lines that do NOT depend on pi being installed: three per install
+          # arm (default / scope=user — install ran, user tree complete, project tree
+          # present-or-absent), five for the retire arm (the opt-out run over a project copy
+          # that already exists), and three for the invalid-value arm. Only the get_commands
+          # probe inside the first two arms needs pi, and that SKIPs on this runner. So the
+          # delta is exactly +14 on CI — measured at 56 PASS / 2 SKIP with pi hidden from
+          # PATH, against 42 before the change — and the previous 30 was reached with slack
+          # to spare; keeping the same slack means 44.
+          #
+          # The six new named checks above are what stops the two assertions that carry the
+          # actual meaning from being deleted under a floor this loose: the ABSENCE check
+          # (which distinguishes a working opt-out from an installer that ignores the switch)
+          # and the RETIRE check (which distinguishes an opt-out that works on the box that
+          # asked for it from one that only works in an empty sandbox).
+          #
+          # New CI surface, deliberately: this step now depends on install.sh SUCCEEDING on
+          # the runner, which it did not before. install.sh only warns when pi is absent
+          # (verified), but an environment break in it now reddens this gate with several
+          # FAILs instead of SKIPping past.
           n=$(grep -c '^  PASS: ' pi_runtime.log || true)
-          [ "${n:-0}" -ge 30 ] \
-            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 30 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 44 ] \
+            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 44 — checks have gone missing"; exit 1; }
           echo "pi runtime gate: $n checks passed"
 
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal

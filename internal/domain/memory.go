@@ -762,6 +762,15 @@ type RecallResponse struct {
 	// whitelist FIRST and made the field generic — so this is the last time that
 	// argument has to be made.
 	RequestAdjusted []RequestAdjustment `json:"request_adjusted,omitempty"`
+	// Lexical is the second retrieval section (aihub#360): verbatim-substring
+	// matches over the same corpus, parallel to — never merged into — the
+	// semantic ranking in Items. Present exactly when the request carried a
+	// non-empty query, whichever path served Items; a query that matched
+	// nothing still gets the section, carrying an explicit total of 0. Attached
+	// by Recall around the router for the same one-exit reason as
+	// RequestAdjusted above. See lexical.go for the aihub#367 measurement this
+	// answers and memory_lexical.go for the predicate.
+	Lexical *MemoryLexicalSection `json:"lexical,omitempty"`
 }
 
 // ─── Forgetting Curve (§7.2) ──────────────────────────────────────────────────
@@ -2486,6 +2495,23 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 		return resp, err
 	}
 	resp.RequestAdjusted = adjusted
+	// aihub#360: the lexical section, attached HERE — around the router, like
+	// the two disclosures above — so one exit covers the vector, hybrid, text
+	// and lexical-algo paths alike. Keyed on the REQUEST (a non-empty query),
+	// never on what the router returned: an empty semantic page still gets the
+	// section, and a full one does too, because "the vector path answered" is
+	// precisely the state in which aihub#367 measured the misses (recall@1
+	// 0/42, with 11 of 12 production-shape targets retrievable by an unrelated
+	// query — in the corpus, not semantically reachable). recallRouted has
+	// already normalized req.TopK by the time this runs, so the section's page
+	// cap is the same one Items obeys.
+	if strings.TrimSpace(req.Query) != "" {
+		lex, lerr := recallLexical(ctx, pool, req)
+		if lerr != nil {
+			return nil, lerr
+		}
+		resp.Lexical = lex
+	}
 	return resp, nil
 }
 

@@ -19,6 +19,18 @@ import (
 // cosine similarity as the primary key (bucketed to 0.01), with Ebbinghaus
 // effective_strength breaking ties only inside a bucket (aihub#311).
 //
+// 🔴 A miss on this path is NOT evidence of absence, and that is a property of
+// the index shape, not a data defect (aihub#360): each row carries ONE
+// unchunked vector over its whole content, so an EXCERPT of a stored document
+// embeds as a different point than its parent and routinely fails to retrieve
+// it. Measured against production 2026-09-06 (aihub#367, answers frozen before
+// the first query ran): recall@1 = 0/42; production-shape recall@10 33.3%
+// against a 14.1% random baseline — with 11 of the 12 misses retrievable by an
+// unrelated query and all 161 embeddable rows carrying a vector, so no
+// re-embedding fixes it. The repair is the parallel lexical section Recall
+// attaches around this path (memory_lexical.go); judge existence by that
+// section or by direct filters, never by a page from here.
+//
 // Only memories that have emb_model matching the current provider and a non-NULL
 // emb_vector are candidates — unembedded memories fall through to the text path.
 //

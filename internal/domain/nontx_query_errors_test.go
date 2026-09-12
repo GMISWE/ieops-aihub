@@ -197,7 +197,11 @@ func TestNonTransactionalQuerySitesAnswerTheirErrors(t *testing.T) {
 	// raise this. Fewer: a site was removed, or it moved into a shape this
 	// scanner cannot see (an if-init assignment, a helper wrapping the call),
 	// which reads as compliant — check which before touching the number.
-	const wantSites = 29
+	//
+	// 29 -> 31 same day: aihub#360 added the two lexical-section page queries
+	// (recallLexical in memory_lexical.go, listWorkItemsLexical in
+	// wi_lexical.go), both answering their errors through dbErrCause.
+	const wantSites = 31
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d Query sites in non-transactional functions, want %d — see the count-arm "+
 			"note above this assertion before touching the number", totalSites, wantSites)
@@ -222,7 +226,11 @@ func TestNonTransactionalQueryRowSitesAnswerTheirErrors(t *testing.T) {
 
 	// Measured 2026-09-12 on the aihub#607 tree: 21 single-assign
 	// QueryRow(…).Scan(…) sites in non-transactional functions.
-	const wantSites = 21
+	//
+	// 21 -> 22 same day: aihub#360's listWorkItemsLexical counts its matches
+	// through a single-assign QueryRow, answered through dbErrCause (the
+	// memory side reuses countMemories, an already-counted site).
+	const wantSites = 22
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d QueryRow sites in non-transactional functions, want %d — fewer may mean a "+
 			"site moved into a stated blind spot (if-init, row-helper, blanked error), which "+

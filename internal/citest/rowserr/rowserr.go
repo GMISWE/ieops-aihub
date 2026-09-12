@@ -123,7 +123,32 @@ var rowsTypeNames = []string{"Rows"}
 // testdata, vendor, .git or node_modules.
 func ScanDir(root string) ([]Loop, error) {
 	var out []Loop
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := walkGoFiles(root, func(path, rel string) error {
+		loops, scanErr := ScanFile(path, rel)
+		if scanErr != nil {
+			return scanErr
+		}
+		out = append(out, loops...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		return out[i].Line < out[j].Line
+	})
+	return out, nil
+}
+
+// walkGoFiles visits every non-test .go file under root, skipping testdata,
+// vendor, .git and node_modules directories. rel is slash-separated and
+// relative to root. Shared by both analyses (ScanDir, ScanDirSwallows) so the
+// two gates walk one population.
+func walkGoFiles(root string, visit func(path, rel string) error) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -142,23 +167,8 @@ func ScanDir(root string) ([]Loop, error) {
 		if relErr != nil {
 			return relErr
 		}
-		loops, scanErr := ScanFile(path, filepath.ToSlash(rel))
-		if scanErr != nil {
-			return scanErr
-		}
-		out = append(out, loops...)
-		return nil
+		return visit(path, filepath.ToSlash(rel))
 	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].File != out[j].File {
-			return out[i].File < out[j].File
-		}
-		return out[i].Line < out[j].Line
-	})
-	return out, nil
 }
 
 // ScanFile parses one file. reportAs is the name used in the returned Loops.

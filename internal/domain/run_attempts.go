@@ -450,9 +450,20 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		}
 		for lockRows.Next() {
 			var l ResourceLock
-			if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr == nil {
-				existingLocks = append(existingLocks, l)
+			if scanErr := lockRows.Scan(&l.ResourceType, &l.ResourceKey, &l.OwnerAttemptID, &l.ClaimEpoch); scanErr != nil {
+				// aihub#608: this was a success-only guard, and here the
+				// partial publish was REACHABLE, not just spelled: pgx v5's
+				// failed Scan poisons the rows, the drain stops, and the
+				// rows.Err() arm below used to return only for class 40 — a
+				// decode error is not class 40, so it fell through and the
+				// truncated existingLocks answered the idempotent re-claim.
+				// That is the phantom the send-time arm above was fixed for
+				// (aihub#522), on the one field that "has to be complete or it
+				// cannot be used at all" (aihub#345).
+				lockRows.Close()
+				return nil, dbErrCause(scanErr, "failed to scan lock row for idempotent claim")
 			}
+			existingLocks = append(existingLocks, l)
 		}
 		lockRows.Close()
 		// aihub#334: this is the same shape as unblockDependentWI's sweep —
@@ -464,6 +475,10 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			if aerr := retryConflictErr(err, "failed to load locks for idempotent claim"); aerr != nil {
 				return nil, aerr
 			}
+			// aihub#608: the non-conflict half used to fall through, publishing
+			// the same partial drain the class-40 half refuses — and the same
+			// partial AcquiredLocks the Scan arm above now returns on.
+			return nil, dbErrCause(err, "failed to load locks for idempotent claim")
 		}
 
 		// Recompute step_recovery_hint identically to the fresh path.
@@ -1295,6 +1310,15 @@ func unblockDependentWI(ctx context.Context, tx pgx.Tx, wiID, project string) *A
 	var candidateIDs []string
 	for rows.Next() {
 		var id string
+		// aihub#608: a deliberate discard, adjudicated with the rest of the
+		// drain-loop Scan arms. This sweep's written policy (both error arms
+		// above and below) is best-effort outside class 40, and the failure
+		// direction is CLOSED: on pgx v5 a failed Scan poisons the rows, the
+		// drain stops, and every candidate not yet collected stays blocked —
+		// the recoverable outcome this function's aihub#334 comments already
+		// chose. A decode error is not class 40, so the rows.Err() arm below
+		// then takes its documented best-effort branch. Allowlisted in
+		// internal/citest/rowserr/scan_swallow_allowlist.txt.
 		if err := rows.Scan(&id); err == nil {
 			candidateIDs = append(candidateIDs, id)
 		}

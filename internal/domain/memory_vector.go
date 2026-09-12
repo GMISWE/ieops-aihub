@@ -230,8 +230,12 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 			&similarity, &effStrength,
 		); scanErr != nil {
-			fmt.Fprintf(os.Stderr, "recallWithVector: scan error: %v\n", scanErr)
-			continue
+			// aihub#608: same repair as recallText — log-and-continue spelled
+			// "publish a partial recall as the complete one"; pgx v5's
+			// Scan-poisons-rows meant the rows.Err() arm below caught it under
+			// its own message, and the Scan arm now returns directly, keeping
+			// the per-column diagnosis in the caller's error.
+			return nil, dbErrCause(scanErr, "failed to scan recallWithVector row")
 		}
 		// aihub#504: forwarded only when the vector covers a strict prefix — on
 		// this path the value is doubly load-bearing, because the SIMILARITY

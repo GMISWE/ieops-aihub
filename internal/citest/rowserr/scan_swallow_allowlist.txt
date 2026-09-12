@@ -1,0 +1,68 @@
+# Drains exempted from TestNoDrainLoopSwallowsARowScanFailure (aihub#608).
+#
+# One `<file>:<func>:<rows>` per line — the exact line the gate prints when it
+# fails. No line numbers, same reasoning as allowlist.txt (see Loop.Key in
+# rowserr.go); the same coarseness too: a function with several drains over one
+# variable name shares one key, and an entry there defends all of them at once
+# (fetchWIFacets below is exactly that — two loops, one entry).
+#
+# UNLIKE allowlist.txt, this file is NOT expected to be empty. It is the
+# justification ledger for drains adjudicated best-effort in aihub#608,
+# mirroring aihub#607's nontxQueryJustifications: every entry says WHY the
+# discard cannot lie to a caller, the reason lives here rather than in a
+# nolint, and the gate fails on an entry that matches nothing — a stale
+# exemption pre-authorises whatever lands on that key next.
+#
+# The bar an entry has to clear: given that a failed Scan poisons the rows on
+# pgx v5 (the drain stops; rows.Err() sees the error), the site's OWN Err arm
+# must then do something defensible — record the drop somewhere a consumer
+# looks, degrade something the caller can see is missing (a decoration), or
+# fail CLOSED. "The rows are probably fine" does not clear it — that was
+# GetReadyQueue's, PredictConflicts', recall's and ListEvents' shape, and all
+# of those now surface at the Scan arm instead (aihub#608).
+
+# GC sweeps: the Scan error is appended to `errs` before the continue AND the
+# rows.Err() arm writes GCResult.Error, so the run is NOT recorded as completed
+# and the sweep retries (and re-reports) on every tick — the drop is recorded
+# twice over, not swallowed. No HTTP caller exists for a fail-the-call verdict
+# to reach (aihub#607 made the same ruling for these two functions' send-time
+# arms).
+internal/domain/gc.go:RunNeedsHumanSessionAging:rows
+internal/domain/gc.go:RunUnclassifiedWIAlert:rows
+
+# unblockDependentWI: written best-effort policy at BOTH neighbouring error
+# arms (aihub#334): outside class 40 the sweep degrades rather than failing the
+# caller's terminal transition. The failure direction is CLOSED — the poisoned
+# drain leaves every uncollected candidate blocked, the recoverable direction;
+# a decode error is not class 40, so the Err arm's documented best-effort
+# branch is the one that runs.
+internal/domain/run_attempts.go:unblockDependentWI:rows
+
+# checkDedup: dedup is best-effort by documented policy (the send-time arm
+# deliberately allows creation, aihub#522-verified); the poisoned drain reaches
+# the rows.Err() arm, which applies exactly that policy — class 40 returns (the
+# transaction is dead), anything else fails OPEN into creation, the direction
+# every other failure of this function already takes.
+internal/domain/work_items.go:checkDedup:rows
+
+# attachStepState: best-effort by design (aihub#280) — a step-state enrichment
+# failure leaves StepState nil, the same shape as "never claimed", because
+# include_step_state=true must not break a list call that works without it. The
+# scan arm logs to stderr before continuing and the rows.Err() arm logs the
+# truncation, so the degradation is visible to an operator (aihub#607 recorded
+# the same justification for its send arm).
+internal/domain/work_items.go:attachStepState:rows
+
+# /ui page decorations: each function is documented best-effort at its
+# declaration and its send-time arm already degrades to an empty result by
+# design — filter dropdowns, owner avatars, review links and count badges
+# render without the adornment rather than 500ing the page; the ui_helpers /
+# fetchDepMeta rows.Err() arms log to stderr, buildVersionReviewLinks' returns
+# the map built so far, per its "Best-effort: returns an empty map on any
+# error" contract. The caller can see the decoration is missing; nothing plans
+# around its absence.
+internal/server/routes_artifacts.go:buildVersionReviewLinks:rows
+internal/server/ui_handlers_wi.go:fetchDepMeta:rows
+internal/server/ui_helpers.go:fetchWIFacets:rows
+internal/server/ui_helpers.go:fetchAttemptOwners:rows
+internal/server/ui_helpers.go:fetchProjectWICounts:rows

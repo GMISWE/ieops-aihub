@@ -1745,9 +1745,16 @@ func textDedupCheck(ctx context.Context, pool *pgxpool.Pool, project, memType, c
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.ID, &c.Type, &c.Content); err == nil {
-			candidates = append(candidates, c)
+		if err := rows.Scan(&c.ID, &c.Type, &c.Content); err != nil {
+			// aihub#608: this was a success-only guard (`if err == nil`) —
+			// spelling "let the unscannable candidate leave the dedup pool".
+			// aihub#607 made this function's send-time errors fail the call,
+			// and pgx v5's Scan-poisons-rows meant the rows.Err() arm caught
+			// the drain half; the Scan arm now agrees with both, naming the
+			// site.
+			return nil, dbErrCause(err, "failed to scan dedup candidate row")
 		}
+		candidates = append(candidates, c)
 	}
 	// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
 	if err := rows.Err(); err != nil {
@@ -2826,8 +2833,13 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 	for rows.Next() {
 		m, err := scanMemoryLite(rows)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "recall: scanMemoryLite error (possible column drift): %v\n", err)
-			continue
+			// aihub#608: this used to log "possible column drift" to stderr
+			// and continue — spelling "drop the memory, publish the rest". On
+			// pgx v5 the failed Scan poisons the rows, so the rows.Err() arm
+			// below failed the call anyway, as "recall rows error" with the
+			// column-drift diagnosis lost to a log nobody tails. Returning
+			// here keeps the diagnosis in the caller's error.
+			return nil, dbErrCause(err, "failed to scan recall row")
 		}
 		strength := MemoryStrength(m.BaseStrength, m.StabilityDays, m.LastActivatedAt, m.CreatedAt)
 		// min_strength filter is now in SQL (H9); this is just for the EffectiveStrength field
@@ -3549,7 +3561,12 @@ func ListEvents(ctx context.Context, pool *pgxpool.Pool, f *ListEventsFilter) (*
 		if err := rows.Scan(&ev.ID, &ev.WorkItemID, &ev.WorkItemSlug, &ev.RunAttemptID,
 			&ev.ActorUserID, &ev.ActorDisplay, &ev.EventType,
 			&ev.Payload, &ev.Pinned, &ev.Project, &ev.CreatedAt); err != nil {
-			continue
+			// aihub#608: this used to `continue` — and had it worked as
+			// written, the cursor being the last RETURNED row's created_at
+			// would have made paging walk past the dropped event forever.
+			// pgx v5's Scan-poisons-rows meant the rows.Err() arm below
+			// caught it instead; returning here names the site.
+			return nil, dbErrCause(err, "failed to scan event row")
 		}
 		events = append(events, ev)
 	}

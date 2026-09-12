@@ -33,9 +33,9 @@ func repoRoot(t *testing.T) string {
 // TestUserVisibleCopyBanList is the aihub#378 gate. It scans the product-copy
 // surfaces for the markers aihub#373 measured at ~zero in human-written text
 // of the same genre, and fails on any occurrence no per-occurrence directive
-// covers. See the package comment for the surface list, the two TEMPORARY
-// surface exclusions (internal/mcp until aihub#626; plugins/** until its
-// release-batched work item is filed and lands), and the exemption grammar.
+// covers. See the package comment for the surface list, the remaining
+// TEMPORARY surface exclusion (plugins/** until its release-batched work item
+// is filed and lands), and the exemption grammar.
 func TestUserVisibleCopyBanList(t *testing.T) {
 	root := repoRoot(t)
 	res, err := ScanRepo(root)

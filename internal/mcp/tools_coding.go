@@ -278,13 +278,13 @@ func (s *Server) registerCodingTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_commit",
 		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline. " +
-			"⚠️ THIS CALL CAN ACQUIRE LOCKS — a heavier semantic than \"commit\" normally carries, so read this before using it. " +
+			"THIS CALL CAN ACQUIRE LOCKS, a heavier semantic than \"commit\" normally carries, so read this before using it. " +
 			"Before committing it lists the files the commit would contain and compares them against the file_scope locks THIS ATTEMPT ACTUALLY HOLDS " +
-			"(the live lock set, NOT declared_resources — the two routinely disagree). " +
+			"(the live lock set, NOT declared_resources; the two routinely disagree). " +
 			"Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
-			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder — actor, work item and attempt. " +
+			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder: actor, work item and attempt. " +
 			"When every changed file is already covered, no lock is taken and nothing is written. " +
-			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (the index matched HEAD, so there was no change set to lock — reachable here only for a merge commit, which is made from MERGE_HEAD rather than from staged changes; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
+			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (the index matched HEAD, so there was no change set to lock, reachable here only for a merge commit, which is made from MERGE_HEAD rather than from staged changes; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
 			"There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
@@ -463,17 +463,17 @@ func (s *Server) registerCodingTools() {
 			"commit/push/pr failed and \"side_effects\" lists what already happened (typically a " +
 			"local commit that was never pushed). Reach for pf_commit / pf_push / pf_pr separately " +
 			"only when you need to inspect state between the steps. " +
-			"⚠️ AND ITS COMMIT STAGE ACQUIRES LOCKS, exactly as pf_commit's does: every file the commit " +
+			"AND ITS COMMIT STAGE ACQUIRES LOCKS, exactly as pf_commit's does: every file the commit " +
 			"contains that this attempt does not already hold a file_scope lock for is locked for it " +
 			"automatically and stays locked until the attempt ends. A file held by another live attempt " +
-			"stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN — nothing committed, nothing " +
-			"pushed, no PR — and the error names every blocked path and its holder. `lock_gate` in the " +
-			"response reports which of five things happened — covered | acquired | not_run (the commit " +
+			"stops the whole call at stage=\"commit\" with CONFLICT_LOCK_TAKEN (nothing committed, nothing " +
+			"pushed, no PR), and the error names every blocked path and its holder. `lock_gate` in the " +
+			"response reports which of five things happened: covered | acquired | not_run (the commit " +
 			"stage finished and nothing was staged, so no commit was needed and there was nothing to " +
 			"lock) | refused (another live attempt holds one of the files) | could_not_run (nothing was " +
-			"checked: either the check itself failed, or the commit stage died before reaching it — " +
+			"checked: either the check itself failed, or the commit stage died before reaching it; " +
 			"`lock_gate_detail` says which, and `side_effects` rather than `lock_gate` says what was " +
-			"left in the index) — and there is no pass-through: a check that cannot reach the server " +
+			"left in the index). There is no pass-through: a check that cannot reach the server " +
 			"fails the ship rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
@@ -774,7 +774,7 @@ func shipSideEffects(res *coding.ShipResult) []string {
 func shipAdvice(res *coding.ShipResult, err error) string {
 	if isBaseMoved(err) {
 		return "The base branch moved. Fetch and rebase onto the latest base, then retry pf_ship " +
-			"with the same arguments — any commit already made will not be duplicated."
+			"with the same arguments; any commit already made will not be duplicated."
 	}
 	switch res.Stage {
 	case coding.StageCommit:
@@ -784,11 +784,11 @@ func shipAdvice(res *coding.ShipResult, err error) string {
 		// created no commit, so there is no commit "above" to point at, and the
 		// undelivered work is identified only by HEAD.
 		return "Nothing reached origin. Worktree HEAD (head_sha in this response) is local only. " +
-			"Fix the push failure and retry pf_ship with the same arguments — no already-made " +
+			"Fix the push failure and retry pf_ship with the same arguments: no already-made " +
 			"commit will be duplicated."
 	case coding.StagePR:
 		return "The commits are already on origin and are safe; only opening the PR failed. " +
 			"Retry pf_ship with the same arguments, or open the PR by hand with pf_pr."
 	}
-	return "Retry pf_ship with the same arguments — no completed stage is repeated."
+	return "Retry pf_ship with the same arguments; no completed stage is repeated."
 }

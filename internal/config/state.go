@@ -167,7 +167,7 @@ func ResolveStateFile(idOrSlug string) (*StateFile, error) {
 //
 // STATE_FILE_MISSING goes in the string because that is where this codebase
 // already puts client-side codes: classifyStepUpdateErr returns
-// "STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"
+// "STALE_LOCAL_CREDENTIAL: state file deleted; please re-claim this work item"
 // through the same errResult path. A second convention would have been worse
 // than the one that exists, and giving errResult a structured envelope is a
 // change to every tool's response shape rather than to this family's wording.

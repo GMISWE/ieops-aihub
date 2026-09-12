@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_create_work_item",
-  "description_sha256": "2978a1542ea8458bd057eea171e82bbd04eecdec320281d9b37b3ce3c14b9d69",
-  "input_schema_sha256": "bd546eb788a6c4f5062d6aa03698211e70f7a6b2b4b6ae2aa7983194026b8a19",
+  "description_sha256": "743e32ca1de21edc36fc36d956a59f7748864e8b363cec5c8196c3fe81452351",
+  "input_schema_sha256": "66ec9cd4453bfb9e14c07eaab66b7e3342789d215a98cabc0e1504f4ad0f5a0a",
   "params": {
     "attrs": {
       "type": "object",

@@ -17,7 +17,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_remember
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_remember",
-		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types — write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact. A response carrying embedded_len is a truncation warning: only the first embedded_len runes of the stored content were vector-embedded (the embedding input budget), so semantic recall will never match anything past that point — split the document or accept that the tail is text-search-only.",
+		Description: "Store a memory in aihub. type must use full name (e.g. experience.debug). Rejects methodology.* types; write spec/plan/review/execute/retro/wrap_summary via pf_save_artifact. A response carrying embedded_len is a truncation warning: only the first embedded_len runes of the stored content were vector-embedded (the embedding input budget), so semantic recall will never match anything past that point. Split the document or accept that the tail is text-search-only.",
 		InputSchema: rememberSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -42,7 +42,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"] — one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest. Separately, an item carrying embedded_len was vector-embedded from only its first embedded_len runes (the embedding input budget): semantic ranking saw that prefix alone, and content past it is findable only by text search. A query returns TWO sections (aihub#360): items[] is the semantic ranking, and `lexical` is a parallel verbatim-substring match (every whitespace token of the query, case-insensitive, must appear in a row's content; its hits carry NO similarity — none is computed). The index is ONE unchunked vector per row, so an EXCERPT of a stored memory routinely fails to retrieve it semantically (measured 2026-09-06, aihub#367: recall@1 0/42; production-shape recall@10 33.3% vs 14.1% random) — a semantic miss is NOT evidence of absence. Judge existence by the lexical section: its total is explicit, and `lexical.total: 0` is the strongest available not-in-corpus signal.",
+		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"], one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest. Separately, an item carrying embedded_len was vector-embedded from only its first embedded_len runes (the embedding input budget): semantic ranking saw that prefix alone, and content past it is findable only by text search. A query returns TWO sections (aihub#360): items[] is the semantic ranking, and `lexical` is a parallel verbatim-substring match (every whitespace token of the query, case-insensitive, must appear in a row's content; its hits carry NO similarity, as none is computed). The index is ONE unchunked vector per row, so an EXCERPT of a stored memory routinely fails to retrieve it semantically (measured 2026-09-06, aihub#367: recall@1 0/42; production-shape recall@10 33.3% vs 14.1% random); a semantic miss is NOT evidence of absence. Judge existence by the lexical section: its total is explicit, and `lexical.total: 0` is the strongest available not-in-corpus signal.",
 		InputSchema: recallSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -94,7 +94,7 @@ func (s *Server) registerMemoryTools() {
 	// complete it. This is the tool half of that escape hatch.
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_get_memory",
-		Description: "Fetch one memory by id with its FULL, untruncated content — the follow-up read for a pf_recall item whose content_truncated is true. If the response carries embedded_len, the stored vector embeds only the first embedded_len runes of this content: semantic recall cannot see the rest.",
+		Description: "Fetch one memory by id with its FULL, untruncated content: the follow-up read for a pf_recall item whose content_truncated is true. If the response carries embedded_len, the stored vector embeds only the first embedded_len runes of this content: semantic recall cannot see the rest.",
 		InputSchema: getMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -140,7 +140,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_reinforce_memory
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_reinforce_memory",
-		Description: "Reinforce a memory with additional context (mutating — credentials from state file)",
+		Description: "Reinforce a memory with additional context (mutating; credentials from state file)",
 		InputSchema: reinforceMemorySchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -219,7 +219,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_save_artifact
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_save_artifact",
-		Description: "Save a methodology artifact. type must start with methodology. (suggested: spec, plan, review, execute, retro, wrap_summary — an off-list methodology.* name is also accepted). Credentials injected from state file.",
+		Description: "Save a methodology artifact. type must start with methodology. (suggested: spec, plan, review, execute, retro, wrap_summary; an off-list methodology.* name is also accepted). Credentials injected from state file.",
 		InputSchema: saveArtifactSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -456,7 +456,7 @@ func recallSchema() json.RawMessage {
 		// SKILL.md templates taught type="a|b|c", nothing split it, and the
 		// resulting empty set read as "no relevant memory". The model reads this
 		// string, so this string has to state the contract.
-		"type": prop("array", "Memory types to filter — an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|' — that is not a separator and is rejected with a 400."),
+		"type": prop("array", "Memory types to filter: an ARRAY of names, one per entry: [\"experience.*\",\"rule.work\"]. Entries ending in .* are prefix wildcards. Do NOT pack several types into one string with '|', which is not a separator and is rejected with a 400."),
 		// ⚠️ No `visibility` here — withdrawn by aihub#484 on 2026-09-09; see the
 		// tombstone on recallStringParams above for the measurement. It promised
 		// "Filter by visibility" and no recall-path function in internal/domain
@@ -467,12 +467,12 @@ func recallSchema() json.RawMessage {
 		// skill types looked unsupported and callers burned a pf_get_work_item
 		// round-trip for a canonical id nothing needs. Pinned by
 		// slug_publication_test.go (TestSlugAcceptanceIsPublishedByRecall).
-		"work_item_id": prop("string", "Filter by work item — canonical id or slug; either resolves "+
+		"work_item_id": prop("string", "Filter by work item, as canonical id or slug; either resolves "+
 			"to the same filter (aihub#363)."),
 		"top_k": prop("string", "Max results (default 20, ceiling 200). A JSON number is also "+
 			"accepted, and is what most callers send."),
 		"similarity_threshold": prop("number", "Minimum cosine similarity, 0-1. Applies to the "+
-			"semantic (vector) half of the recall only, and is OFF by default — scores are not "+
+			"semantic (vector) half of the recall only, and is OFF by default: scores are not "+
 			"comparable across queries, so there is no safe global cutoff. A threshold that "+
 			"matches nothing returns an empty list rather than falling back to text search: "+
 			"empty is the intended answer when you set one."),
@@ -506,7 +506,7 @@ func recallSchema() json.RawMessage {
 		// lexical section serves that semantics on every recall with a query.
 		// Do not re-add it here without also reversing
 		// TestRecallAlgoStaysUnpublished and TestRecallAlgoIsRetired.
-		"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor. "+
+		"cursor": prop("string", "Opaque page token: pass a previous response's next_cursor. "+
 			"TEXT-path paging only: the semantic (vector) path and the hybrid merge "+
 			"return no next_cursor and ignore this."),
 		// aihub#433 / aihub#411 T2-19. The default is unchanged and deliberately
@@ -516,7 +516,7 @@ func recallSchema() json.RawMessage {
 		// as a sensible mid-range cutoff only if you believe the range this tool
 		// used to publish for base_strength, which is why the two strings are
 		// fixed together and gated together.
-		"min_strength":     prop("number", "Min effective strength — base_strength (1-5) after decay. Default 0.3 filters nothing"),
+		"min_strength":     prop("number", "Min effective strength, i.e. base_strength (1-5) after decay. Default 0.3 filters nothing"),
 		"include_archived": prop("boolean", "Include archived memories (default false)"),
 		// ⚠️ No `recency_weight` here — withdrawn by aihub#469, see the note on
 		// recallNumberParams for the measurement. Its published description said
@@ -763,8 +763,8 @@ func memoryTypeParamDesc() string {
 	}
 	return "Memory type, full name (e.g. experience.debug). ENFORCED: must start with " +
 		strings.Join(globs, ", ") + ", and contain no '|' (a memory has exactly ONE type; " +
-		"a piped one can never be recalled by type). methodology.* is refused here — use " +
-		"pf_save_artifact. SUGGESTED, not a closed set — an off-list name with a legal prefix " +
+		"a piped one can never be recalled by type). methodology.* is refused here; use " +
+		"pf_save_artifact. SUGGESTED, not a closed set: an off-list name with a legal prefix " +
 		"is accepted and stored: " + strings.Join(domain.PfRememberTypeEnum, ", ") + "."
 }
 
@@ -831,8 +831,8 @@ func rememberVisibilityParamDesc() string {
 func visibilityVocabAndConsequence() string {
 	return "ENFORCED: one of " +
 		strings.Join(domain.MemoryVisibilityList(), "|") +
-		" (memories_visibility_check, mirrored in Go — anything else is a 400 naming the field). " +
-		"⚠️ `public` is the anonymous-share tier: GET /share/:id serves a public memory with NO auth " +
+		" (memories_visibility_check, mirrored in Go; anything else is a 400 naming the field). " +
+		"NOTE: `public` is the anonymous-share tier: GET /share/:id serves a public memory with NO auth " +
 		"when it also has a renderable body."
 }
 
@@ -1102,7 +1102,7 @@ func methodologyTypeParamDesc() string {
 	return "Artifact type, full name (e.g. " + domain.MethodologyTypeEnum[0] + "). ENFORCED: must " +
 		"start with " + domain.MethodologyTypePrefix + " (pf_remember takes the other prefixes), " +
 		"contain no '|', and carry this work item's attempt credentials, which this tool sends " +
-		"from the state file. SUGGESTED, not a closed set — an off-list name with the " +
+		"from the state file. SUGGESTED, not a closed set: an off-list name with the " +
 		domain.MethodologyTypePrefix + " prefix is accepted and stored: " +
 		strings.Join(domain.MethodologyTypeEnum, ", ") + ". An off-list type is stored but is " +
 		"NOT pre-rendered and does NOT appear in the work item's artifact list, both of which " +
@@ -1127,7 +1127,7 @@ func offPrefixHint(artifactType string) string {
 	}
 	for _, p := range domain.MemoryTypePrefixes {
 		if p != domain.MethodologyTypePrefix && strings.HasPrefix(artifactType, p) {
-			return "that is a pf_remember type, not an artifact — pf_save_artifact writes " +
+			return "that is a pf_remember type, not an artifact; pf_save_artifact writes " +
 				"work-item-bound methodology artifacts only"
 		}
 	}

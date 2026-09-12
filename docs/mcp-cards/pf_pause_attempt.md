@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_pause_attempt",
-  "description_sha256": "fcfae2916f42bafa65ec2a703a2278ba4752aae19153db5edc845d913a161946",
+  "description_sha256": "a8261b197becba087ae99f224bad4daec86be812b7db848173ad4a0aed26af61",
   "input_schema_sha256": "b2a0b799191acc6ff59530c2dc1df8b535735fce5fe9b62b4d718a79380cc79e",
   "params": {
     "pause_reason": {

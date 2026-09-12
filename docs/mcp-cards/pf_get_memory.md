@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_get_memory",
-  "description_sha256": "bb955eb200280673948a1479db4020d31dd765bc6426f73ba3a5d9b1c68c1d9b",
+  "description_sha256": "cda534c4561efe2b3bf31f57c1875e7044e0a6b8a1b9b880e5162306b6394722",
   "input_schema_sha256": "d8b070884ea6bfca420b507d729d4aa5a2a7ce9e98be09114524090d3360d1aa",
   "params": {
     "memory_id": {

@@ -4,7 +4,7 @@
 {
   "tool": "pf_get_ready_queue",
   "description_sha256": "ee016b0c85960c28e900f6134683d38c7cbed004139104d9595d80763fb6c48e",
-  "input_schema_sha256": "50cc9e20d3f3579b279c43ab35dacdf4fda68bb80946013fa2df79d8366302f3",
+  "input_schema_sha256": "bab987df1ceab8fedbb533d0d9096f404d7d9df02731dbbec718ce94b930d3d8",
   "params": {
     "max": {
       "type": "string",
@@ -36,7 +36,7 @@ parameter that reached the wire and was read by nothing.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | "Project name" |
-| `max` | string | no | "Max items in EACH queued section — items, needs_human_session and unclassified take it as their own LIMIT (default 10)" |
+| `max` | string | no | "Max items in EACH queued section: items, needs_human_session and unclassified take it as their own LIMIT (default 10)" |
 
 `non_conflicting` was published here and forwarded as `?non_conflicting=true` from
 the day the tool was added until `aihub#387` withdrew it. Nothing ever read it:

@@ -209,7 +209,7 @@ func unknownParamsLogLine(tool string, unknown []string) string {
 		mechanism = "they were stripped at this boundary before the request was built, so nothing " +
 			"was forwarded and they had no effect (aihub#586)"
 	}
-	return fmt.Sprintf("polyforge: %s received %d parameter(s) it does not publish: %v — %s (aihub#389)\n",
+	return fmt.Sprintf("polyforge: %s received %d parameter(s) it does not publish: %v; %s (aihub#389)\n",
 		tool, len(unknown), unknown, mechanism)
 }
 

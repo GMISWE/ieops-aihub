@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_commit",
-  "description_sha256": "5f44b1634c4eb4dfcbdce62c657b98cbe3cbb73e3fbd40238b7460fc5d04669e",
+  "description_sha256": "67d89eae3718754afb4a65a821c3179c7dc9f25f1c5506612fe8287fe7445fd6",
   "input_schema_sha256": "efb55cef0d5dd923b0e8c7447968212c86a2e60bdcf5342ee087f602af2d8545",
   "params": {
     "message": {

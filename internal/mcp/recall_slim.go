@@ -113,7 +113,7 @@ var recallItemWithheldKeys = map[string]string{
 	//    a complete standalone HTML document on methodology.* artifacts. The
 	//    model cannot use markup, and one such field can exceed the whole rest
 	//    of the response.
-	"rendered_html": "a full standalone HTML document on methodology.* artifacts — the largest " +
+	"rendered_html": "a full standalone HTML document on methodology.* artifacts: the largest " +
 		"field a memory can carry, and unusable by a model. /ui and the artifact HTML viewer " +
 		"serve it; pf_get_memory returns the markdown source.",
 	"backlinks": "the reverse edge of `related`, which IS forwarded. Both directions is double the " +
@@ -125,8 +125,8 @@ var recallItemWithheldKeys = map[string]string{
 	//    are the inputs it is computed FROM, so forwarding them pays for the
 	//    model to re-derive a value it already has.
 	"base_strength":     "an input to effective_strength, which is forwarded; nothing reads the input.",
-	"stability_days":    "same — a decay parameter, not a fact about the memory's content.",
-	"activation_count":  "same — reinforcement bookkeeping behind effective_strength.",
+	"stability_days":    "same: a decay parameter, not a fact about the memory's content.",
+	"activation_count":  "same: reinforcement bookkeeping behind effective_strength.",
 	"last_activated_at": "activation bookkeeping; recency judgements use created_at, which is forwarded.",
 	"last_activated_by": "who last activated it. Provenance of a read, not content, and not actionable.",
 	"is_immortal":       "a decay exemption flag, i.e. another effective_strength input.",
@@ -135,12 +135,12 @@ var recallItemWithheldKeys = map[string]string{
 
 	// ── Identity the caller already fixed or cannot act on. project comes from
 	//    the request; author/visibility/status are governance, not content.
-	"project": "the caller supplied it in the request — echoing it back per item pays for a " +
+	"project": "the caller supplied it in the request, so echoing it back per item pays for a " +
 		"value the caller already holds.",
 	"author_user_id": "an opaque internal id the model cannot resolve or act on.",
 	"author_display": "provenance rather than content; pf_get_memory carries it for the one memory " +
 		"a caller actually opens.",
-	"visibility": "an access-control fact already enforced server-side — anything the caller " +
+	"visibility": "an access-control fact already enforced server-side; anything the caller " +
 		"cannot see is not in this list at all, so the field can only ever confirm the obvious.",
 	// ⚠️ `status` is NOT in this list, and the first draft of this change had it
 	// here with the reason "recall returns live rows, so this is always active".
@@ -203,7 +203,7 @@ var recallItemWithheldKeys = map[string]string{
 		"forwarded; updated_at moves on a reinforce and would read as recency it does not mean.",
 
 	// ── Embedding internals. Pure infrastructure.
-	"emb_model": "which embedding model produced the vector — an infrastructure fact with no " +
+	"emb_model": "which embedding model produced the vector, an infrastructure fact with no " +
 		"bearing on what the memory says.",
 	"emb_dims": "the vector's dimensionality; same.",
 }
@@ -220,7 +220,7 @@ var recallItemNarrowedKeys = map[string]string{
 	"attrs": "kept ONLY as {structured_payload}. The rest of attrs is per-type internal " +
 		"bookkeeping; structured_payload is the half a caller wrote deliberately (spec " +
 		"acceptance criteria, review findings). Residual: a new key inside attrs does not arrive.",
-	"commits": "kept as the human INSIGHT only — body, author_display as `by`, and reply bodies — " +
+	"commits": "kept as the human INSIGHT only (body, author_display as `by`, and reply bodies), " +
 		"with ids, author_user_id, timestamps, anchors and thread structure stripped. Residual: a " +
 		"new key inside a commit does not arrive.",
 }

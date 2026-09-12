@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_cancel_work_item",
-  "description_sha256": "be34ae201d4ae3c83fff8f32df80da145c5c2477ef33856ae71190ce5ce03952",
+  "description_sha256": "5bf49f6bd910b15aeb6cf3a8740aa6cd0c5a7b2d003b843292fd91b0caae0500",
   "input_schema_sha256": "9cefaa19ce14188a6f2e77d6c54018f1f18be9cb6b435b93695c6b3f1834e1c8",
   "params": {
     "reason": {

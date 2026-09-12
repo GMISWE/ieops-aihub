@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_read_events",
-  "description_sha256": "c495ca6b4e50e46b49bc56d8e8eeb357784284e54b737ff696a6734c6f6d42ae",
-  "input_schema_sha256": "785169078a3d1f45d3949297e10d1fc19540df6cc0ff26eda0e454ccf4b33de8",
+  "description_sha256": "3a6c63620fae071617cf8e0456b524416aa6d6e510065b23789891da9fa6aae4",
+  "input_schema_sha256": "030de9bfa41ff5bbde25eb5aa8177f1a248bd1dd2da7d5860479dda9f8db3ae8",
   "params": {
     "cursor": {
       "type": "string",

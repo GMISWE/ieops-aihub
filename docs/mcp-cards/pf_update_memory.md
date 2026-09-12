@@ -4,7 +4,7 @@
 {
   "tool": "pf_update_memory",
   "description_sha256": "e373c1b2dd6fc7d2da8301632578d70f162feaa3cc682aaced84abaffddb0f1a",
-  "input_schema_sha256": "34a85d04f5a50c8143d9c95269fdab4ac620153c3743f1a7c77432214cdb139a",
+  "input_schema_sha256": "1e2eea33edeb98ed83d833ea0449407601c1f35b3991abc5f37bd85f57d741bb",
   "params": {
     "base_strength": {
       "type": "number",

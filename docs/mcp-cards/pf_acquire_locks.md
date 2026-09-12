@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_acquire_locks",
-  "description_sha256": "fbd2cbf926935ea2cab1195a2801bc6e648e199625ede7fb0a7bef350c114bcf",
+  "description_sha256": "1c5950b9bf0e0d93bb9ba3896679e1f6ed31cbcab3a335780484443f68a29f92",
   "input_schema_sha256": "9ec2816b6ac4d1a38dbba45cadc97d1817b4a4491844acb11cc17cabe4a2fa77",
   "params": {
     "work_item_id": {

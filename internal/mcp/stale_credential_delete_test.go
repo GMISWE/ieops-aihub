@@ -20,7 +20,7 @@ package mcp_test
 // deletes the pre-claim stub the moment the canonical file lands (aihub#141).
 //
 // The delete therefore removed NOTHING while classifyStepUpdateErr returned the
-// literal text "STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim
+// literal text "STALE_LOCAL_CREDENTIAL: state file deleted; please re-claim
 // this work item". The caller is told the credential is gone; it is still on
 // disk; the next slug-addressed call resolves to it again and re-sends the same
 // dead credential. Nothing in the loop terminates it — an agent that trusts the

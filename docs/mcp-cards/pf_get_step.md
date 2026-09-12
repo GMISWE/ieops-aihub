@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_get_step",
-  "description_sha256": "7c843970e4b28c379391a4c76e182b9d29685af5b54da1392f0af6d821257e69",
+  "description_sha256": "15584aa0b62981ff6e439ad5fd46a319e9ed5f8ba6f919e2d1c3eedf51a6b6ca",
   "input_schema_sha256": "0d138f8f344be0161281deb07d0ff88f782e6397ea2be18bb413fb2c4cfe88e4",
   "params": {
     "work_item_id": {

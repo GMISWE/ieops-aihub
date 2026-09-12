@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_claim_work_item",
-  "description_sha256": "8ad92ad01ec4a74804859e887970087ba2f3572539186dc40b3b44c97c1b0048",
-  "input_schema_sha256": "87a9ba1141422c042e4762145752878c7d79485166bef069385b5a7e7e1def67",
+  "description_sha256": "217fc4e7868d06b69e044249c0e221134a833d90801266adb11d8d2377a46527",
+  "input_schema_sha256": "ed92323993421a21654e60262b99c28d844dc3b5a76f3e7a9a8b40053f6fb816",
   "params": {
     "force_takeover": {
       "type": "boolean",

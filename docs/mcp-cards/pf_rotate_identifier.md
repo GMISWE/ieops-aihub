@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_rotate_identifier",
-  "description_sha256": "c03ebc4e8f0f29519857adfb15b1d6b17bf5402086fe4099cafb559a1c2c21a0",
+  "description_sha256": "2e36043cfb6ecd1ef30e837deaeae3530932ee85e502a9969e2be52ef29d2a0e",
   "input_schema_sha256": "ebb939f2990b66ae8741abbcaefcd693d6794ac19a77fbc7ab9677a5cb963cb4",
   "params": {
     "name": {
@@ -24,7 +24,7 @@ One parameter, and a description with a handling instruction in it.
 |---|---|---|---|
 | `name` | string | yes | "Project name" |
 
-"Rotate the project identifier (bcrypt token). **Returns plain once — store it
+"Rotate the project identifier (bcrypt token). **Returns plain once; store it
 securely.** Owner/admin only." Three facts in one line: what it rotates, that the
 plaintext is unrecoverable afterwards, and who may call it.
 

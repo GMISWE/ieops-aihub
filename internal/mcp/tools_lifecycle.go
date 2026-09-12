@@ -106,7 +106,7 @@ func buildListWorkItemsParams(args map[string]any) (url.Values, error) {
 // split out so the forwarding test can read the same value the tool registers.
 func listWorkItemsSchema() json.RawMessage {
 	idsProp := prop("array", "Filter to these work item IDs or slugs (array of strings; "+
-		"a comma-separated string is also accepted). Makes `project` optional — an id "+
+		"a comma-separated string is also accepted). Makes `project` optional: an id "+
 		"already names one work item, and the query is bounded to the projects you can see. "+
 		"An inaccessible project= answers 404 and ids you cannot see are silently omitted; "+
 		"neither says whether the thing exists (aihub#377).")
@@ -149,12 +149,12 @@ func listWorkItemsSchema() json.RawMessage {
 			"than either limit they return different subsets."),
 		"include_step_state": prop("boolean", "Attach each item's step state as `step_state` "+
 			"(current_step, current_step_status, step_started_at, ...). The key is ABSENT for a work "+
-			"item that has never been claimed — and also if the lookup itself failed, which is "+
+			"item that has never been claimed, and also if the lookup itself failed, which is "+
 			"best-effort and reported only on the server's stderr. Absent therefore means \"no step "+
 			"state\", not \"definitely never claimed\"."),
 		"since": prop("string", "Only items whose CREATED_AT is at or after this RFC3339 timestamp. "+
 			"This is creation time, not close time: combining it with status=wrapped does NOT give "+
-			"\"wrapped since T\" — an item created before T and wrapped after it is excluded. "+
+			"\"wrapped since T\": an item created before T and wrapped after it is excluded. "+
 			"An unparseable value is rejected rather than ignored."),
 		// ─── Description budget for the three semantic params ────────────────
 		//
@@ -196,23 +196,23 @@ func listWorkItemsSchema() json.RawMessage {
 		"query": prop("string", "Semantic search over goal+content (aihub#273): "+
 			"embedding cosine when the server has a provider, ILIKE fallback otherwise. "+
 			"Similarity-ordered; not combinable with sort/order/cursor; mutually exclusive "+
-			"with similar_to. 🔴 `similarity` compares only WITHIN one result set — it has no "+
+			"with similar_to. CAUTION: `similarity` compares only WITHIN one result set; it has no "+
 			"absolute meaning and there is no relevance filter, so ANY input returns a full "+
 			"page. Judge by `semantic.ranked_candidates` (you got the top len(items) of that "+
 			"many) and by reading the goals. For \"like this work item\" use similar_to."),
-		"similar_to": prop("string", "Document→document recall (aihub#277): a work item id or "+
-			"slug whose STORED goal+content vector becomes the query vector — far sharper "+
+		"similar_to": prop("string", "Document-to-document recall (aihub#277): a work item id or "+
+			"slug whose STORED goal+content vector becomes the query vector, far sharper "+
 			"than approximating it with a one-line query=. Makes `project` optional the way "+
 			"`ids` does. The source is scoped like the results: 404 outside that scope, 412 "+
 			"if it has no embedding yet. It is an ordinary row in its own results (so at "+
-			"similarity 1.0, unless one of your other filters excludes it) — to confirm which "+
+			"similarity 1.0, unless one of your other filters excludes it); to confirm which "+
 			"row was used, read `semantic.source_work_item_id`, which is unconditional. "+
 			"`similarity` is still only comparable within this one result set. "+
 			"Excludes query=; no sort/order/cursor."),
 		"min_similarity": prop("string", "Opt-in cosine floor for the vector path; a JSON "+
 			"number is also accepted. Must be in [0,1]. 0 is the default and means OFF, so "+
 			"sending 0 is always accepted and always a no-op; any value above 0 requires "+
-			"query= or similar_to= and is a 400 otherwise, never a silent no-op. 🔴 No "+
+			"query= or similar_to= and is a 400 otherwise, never a silent no-op. No "+
 			"globally valid value exists, so none is ever defaulted: measured, garbage and "+
 			"real queries overlap on every similarity-derived statistic."),
 		"limit": prop("string", "Max items to return (default 50, ceiling 200). A JSON number "+
@@ -224,7 +224,7 @@ func listWorkItemsSchema() json.RawMessage {
 		// being retyped here, so the published contract cannot drift from the
 		// validator that rejects everything outside them.
 		"sort": propEnum("string", fmt.Sprintf(
-			"Sort column (default %s). %s returns ONLY closed items — a NULL close time has no position in that ordering.",
+			"Sort column (default %s). %s returns ONLY closed items, since a NULL close time has no position in that ordering.",
 			domain.ListWorkItemsSortCreatedAt, domain.ListWorkItemsSortClosedAt),
 			domain.ListWorkItemsSortValues()),
 		"order": propEnum("string", fmt.Sprintf("Sort direction (default %s)", domain.ListWorkItemsOrderDesc),
@@ -455,7 +455,7 @@ func (s *Server) registerLifecycleTools() {
 	// pf_create_work_item
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_work_item",
-		Description: "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items — repeated calls here cost one round-trip each.",
+		Description: "Create a work item in the specified project. To create more than one, use pf_batch_create_work_items; repeated calls here cost one round-trip each.",
 		InputSchema: createWorkItemSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -473,7 +473,7 @@ func (s *Server) registerLifecycleTools() {
 		if err != nil {
 			// Surface PROJECT_NOT_FOUND with a clear message
 			if isAihubCode(err, "PROJECT_NOT_FOUND") {
-				return errResult(fmt.Errorf("PROJECT_NOT_FOUND: project %q does not exist — create it first with pf_create_project", strArg(args, "project")))
+				return errResult(fmt.Errorf("PROJECT_NOT_FOUND: project %q does not exist; create it first with pf_create_project", strArg(args, "project")))
 			}
 			return errResult(err)
 		}
@@ -503,7 +503,7 @@ func (s *Server) registerLifecycleTools() {
 		Name: "pf_batch_create_work_items",
 		Description: "Create SEVERAL work items in one call. Use this when filing more than one wi at once " +
 			"(follow-ups discovered mid-execution, a backlog split into pieces) instead of calling " +
-			"pf_create_work_item repeatedly — each extra call costs a whole round-trip for a confirmation " +
+			"pf_create_work_item repeatedly: each extra call costs a whole round-trip for a confirmation " +
 			"the next one does not read. " +
 			"Items are created INDEPENDENTLY and one failure does not stop the rest: the response reports " +
 			"`created` and `failed` separately, each failure carrying the item's `index` so a retry can " +
@@ -628,11 +628,11 @@ func (s *Server) registerLifecycleTools() {
 		Description: "List work items with optional filters. " +
 			"Item keys whose value is null are omitted: an absent key means null. " +
 			"query= returns TWO sections (aihub#360): items[] (semantic when the server has an " +
-			"embedding provider — the `semantic` block says so; ILIKE text match otherwise) plus " +
+			"embedding provider, and the `semantic` block says so; ILIKE text match otherwise) plus " +
 			"`lexical`, a parallel verbatim-substring section (every whitespace token of the query, " +
 			"case-insensitive, must appear in goal+content; its hits carry NO similarity). The index " +
-			"is ONE unchunked vector per work item over goal+content only — attrs, labels and events " +
-			"are never embedded — so an EXCERPT of a stored work item routinely fails to retrieve it " +
+			"is ONE unchunked vector per work item over goal+content only (attrs, labels and events " +
+			"are never embedded), so an EXCERPT of a stored work item routinely fails to retrieve it " +
 			"semantically (measured 2026-09-06, aihub#367: query= recall was 0/6 at EVERY N). A " +
 			"semantic miss is NOT evidence of absence: judge existence by the lexical section, whose " +
 			"`total: 0` is explicit, or by ids=/filters.",
@@ -731,18 +731,18 @@ func (s *Server) registerLifecycleTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_update_work_item",
 		Description: "Update a work item. Editability is ONE matrix over three field tiers, and the STRICTEST " +
-			"tier the patch touches governs the whole patch — a patch that mixes tiers is refused whole, never " +
+			"tier the patch touches governs the whole patch: a patch that mixes tiers is refused whole, never " +
 			"applied in part. " +
 			"contract (goal, wi_type): only while status is queued, paused or blocked, and only for the " +
 			"reporter, a project maintainer or an admin. " +
 			"working (content, labels, priority, milestone, requires_human_session, declared_resources): any " +
 			"non-terminal status. " +
-			"record (attrs, attrs_patch, attrs_unset): EVERY status, including a wrapped work item — deliberate, " +
+			"record (attrs, attrs_patch, attrs_unset): EVERY status, including a wrapped work item; deliberate, " +
 			"and load-bearing for post-wrap records. " +
 			"A refusal names the KIND, not the field: 409 CONFLICT_WI_ALREADY_CLAIMED (running) or 409 " +
 			"CONFLICT_TERMINAL_STATE (wrapped, failed, cancelled) for a wrong state, 403 FORBIDDEN for a wrong " +
 			"caller. " +
-			"🔴 NEW since aihub#440, and the only part of this that used to be otherwise: labels, priority, " +
+			"NEW since aihub#440, and the only part of this that used to be otherwise: labels, priority, " +
 			"milestone, requires_human_session and declared_resources had NO status guard and succeeded on a " +
 			"terminal work item; they now answer 409 CONFLICT_TERMINAL_STATE there.",
 		InputSchema: objectSchema(map[string]any{
@@ -860,7 +860,7 @@ func (s *Server) registerLifecycleTools() {
 			// means no body" rule to that one's reply and conclude a work item
 			// with a 4 KB body was empty.
 			"brief": prop("boolean", "Replace the content body with content_len (bytes stored); default false. "+
-				"A wi that HAS no body is unaffected — it comes back as content: null with no content_len, so a "+
+				"A wi that HAS no body is unaffected; it comes back as content: null with no content_len, so a "+
 				"missing content_len here means \"this wi has no body\", never \"the body was withheld\". "+
 				"NOT the same as pf_get_work_item's brief, which deletes content outright and reports no length. "+
 				"Content you send in THIS call is never echoed back regardless of this flag."),
@@ -910,19 +910,19 @@ func (s *Server) registerLifecycleTools() {
 	// pf_claim_work_item
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_claim_work_item",
-		Description: "Claim a work item — creates a new run_attempt with typed locks and writes the state " +
+		Description: "Claim a work item: creates a new run_attempt with typed locks and writes the state " +
 			"file every later credential-checked pf_* call authenticates with. Retry-safe: resending the " +
 			"same idempotency_key returns the first call's attempt and keeps the session_secret it is " +
 			"bound to (aihub#392).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID or slug"),
-			"idempotency_key": prop("string", "Idempotency key for DB dedup on run_attempts — a BODY "+
+			"idempotency_key": prop("string", "Idempotency key for DB dedup on run_attempts: a BODY "+
 				"parameter, NOT the HTTP Idempotency-Key header, which the client now mints per request "+
 				"on its own (aihub#436); different guarantees, and the design requires both. "+
 				"Resending a key returns the "+
 				"EXISTING attempt, and this process reuses the session_secret it recorded for that key so "+
 				"the credential stays valid (aihub#392: it used to mint a new one, and every later call "+
-				"then answered 'invalid session_secret'). ⚠️ Only works where that record exists: "+
+				"then answered 'invalid session_secret'). CAUTION: only works where that record exists: "+
 				"replaying a key from another machine, or after the state file was deleted, is still left "+
 				"unauthenticated. Send a NEW key unless retrying a call whose response you never saw."),
 			"requested_locks": requestedLocksProp("Resource locks to acquire"),
@@ -953,7 +953,7 @@ func (s *Server) registerLifecycleTools() {
 			// this path — it measures the one the qualifier described. The full
 			// analysis of the commit-window gap the unpinned default leaves open is
 			// still in internal/domain/resource_events.go above lockUpsertSQL.
-			"force_takeover": prop("boolean", "Force takeover if already claimed. ⚠️ It takes over the WORK "+
+			"force_takeover": prop("boolean", "Force takeover if already claimed. NOTE: it takes over the WORK "+
 				"ITEM, not other people's locks: a lock held by a running or paused attempt of a "+
 				"DIFFERENT work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands "+
 				"(aihub#393). It reclaims this work item's own locks, and rows whose owning attempt has "+
@@ -1206,13 +1206,13 @@ func (s *Server) registerLifecycleTools() {
 				attemptDesc = "A new attempt (the server did not echo its id)"
 			}
 			return errResult(fmt.Errorf("update state file: %w"+
-				" — ⚠️ NOT A NO-OP: the claim ALREADY SUCCEEDED on the server."+
+				" (NOT A NO-OP: the claim ALREADY SUCCEEDED on the server)."+
 				" %s is running under your name and holds whatever locks this work item declares;"+
 				" only this machine's local record of it failed, and without that record nothing here can authenticate as the attempt."+
 				" RECOVERY: call pf_claim_work_item again and REPLAY THIS SAME idempotency_key, with the same work_item_id spelling you passed here."+
 				" This process persisted that key's session_secret before it called the server, so the replay reuses that exact secret and the server returns THIS attempt with its epoch unchanged (aihub#392):"+
 				" it costs no epoch bump and no superseded attempt, and the only thing it has to redo is the local write that just failed."+
-				" Send a NEW idempotency_key ONLY IF that record cannot be read back — deleted, truncated by the very write that just failed, or you are retrying from a different machine — since a replay that cannot read the recorded secret mints one the server never registered and every later call then answers \"invalid session_secret\"."+
+				" Send a NEW idempotency_key ONLY IF that record cannot be read back (deleted, truncated by the very write that just failed, or you are retrying from a different machine), since a replay that cannot read the recorded secret mints one the server never registered and every later call then answers \"invalid session_secret\"."+
 				" That fallback is not destructive either, but it does cost one epoch bump and one superseded attempt."+
 				" %s",
 				err, attemptDesc, stateWriteFilesystemAdvice))
@@ -1303,7 +1303,7 @@ func (s *Server) registerLifecycleTools() {
 									// the failure it was written to prevent is worse than
 									// no advice.
 									problem := fmt.Sprintf("%s: %s exists but is not a usable git worktree (%v), so this claim created NO worktree for that repo. "+
-										"Inspect it first — a half-finished checkout still holds whatever was written before it died. "+
+										"Inspect it first: a half-finished checkout still holds whatever was written before it died. "+
 										"Once you are sure nothing there is worth keeping, IN THIS ORDER: `rm -rf %s && git -C %s worktree prune`, then claim again.",
 										repo.Name, wtPath, vErr, wtPath, srcPath)
 									fmt.Fprintf(os.Stderr, "polyforge: %s\n", problem)
@@ -1437,14 +1437,14 @@ func (s *Server) registerLifecycleTools() {
 		Name: "pf_complete_attempt",
 		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. " +
 			"Pass `note` to record the closing note in the same call instead of emitting it with a separate " +
-			"pf_emit_event beforehand — which is the only order that works, since this call deletes the " +
+			"pf_emit_event beforehand, which is the only order that works, since this call deletes the " +
 			"credentials pf_emit_event needs. The response's note_emitted says whether it landed.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id":         prop("string", "Work item ID (used to find state file)"),
 			"status":               prop("string", "wrapped|failed|paused"),
 			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
 			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
-			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\" — sending one with any other status is refused, not ignored — and recorded on the attempt row and in the attempt_completed event, unlike `note`, which becomes its own timeline event whatever the status."),
+			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\" (sending one with any other status is refused, not ignored) and recorded on the attempt row and in the attempt_completed event, unlike `note`, which becomes its own timeline event whatever the status."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1567,7 +1567,7 @@ func (s *Server) registerLifecycleTools() {
 		// takeover succeeds, rewrites a live foreign holder's row, and tells
 		// neither side. So this clause is not a hedge and not a leftover: delete
 		// it only in the change that closes the gap.
-		Description: "Force-take ownership of a work item from another agent. ⚠️ It takes over the WORK " +
+		Description: "Force-take ownership of a work item from another agent. NOTE: it takes over the WORK " +
 			"ITEM, not other people's locks: a lock held by a running or paused attempt of a DIFFERENT " +
 			"work item still answers 409 CONFLICT_LOCK_TAKEN and does not change hands (aihub#393). It " +
 			"reclaims this work item's own locks, and rows whose owning attempt has ended. No flag " +
@@ -1686,10 +1686,10 @@ func (s *Server) registerLifecycleTools() {
 			// handler, which persists the secret before calling the server, this one
 			// generates it at :1023 and writes it nowhere until the line above.
 			return errResult(fmt.Errorf("write state file: %w"+
-				" — ⚠️ NOT A NO-OP: the takeover ALREADY SUCCEEDED on the server."+
+				" (NOT A NO-OP: the takeover ALREADY SUCCEEDED on the server)."+
 				" %s has been evicted, and attempt %s (epoch %d) is running under your name holding whatever locks this work item declares;"+
 				" only this machine's local record of it failed, and the session_secret it needed lived in memory alone and is now gone."+
-				" RECOVERY: re-run this exact pf_force_takeover call — you now own the current attempt, so the server admits it as a self-takeover."+
+				" RECOVERY: re-run this exact pf_force_takeover call; you now own the current attempt, so the server admits it as a self-takeover."+
 				" It is not destructive: it costs one epoch bump, one superseded attempt and one timeline event."+
 				" %s",
 				err, prior, sf.AttemptID, sf.ClaimEpoch, stateWriteFilesystemAdvice))
@@ -1770,7 +1770,7 @@ func (s *Server) registerLifecycleTools() {
 			"For Orchestrator use.",
 		InputSchema: objectSchema(map[string]any{
 			"project": prop("string", "Project name"),
-			"max": prop("string", "Max items in EACH queued section — items, "+
+			"max": prop("string", "Max items in EACH queued section: items, "+
 				"needs_human_session and unclassified take it as their own LIMIT (default "+
 				"10); running, stalled, paused and stale_running are unbounded. A JSON "+
 				"number is also accepted, and is what most callers send."),
@@ -1812,15 +1812,15 @@ func (s *Server) registerLifecycleTools() {
 			"CONFLICT_WI_ALREADY_CLAIMED (force_takeover first, then cancel) and an already-terminal one " +
 			"with 409 CONFLICT_TERMINAL_STATE. " +
 			"The lock release matters for a PAUSED work item: pausing releases only file_scope locks and " +
-			"keeps every other type, and before aihub#355 cancelling left those held forever — the work " +
+			"keeps every other type, and before aihub#355 cancelling left those held forever: the work " +
 			"item was terminal, so no claim, force_takeover or complete_attempt could ever release them, " +
 			"and the orphan sweep skips a paused attempt's rows by design. Since aihub#416 the retained " +
 			"set is normally empty, because the only lock the server derives is file_scope; it is " +
 			"non-empty for an attempt that supplied requested_locks explicitly, or that predates that " +
 			"change. Every release emits a lock_released event with cause=wi_cancelled, so " +
 			"pf_read_events can confirm it. " +
-			"🔴 RETRYABLE: the status check is now re-run inside the transaction against a locked row, so " +
-			"a cancel racing a claim can return 409 CONFLICT_WI_ALREADY_CLAIMED (correctly — the previous " +
+			"RETRYABLE: the status check is now re-run inside the transaction against a locked row, so " +
+			"a cancel racing a claim can return 409 CONFLICT_WI_ALREADY_CLAIMED (correctly: the previous " +
 			"200 was a lie, and it released a live attempt's locks), and a lost concurrency race returns " +
 			"409 CONFLICT_SERIALIZATION_FAILURE with retryable=true. Both mean retry or re-read, not " +
 			"\"the server is broken\".",
@@ -1851,7 +1851,7 @@ func (s *Server) registerLifecycleTools() {
 	// pf_pause_attempt
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_pause_attempt",
-		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; any other lock type is retained for resume — since aihub#416 that set is normally empty, because file_scope is the only lock the server derives; status → paused). State file is preserved for resume.",
+		Description: "Pause the current attempt (releases file_scope locks acquired mid-attempt; any other lock type is retained for resume, though since aihub#416 that set is normally empty, because file_scope is the only lock the server derives; status becomes paused). State file is preserved for resume.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
 			"pause_reason": prop("string", "Optional reason for pausing"),
@@ -1896,7 +1896,7 @@ func (s *Server) registerLifecycleTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_acquire_locks",
 		Description: "Acquire file_scope locks for the current running attempt from the work item's declared_resources (reconcile mid-attempt; blocks on conflict, never steals). " +
-			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table — including locks with no live declaration behind them: locks taken from a client-supplied requested_locks, file_scope locks predating aihub#264, and (on a database with rows older than aihub#416) git_branch/deploy_env rows, which nothing derives any more. The two are disjoint and together are the attempt's full lock set. " +
+			"`acquired` is what THIS call took; `already_held` is every other lock the attempt holds, of every type, read from the lock table, including locks with no live declaration behind them: locks taken from a client-supplied requested_locks, file_scope locks predating aihub#264, and (on a database with rows older than aihub#416) git_branch/deploy_env rows, which nothing derives any more. The two are disjoint and together are the attempt's full lock set. " +
 			"Since aihub#264, removing a path from declared_resources DOES release its file_scope lock, at the moment of the update. Any surviving non-file_scope row is not released that way and is held until the attempt ends.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID (used to find state file)"),
@@ -2223,7 +2223,7 @@ func propEnum(typ, description string, enum []string) map[string]any {
 // split on the error-message side.
 const jsonObjectPropNote = " Must be a JSON object: a string (including a JSON-encoded string of the object you meant), " +
 	"an array, a number or a boolean is rejected with 400 naming the type received, and nothing is written. " +
-	"Do not hand-write the escaped JSON — send the object and let your client serialise it. " +
+	"Do not hand-write the escaped JSON; send the object and let your client serialise it. " +
 	"Size is never the reason for that 400: this field has no length cap."
 
 // maxBatchWorkItems bounds pf_batch_create_work_items. Generous relative to the
@@ -2325,7 +2325,7 @@ func workItemFieldProps() map[string]any {
 // row in the audit.
 const requiresHumanSessionCreateDescription = "Whether a human has to be in the session for this wi. " +
 	"THREE states, not two: true, false, and OMITTED. Omitting it stores NULL, which is NOT a default of " +
-	"false — the wi goes to the ready queue's unclassified[] segment instead of items[], the segment that " +
+	"false: the wi goes to the ready queue's unclassified[] segment instead of items[], the segment that " +
 	"means \"takeable now by an agent\", and pf_list_work_items' ready_only filter does not return it. NULL is " +
 	"not permanent: the FIRST pf_claim_work_item on such a wi resolves it to true from a server default, " +
 	"writes that back and records a wi_classification_resolved event. Send false explicitly for a wi an " +
@@ -2351,7 +2351,7 @@ const requiresHumanSessionCreateDescription = "Whether a human has to be in the 
 const requiresHumanSessionUpdateDescription = "Set the human-session classification to true or false. " +
 	"It cannot reach the third state: there is no way back to NULL (unclassified) through this tool, because " +
 	"omitting this field and sending an explicit null BOTH mean \"leave the stored value alone\". A wi that was " +
-	"still NULL when it was first claimed is already true — the claim resolves NULL from a server default — so " +
+	"still NULL when it was first claimed is already true (the claim resolves NULL from a server default), so " +
 	"this field is how you CORRECT that value, not how you undo it."
 
 // blockedByPropDescription is the published description of `blocked_by`.
@@ -2436,7 +2436,7 @@ func cloneArgs(in map[string]any) map[string]any {
 // enforces it.
 func declaredResourcesProp(description string) map[string]any {
 	p := prop("array", description+
-		` — entries are {"type","uri","intent"} plus an optional "repo" on path entries (aihub#261). NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values. ⚠️ Since aihub#416 the server derives exactly ONE of them — file_scope, from path/document/section entries. git_branch and deploy_env are no longer derived from anything (a repo or service entry takes no lock), and worktree/tcp_port never were; all four remain legal only in an explicit requested_locks. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
+		`. Entries are {"type","uri","intent"} plus an optional "repo" on path entries (aihub#261). NOTE: type takes a DECLARED type (repo/path/document/section/service/external_ref), NOT a lock type: file_scope/git_branch/worktree/tcp_port/deploy_env are resource_locks.resource_type values. Since aihub#416 the server derives exactly ONE of them: file_scope, from path/document/section entries. git_branch and deploy_env are no longer derived from anything (a repo or service entry takes no lock), and worktree/tcp_port never were; all four remain legal only in an explicit requested_locks. A file path is type="path", uri="file:<repo-relative-path>". The path field is `+"`uri`"+`, not value/path/scope.`)
 	p["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -2454,10 +2454,10 @@ func declaredResourcesProp(description string) map[string]any {
 			// now the majority — and that repo/service still produce a signal
 			// (predict rules 2, 4, 6), which external_ref's own warning-exemption
 			// means it does not.
-			"type": propEnum("string", "Declared resource type (NOT a lock type). ⚠️ Only path/document/section "+
-				"take a lock (file_scope). repo and service take NONE since aihub#416 — they are advisory: they "+
+			"type": propEnum("string", "Declared resource type (NOT a lock type). Only path/document/section "+
+				"take a lock (file_scope). repo and service take NONE since aihub#416; they are advisory: they "+
 				"feed pf_predict_conflicts, the timeline and deploy preflight, and derive no resource_locks row. "+
-				"external_ref takes no lock and no warning either — an annotation only.",
+				"external_ref takes no lock and no warning either, an annotation only.",
 				domain.DeclaredResourceTypeList()),
 			// aihub#395 part 4. Generated from domain.declaredResourceURISchemes,
 			// which is the table ValidateDeclaredResources enforces — so the
@@ -2483,8 +2483,8 @@ func declaredResourcesProp(description string) map[string]any {
 			"intent": prop("string",
 				`Access intent. Not validated by the server; only two values carry behaviour: "read" and `+
 					`"refactor" (on a repo entry, flags other refactors of the same repo). "write" is the `+
-					`conventional default; other values are accepted but inert. ⚠️ "read" is honoured on `+
-					`path/document/section ONLY — no write lock, and a path overlap reports info instead `+
+					`conventional default; other values are accepted but inert. "read" is honoured on `+
+					`path/document/section ONLY: no write lock, and a path overlap reports info instead `+
 					`of soft_block. On repo and service entries "read" is inert for a different reason `+
 					`since aihub#416: those two take no lock under ANY intent, so there is nothing for `+
 					`"read" to suppress.`),
@@ -2564,7 +2564,7 @@ func declaredResourcesProp(description string) map[string]any {
 // the work item's declared_resources.
 func requestedLocksProp(description string) map[string]any {
 	p := prop("array", description+
-		` — usually OMIT this and let the server derive locks from the wi's declared_resources. Entries are {"resource_type","resource_key"} (NOT declared_resources' type/uri).`)
+		`. Usually OMIT this and let the server derive locks from the wi's declared_resources. Entries are {"resource_type","resource_key"} (NOT declared_resources' type/uri).`)
 	p["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{

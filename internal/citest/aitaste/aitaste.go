@@ -13,21 +13,18 @@
 // Scanned surfaces (the aihub#373 operationalization of "user-visible"):
 //
 //   - String literals in non-test Go files under internal/server,
-//     internal/domain, internal/coding and internal/cli (error messages,
-//     notifications, CLI output). Comments are not scanned: they are
-//     developer-facing, not product copy.
+//     internal/mcp, internal/domain, internal/coding and internal/cli (error
+//     messages, tool and parameter descriptions, notifications, CLI output).
+//     Comments are not scanned: they are developer-facing, not product copy.
+//     internal/mcp entered the surface with aihub#626, which cleared its 135
+//     occurrences and carried the contract-card regen they forced.
 //   - Visible text in internal/server/templates/**/*.tmpl, with template
 //     comments, {{...}} actions, HTML comments, script/style blocks and tag
 //     markup masked out. HTML entities are decoded first, so writing &mdash;
 //     instead of the literal character does not dodge the gate.
 //
-// TEMPORARY surface exclusions (both must eventually be deleted):
+// TEMPORARY surface exclusion (must eventually be deleted):
 //
-//   - internal/mcp: its 135 occurrences (tool and parameter descriptions) are
-//     aihub#626. Removing them moves description_sha256 on nearly every
-//     contract card, so that sweep carries the card regen and the hot-file
-//     protocol with it. When aihub#626 lands, add "internal/mcp" to
-//     goSurfaceDirs and delete this bullet.
 //   - plugins/**: skill markdown hits on ~100% of files, but any plugins/**
 //     change forces a marketplace version bump, i.e. a release, and releases
 //     are batched. That sweep needs its own work item (not yet filed). When it
@@ -67,10 +64,9 @@ import (
 )
 
 // goSurfaceDirs are the Go packages whose string literals are product copy.
-// internal/mcp is DELIBERATELY absent; see the package comment (temporary,
-// tracked as aihub#626).
 var goSurfaceDirs = []string{
 	"internal/server",
+	"internal/mcp",
 	"internal/domain",
 	"internal/coding",
 	"internal/cli",
@@ -79,10 +75,9 @@ var goSurfaceDirs = []string{
 // templateDir holds the server-rendered HTML templates.
 const templateDir = "internal/server/templates"
 
-// TemporarySurfaceExclusions is printed by the gate on every run so the two
-// carve-outs stay visible until they are deleted.
+// TemporarySurfaceExclusions is printed by the gate on every run so the
+// remaining carve-out stays visible until it is deleted.
 var TemporarySurfaceExclusions = []string{
-	"internal/mcp: TEMPORARY, until aihub#626 lands (135 occurrences in tool/param descriptions plus the contract-card regen they force)",
 	"plugins/**: TEMPORARY, release-gated (any change there forces a marketplace version bump); follow-up work item not yet filed",
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate docs/ against the executable authorities it describes (aihub#352).
 
-Five checks. Each one goes RED on a real drift, and each exists because the
+Six checks. Each one goes RED on a real drift, and each exists because the
 drift it catches is otherwise SILENT — nothing in this repo turns red today when
 a doc's copy of a code fact stops matching the code.
 
@@ -12,8 +12,9 @@ a doc's copy of a code fact stops matching the code.
       compiler, test, or linter noticing. Measured on 2026-09-03 against
       e8fbfcb: of the 23 real line-number citations in docs/superpowers/, 18
       pointed at the wrong line and 3 more were off by one or two. The
-      replacement is a semantic anchor — file plus symbol name — which C2
-      verifies. This check exists so the class stays closed.
+      replacement is a semantic anchor — file plus symbol name — the file half
+      verified by C2, the symbol half by C6. This check exists so the class
+      stays closed.
 
       The required form is also stated for doc AUTHORS, in README.md under
       "How docs cite code" (aihub#439). A gate is the wrong place for a rule
@@ -22,10 +23,21 @@ a doc's copy of a code fact stops matching the code.
       what turned aihub#411's first push red with 156 C1 errors. Keep the two
       statements in step — this file's error messages name that section.
 
-  C2  Every path-qualified `*.go` path referenced in docs/superpowers/ exists.
-      Semantic anchors are only better than line numbers if something checks
-      them. Without C2, `internal/domain/memory.go (UpdateMemory)` rots exactly
-      as silently as `internal/domain/memory.go:1444` did — just less visibly.
+  C2  Every path-qualified `*.go` path referenced in docs/superpowers/,
+      docs/audits/ and docs/mcp-tools.md exists. docs/audits/ is in scope as of
+      aihub#406: C1 fires across ALL of docs/ and its error message routes
+      authors to the semantic-anchor form, so the audits — where aihub#404
+      converted ~200 anchors under C1's instruction — must not be the one place
+      the prescribed replacement goes unchecked.
+
+  C6  Every SYMBOL anchor in C2's scope resolves: `file.go` (`Symbol`) is only
+      an improvement over `file.go:1444` if `Symbol` is actually declared in
+      that file. An earlier version of this docstring warned "Without C2,
+      `internal/domain/memory.go (UpdateMemory)` rots exactly as silently as
+      `internal/domain/memory.go:1444` did — just less visibly" while the
+      implementation only covered the path half; aihub#406 closed that gap.
+      Declaration scan, not substring: a name that appears only in a comment,
+      a string literal, or as part of another identifier does not resolve.
 
   C3  docs/mcp-tools.md's tool inventory equals the MCP schema dump's.
       The doc carries a total ("50 pf_* tools") and a per-section count in every
@@ -80,8 +92,18 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(REPO_ROOT, "docs")
 MCP_TOOLS_MD = os.path.join(DOCS, "mcp-tools.md")
 SUPERPOWERS = os.path.join(DOCS, "superpowers")
+AUDITS = os.path.join(DOCS, "audits")
 AUDIT_411_REL = "docs/audits/aihub-411-design-decision-table.md"
 AUDIT_411_MD = os.path.join(REPO_ROOT, AUDIT_411_REL)
+
+# Excluded from C2/C6 (aihub#406): the aihub#412 corpus is VERBATIM wire data —
+# recorded tool responses quoting work-item goals, several of which cite files
+# in other repositories (`pipeline/affinity.go` is an ieops gateway file, live
+# in the corpus today). A quoted measurement cannot be "repaired" to satisfy a
+# gate: rewording it falsifies the record, and an allowlist entry per foreign
+# path would grow forever. C1 still covers the directory — a line-number
+# citation in the corpus's own PROSE is still a citation.
+AUDITS_CORPUS_EXCLUDE = os.path.join(AUDITS, "aihub-412-corpus-facts")
 
 # ─── C1 ───────────────────────────────────────────────────────────────────────
 
@@ -115,13 +137,20 @@ CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 # it reports those five as citations, burying the real signal in false positives.
 # A range is unambiguous: no port is written `:N-M`.
 #
-# The code-formatted SINGLE anchor is therefore still NOT gated. That is not an
-# oversight and not this gate's call to make: it is the open question owned by
-# aihub#406, and aihub#439's ruling was explicit that it stays there. Measured
-# 2026-09-08: docs/ holds 7 code-formatted single anchors — 5 ports in
-# docs/deployment.md, and 2 that are deliberate illustrations OF the shape (the
-# aihub#411 table quoting the gap, and its §5 quoting the episode). Not one is a
-# live citation, which is a second reason not to gate this form here.
+# The code-formatted SINGLE anchor is NOT gated, and as of aihub#406 that is a
+# RULING, not an open question. aihub#439 left the call to aihub#406, and
+# aihub#406 rules it stays ungated, for two reasons. (1) The ambiguity is
+# structural, not a regex deficiency: inside a code span a single `:563` and a
+# port `:8080` are the same shape, so any recogniser wide enough to catch the
+# citation reports the ports — re-measured 2026-09-12, unchanged since
+# 2026-09-08: docs/ holds exactly 7 code-formatted single anchors, 5 ports in
+# docs/deployment.md and 2 deliberate illustrations OF the shape (the aihub#411
+# table quoting the gap, and its §5 quoting the episode); zero live citations.
+# (2) The residual risk shrank on the other side: the semantic anchor C1 pushes
+# authors toward is now verified end to end (C2 file half, C6 symbol half), so
+# an author who follows the error message lands on a checked form. Reopen only
+# if a live code-formatted single citation actually appears — the self-test
+# pins the current behaviour so a flip is a visible decision.
 CODE_SPAN_RANGE_ANCHOR = re.compile(r"`:(\d+)-(\d+)`")
 
 # SHAPE 3 (aihub#439). The filename-less anchor written in PROSE — ` :157`,
@@ -190,7 +219,8 @@ C1_ALLOWED = {
 FORM = (
     "The required form is a semantic anchor: the path-qualified file plus the "
     "symbol in parentheses, e.g. `internal/domain/memory.go` (`UpdateMemory`) "
-    "— C2 verifies the file half. See README.md, \"How docs cite code\"."
+    "— C2 verifies the file half, C6 the symbol half. See README.md, "
+    '"How docs cite code".'
 )
 
 # The heading and the first sentence of the section FORM points at. Two tokens,
@@ -286,9 +316,30 @@ def check_c1_no_line_citations(paths: list[str]) -> list[str]:
 # path is what makes the reference checkable at all.
 GO_PATH_REF = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]+\.go)(?![\w/.-])")
 
+# References that are NOT claims about this repository's tree, keyed
+# (docs-relative path, exact ref). Same design as C1_ALLOWED and for the same
+# reason: widening it is a reviewable edit to this script, not a doc edit that
+# slips through under a docs-only diff. Each entry needs a reason, and the
+# reason must say why the reference cannot rot — do not add an entry for a ref
+# that merely moved (update the reference instead).
+C2_ALLOWED = {
+    (
+        "audits/aihub-385-mcp-contract-audit-batch1.md",
+        "mcp/server.go",
+    ): "A file of the modelcontextprotocol go-sdk, cited as `go-sdk v1.6.0 "
+    "`mcp/server.go``, not of this repo. The citation is version-pinned to "
+    "v1.6.0, so it cannot rot under this tree's refactors, and rewording it "
+    "would lose the only pointer to where the no-validation behaviour lives.",
+}
+
 
 def check_c2_referenced_go_files_exist(paths: list[str]) -> list[str]:
-    """Every path-qualified *.go referenced in docs/superpowers/ must exist."""
+    """Every path-qualified *.go referenced in C2's scope must exist.
+
+    Scope is docs/superpowers/, docs/audits/ (minus the aihub#412 corpus) and
+    docs/mcp-tools.md — assembled in main(), stated here because this is where
+    a reader lands from the error message.
+    """
     errors = []
     for path in paths:
         rel = os.path.relpath(path, DOCS)
@@ -298,11 +349,16 @@ def check_c2_referenced_go_files_exist(paths: list[str]) -> list[str]:
                 for match in GO_PATH_REF.finditer(line):
                     seen.setdefault(match.group(1), lineno)
         for ref, lineno in sorted(seen.items()):
+            if (rel, ref) in C2_ALLOWED:
+                continue
             if not os.path.exists(os.path.join(REPO_ROOT, ref)):
                 errors.append(
                     f"docs/{rel}:{lineno}: references `{ref}`, which does not "
-                    "exist. Either the file moved (update the reference) or the "
-                    "doc describes code that never landed (say so in the doc)."
+                    "exist. Either the file moved (update the reference), or "
+                    "the doc describes code that never landed (say so in the "
+                    "doc), or the path belongs to another repository entirely "
+                    "(then it needs a C2_ALLOWED entry in this script, with a "
+                    "reason it cannot rot)."
                 )
     return errors
 
@@ -742,6 +798,260 @@ def check_c5_lock_cause_union(design_text: str, go_text: str) -> list[str]:
     return errors
 
 
+# ─── C6 ───────────────────────────────────────────────────────────────────────
+
+# THE ANCHOR GRAMMAR, measured against the whole C2 scope on 2026-09-12
+# (155 anchor sites carrying symbols, resolving to 142 symbol checks once
+# historical qualifiers and non-symbol items are excluded; every count below
+# is from that run). Four recognised shapes, aligned with the Go-side K6 gate
+# (internal/mcp/contract_cards_gate_test.go (cardGoPathRef)), which resolves
+# docs/mcp-cards/ the same way — that directory is deliberately NOT in C6's
+# scope, because K6 already gates it and two gates over one tree drift apart:
+#
+#   forward      `internal/domain/memory.go` (`UpdateMemory`)        — 106 live
+#   paren-list   `pkg/client/client.go` (`CutAlpha`, `Promote`)      —   3 live
+#   comma        (`internal/server/routes_memory.go`, `handleRemember`) — 5 live
+#   reverse      `FormatIDOrSlug` (`internal/domain/ids.go`)         —  41 live
+#
+# The path/symbol separator is one space OR a single line wrap, exactly as in
+# K6: 🔴 until aihub#528 K6's was one space only, and 69% of the card anchors —
+# the wrapped ones prose reflow produces constantly — silently degraded to
+# path-only. This gate starts life with the fix.
+#
+# Two deliberate DIVERGENCES from K6, both stated because silent divergence is
+# how the two gates would rot apart:
+#   - K6 leaves the paren-list form unresolved because card lists can name
+#     t.Run subtest names its resolver cannot see. The measured docs population
+#     has none, and all 3 live paren-lists resolve, so C6 gates the form. If a
+#     doc ever cites a subtest name, cite the test function instead.
+#   - K6 has no reverse form. The docs population is dominated by it in
+#     docs/audits/ (aihub#404 wrote most of its ~200 anchors symbol-first), so
+#     leaving it out would exempt precisely the population aihub#406 exists to
+#     cover.
+#
+# THE HISTORICAL QUALIFIER. A reverse anchor whose parenthetical continues
+# `of ...` or `at ...` — `` `handleGetStep` (`internal/server/routes_step.go`
+# of that tree) `` — pins the citation to the tree the audit measured, not to
+# HEAD. Its symbol half is deliberately NOT verified: the claim is about a past
+# tree, and grading it against HEAD would red historically-true sentences.
+# (The path half still is, via C2 — a citation into a deleted file needs
+# rewording to a bare filename either way, which is the repair aihub#527 used
+# for `tools_release.go`.)
+#
+# KNOWN BLIND SPOTS, stated so an empty result is read correctly:
+#   - Non-.go anchors (`0001_initial.sql` (`users.role`), SKILL.md sections)
+#     are not verified — there is no declaration grammar to scan for them.
+#   - A symbol cited with prose attribution ("`setIfNonempty` ... in
+#     `internal/mcp/helpers.go`") or in a chained parenthetical
+#     (`(`FnClaimWorkItem`), (`FnForceTakeover`)` — only the first paren
+#     carries the path) is invisible, same as K6's unrecognised shapes.
+#   - An UNBACKTICKED parenthetical after a path is prose, not an anchor:
+#     measured, all 13 instances are verbs like `` `memory.go` (write) ``.
+C6_SEP = r"(?: |[ \t]*\n[ \t]*)"
+C6_TICKED_GO_PATH = r"`((?:[\w.-]+/)+[\w.-]+\.go)`"
+C6_TICKED_SYM = r"`[\w.]+`"
+
+C6_FORWARD = re.compile(
+    C6_TICKED_GO_PATH
+    + "(?:"
+    + C6_SEP
+    + r"\(("
+    + C6_TICKED_SYM
+    + "(?:,"
+    + C6_SEP
+    + C6_TICKED_SYM
+    + r")*)\)"
+    + "|((?:,"
+    + C6_SEP
+    + C6_TICKED_SYM
+    + ")+)"
+    + ")"
+)
+
+# Reverse: the parenthetical may hold ONLY the path (plus an optional `of`/`at`
+# qualifier). Anything else after the path — a comma list, a nested paren —
+# means the paren is not a plain "declared here" claim about the subject, and
+# the inner content is the forward/comma form's business.
+C6_REVERSE = re.compile(
+    r"`([A-Za-z_][\w.]*)`"
+    + C6_SEP
+    + r"\("
+    + C6_TICKED_GO_PATH
+    + r"(\s+(?:of|at)\b[^)]*)?\)"
+)
+
+C6_SYM_ITEM = re.compile(r"`([\w.]+)`")
+
+# A "symbol" that is really a filename — `` `a.go`, `b.go` `` is a file
+# enumeration, not an anchor, and a reverse subject like `tools_release.go`
+# is a file mention. Checking their dotted leaf ("go", "md") against a Go
+# declaration set would red ordinary prose.
+C6_FILENAME_LIKE = re.compile(
+    r"\.(?:go|md|sql|py|sh|ya?ml|json|toml|ts|tsx|js|txt|html|css)$"
+)
+
+# ── Go declaration scan ──
+#
+# Pure-Python mirror of K6's declaredNames (which uses go/parser): top-level
+# funcs and methods, types, consts, vars, and the direct fields of top-level
+# struct types. Regex-over-gofmt rather than an AST because this script must
+# stay runnable with nothing but python3 — and the wi that filed this check
+# (aihub#406) warned, from measurement, that a bare "name appears somewhere in
+# the file" criterion counts comments, strings and substrings as hits. So:
+# strings and comments are stripped FIRST, and every pattern below anchors on
+# a declaration position, not on occurrence.
+#
+# Blind spots vs the AST (all in the false-RED direction — a real declaration
+# the scan misses shows up as a loud error at authoring time, never as silent
+# rot): fields of structs declared inside `type (...)` blocks; second and
+# later names of a multi-name UNGROUPED `var x, y = ...` are handled, but
+# multi-line receivers are not; interface METHOD names are absent here exactly
+# as they are absent from K6's declaredNames — cite the interface type instead.
+# The scan assumes gofmt formatting (top-level declarations at column 0,
+# block members at one tab), which `gofmt -l` enforces repo-wide in CI.
+
+# Strings and comments, in one left-to-right alternation so a `//` inside a
+# string or a quote inside a comment cannot confuse the order. Replaced by
+# their own newlines so line-anchored patterns keep working.
+GO_NOISE = re.compile(
+    r"`[^`]*`"  # raw string
+    r'|"(?:\\.|[^"\\])*"'  # interpreted string
+    r"|'(?:\\.|[^'\\])*'"  # rune
+    r"|//[^\n]*"  # line comment
+    r"|/\*.*?\*/",  # block comment
+    re.S,
+)
+
+GO_FUNC_DECL = re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[([]", re.M)
+GO_TYPE_DECL = re.compile(r"^type\s+([A-Za-z_]\w*)\b", re.M)
+GO_VALUE_DECL = re.compile(
+    r"^(?:const|var)\s+([A-Za-z_]\w*(?:,\s*[A-Za-z_]\w*)*)\b", re.M
+)
+GO_VALUE_BLOCK_OPEN = re.compile(r"^(?:const|var)\s*\(")
+GO_TYPE_BLOCK_OPEN = re.compile(r"^type\s*\(")
+GO_STRUCT_OPEN = re.compile(r"^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+struct\s*\{")
+GO_BLOCK_MEMBER = re.compile(r"^\t([A-Za-z_]\w*(?:,\s*[A-Za-z_]\w*)*)\b")
+GO_STRUCT_FIELD = re.compile(r"^\t([A-Za-z_]\w*(?:,\s*[A-Za-z_]\w*)*)\s+\S")
+
+
+def go_declared_names(path: str) -> set[str]:
+    """Return the top-level names a gofmt'ed Go file declares."""
+    with open(path, encoding="utf-8") as fh:
+        text = GO_NOISE.sub(lambda m: "\n" * m.group(0).count("\n"), fh.read())
+
+    names: set[str] = set()
+    for match in GO_FUNC_DECL.finditer(text):
+        names.add(match.group(1))
+    for match in GO_TYPE_DECL.finditer(text):
+        names.add(match.group(1))
+    for match in GO_VALUE_DECL.finditer(text):
+        names.update(re.split(r",\s*", match.group(1)))
+
+    mode = None  # None | "value" | "type"
+    struct_depth = 0
+    for line in text.split("\n"):
+        if mode is None and struct_depth == 0:
+            if GO_VALUE_BLOCK_OPEN.match(line):
+                mode = "value"
+            elif GO_TYPE_BLOCK_OPEN.match(line):
+                mode = "type"
+            elif GO_STRUCT_OPEN.match(line):
+                # Net brace count, not a bare 1: `type X struct{}` opens and
+                # closes on its own line, and treating it as open would swallow
+                # every declaration below it.
+                struct_depth = line.count("{") - line.count("}")
+        elif mode is not None:
+            if line.startswith(")"):
+                mode = None
+                continue
+            member = GO_BLOCK_MEMBER.match(line)
+            if member:
+                names.update(re.split(r",\s*", member.group(1)))
+        else:  # inside a top-level struct body
+            if struct_depth == 1:
+                field = GO_STRUCT_FIELD.match(line)
+                if field:
+                    names.update(re.split(r",\s*", field.group(1)))
+            struct_depth += line.count("{") - line.count("}")
+            if struct_depth < 0:
+                struct_depth = 0
+    return names
+
+
+def check_c6_symbol_anchors_resolve(paths: list[str]) -> tuple[list[str], int]:
+    """Every symbol anchor must name a declaration in the file it cites.
+
+    Returns (errors, symbols_checked). The caller must treat a zero count as
+    instrument failure: the live population is in the hundreds, so a run that
+    recognised nothing means the grammar rotted, not that docs stopped citing
+    code — the same "an absent check is not a passing one" rule the scan
+    guards in main() enforce for empty file lists.
+
+    A dotted anchor (`Memory.Activate`) resolves on its last segment, which is
+    the method or field name the file declares — same rule as K6.
+
+    A cited file that does not EXIST is C2's finding, reported once there;
+    this check skips it silently rather than reporting the same rot twice.
+    """
+    declared: dict[str, set[str] | None] = {}
+
+    def names_for(ref: str) -> set[str] | None:
+        if ref not in declared:
+            abs_path = os.path.join(REPO_ROOT, ref)
+            declared[ref] = (
+                go_declared_names(abs_path) if os.path.exists(abs_path) else None
+            )
+        return declared[ref]
+
+    errors: list[str] = []
+    checked = 0
+    for path in paths:
+        rel = os.path.relpath(path, DOCS)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+
+        anchors: list[tuple[int, str, str]] = []  # (offset, ref, symbol)
+        forward_spans: list[tuple[int, int]] = []
+        for match in C6_FORWARD.finditer(text):
+            forward_spans.append(match.span())
+            for sym_match in C6_SYM_ITEM.finditer(match.group(2) or match.group(3)):
+                anchors.append((match.start(), match.group(1), sym_match.group(1)))
+        for match in C6_REVERSE.finditer(text):
+            # A reverse subject immediately before a forward/comma anchor is
+            # prose (`` `X` (`file.go`, `Sym`) `` cites Sym, not X) — but such
+            # a match is already rejected by the reverse pattern's ")".
+            # Overlap CAN still happen when a comma-form anchor's last symbol
+            # precedes a parenthesised path; the forward parse wins.
+            if any(a <= match.start() < b for a, b in forward_spans):
+                continue
+            if match.group(3):
+                continue  # `of ...`/`at ...`: pinned to a past tree, not HEAD
+            anchors.append((match.start(), match.group(2), match.group(1)))
+
+        for offset, ref, sym in anchors:
+            if C6_FILENAME_LIKE.search(sym):
+                continue  # a file enumeration or file mention, not a symbol
+            names = names_for(ref)
+            if names is None:
+                continue  # missing file: C2 reports it
+            checked += 1
+            leaf = sym.rsplit(".", 1)[-1]
+            if leaf not in names:
+                lineno = text.count("\n", 0, offset) + 1
+                errors.append(
+                    f"docs/{rel}:{lineno}: cites `{ref}` (`{sym}`), and that "
+                    "file declares no such symbol. A semantic anchor that "
+                    "resolves to nothing rots exactly as quietly as the line "
+                    "number it replaced — which is the whole reason line "
+                    "numbers are banned (C1). Either the symbol moved (update "
+                    "the anchor) or it was renamed (follow it). For a claim "
+                    "about a PAST tree, write the reverse form with a "
+                    "qualifier: `Sym` (`file.go` of that tree — since "
+                    "deleted, aihub#NNN)."
+                )
+    return errors, checked
+
+
 # ─── self-test ────────────────────────────────────────────────────────────────
 
 
@@ -1023,10 +1333,12 @@ def self_test() -> int:
             # was reworded to `port 8080`, not allowlisted.
             ("C1c prose-shaped port fires (documented cost)", "prose_port.md",
              "docker stop aihub   # graceful SIGTERM; releases :8080\n", True),
-            # The code-formatted SINGLE anchor stays OPEN — it is the port
-            # ambiguity owned by aihub#406, and aihub#439's ruling left it there.
-            # This case exists so closing it is a visible decision, not a drift.
-            ("C1c code-formatted single stays open (aihub#406)", "span_single.md",
+            # The code-formatted SINGLE anchor stays UNGATED — ruled by
+            # aihub#406 (the port ambiguity is structural; see the
+            # CODE_SPAN_RANGE_ANCHOR block). This case pins the ruling so
+            # flipping it is a visible decision, not a drift.
+            ("C1c code-formatted single stays ungated (aihub#406 ruling)",
+             "span_single.md",
              "a single `` `:563` `` is indistinguishable from a port\n", False),
             # Colons that separate inside a larger token are not anchors. All
             # four classes are live in docs/ today.
@@ -1061,6 +1373,146 @@ def self_test() -> int:
                 check_c2_referenced_go_files_exist([write(rel, text)]),
                 should_fire,
             )
+
+        # The C2 allowlist must excuse its ref ONLY inside its own file — the
+        # same containment C1_ALLOWED is tested for above.
+        os.makedirs(os.path.join(DOCS, "audits"))
+        expect(
+            "C2 allowlist suppresses in its own file",
+            check_c2_referenced_go_files_exist([write(
+                "audits/aihub-385-mcp-contract-audit-batch1.md",
+                "go-sdk v1.6.0 `mcp/server.go` performs no validation\n",
+            )]),
+            False,
+        )
+        expect(
+            "C2 allowlist does NOT suppress elsewhere",
+            check_c2_referenced_go_files_exist([write(
+                "audits/elsewhere.md",
+                "go-sdk v1.6.0 `mcp/server.go` performs no validation\n",
+            )]),
+            True,
+        )
+
+        # C6: driven through the real function against a real (temp) Go file,
+        # for the same two reasons as C1/C2 above. The fixture exercises every
+        # declaration shape the scanner claims, plus the two poisons aihub#406
+        # named: a name living only in a comment, and one living only in a
+        # string. A substring criterion passes both; a declaration scan reds
+        # both.
+        with open(
+            os.path.join(tmp, "internal", "domain", "anchors.go"),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(
+                "package domain\n\n"
+                "// GhostComment is named here, in prose, and nowhere else.\n"
+                "const topLevelConst = 1\n\n"
+                "var soloVar, secondVar = 1, 2\n\n"
+                "const (\n"
+                '\tgroupedConst = "x"\n'
+                "\tpairA, pairB = 1, 2\n"
+                ")\n\n"
+                "var (\n"
+                "\tGroupedVar = map[string]int{}\n"
+                ")\n\n"
+                "type Empty struct{}\n\n"
+                "type Memory struct {\n"
+                "\tID       string\n"
+                "\tStrength float64\n"
+                "}\n\n"
+                "type (\n"
+                "\tAlias   = int\n"
+                "\tWrapped struct{ Inner int }\n"
+                ")\n\n"
+                "func UpdateMemory(id string) error { return nil }\n\n"
+                "func (m *Memory) Activate() {}\n\n"
+                "func Clamp[T any](v T) T {\n"
+                '\tghost := "GhostString is named only in this string"\n'
+                "\t_ = ghost\n"
+                "\treturn v\n"
+                "}\n"
+            )
+
+        def c6(label, rel, text, should_fire, want_checked):
+            errors, checked = check_c6_symbol_anchors_resolve([write(rel, text)])
+            expect(label, errors, should_fire)
+            if checked != want_checked:
+                failures.append(
+                    f"{label}: expected {want_checked} symbol(s) checked, got "
+                    f"{checked} — the count is the recogniser's health, so a "
+                    "shape it silently stopped seeing must fail here"
+                )
+
+        fixture = "internal/domain/anchors.go"
+        c6("C6 forward anchor resolves", "c6_fwd.md",
+           f"see `{fixture}` (`UpdateMemory`)\n", False, 1)
+        c6("C6 method resolves", "c6_method.md",
+           f"`{fixture}` (`Activate`)\n", False, 1)
+        c6("C6 dotted anchor resolves on its leaf", "c6_dotted.md",
+           f"`{fixture}` (`Memory.Activate`)\n", False, 1)
+        c6("C6 generic func resolves", "c6_generic.md",
+           f"`{fixture}` (`Clamp`)\n", False, 1)
+        c6("C6 grouped const resolves", "c6_gconst.md",
+           f"`{fixture}` (`groupedConst`)\n", False, 1)
+        c6("C6 later names of multi-name specs resolve", "c6_multi.md",
+           f"`{fixture}` (`pairB`) and `{fixture}` (`secondVar`)\n", False, 2)
+        c6("C6 grouped var resolves", "c6_gvar.md",
+           f"`{fixture}` (`GroupedVar`)\n", False, 1)
+        c6("C6 struct field resolves", "c6_field.md",
+           f"`{fixture}` (`Strength`)\n", False, 1)
+        c6("C6 type-block member resolves", "c6_tblock.md",
+           f"`{fixture}` (`Wrapped`)\n", False, 1)
+        c6("C6 one-line struct{} does not swallow later declarations",
+           "c6_empty.md",
+           f"`{fixture}` (`Empty`); later `{fixture}` (`Clamp`)\n", False, 2)
+        # The wrapped separator is the shape prose reflow produces constantly:
+        # 69% of the Go-side card anchors were in it, all invisible, until
+        # aihub#528. Pinned so this gate can never regress into that.
+        c6("C6 wrapped separator still parses", "c6_wrap.md",
+           f"see `{fixture}`\n(`UpdateMemory`) for the write path\n", False, 1)
+        c6("C6 comma form resolves", "c6_comma.md",
+           f"(`{fixture}`, `UpdateMemory`)\n", False, 1)
+        c6("C6 paren-list resolves", "c6_plist.md",
+           f"`{fixture}` (`UpdateMemory`, `Activate`)\n", False, 2)
+        c6("C6 reverse form resolves", "c6_rev.md",
+           f"`UpdateMemory` (`{fixture}`)\n", False, 1)
+
+        # THE DRIFT ITSELF, in every recognised shape: the symbol is not there.
+        c6("C6 fake symbol fires (forward)", "c6_bad_fwd.md",
+           f"`{fixture}` (`NoSuchFuncEver`)\n", True, 1)
+        c6("C6 fake symbol fires (comma)", "c6_bad_comma.md",
+           f"(`{fixture}`, `NoSuchFuncEver`)\n", True, 1)
+        c6("C6 fake symbol fires (paren-list, one bad item)", "c6_bad_plist.md",
+           f"`{fixture}` (`UpdateMemory`, `NoSuchFuncEver`)\n", True, 2)
+        c6("C6 fake symbol fires (reverse)", "c6_bad_rev.md",
+           f"`NoSuchFuncEver` (`{fixture}`)\n", True, 1)
+
+        # THE TWO POISONS. Both names ARE in the file, as text; neither is a
+        # declaration. This pair is what makes C6 a declaration scan rather
+        # than a substring search — aihub#406 measured that failure mode
+        # before banning it.
+        c6("C6 a name only in a comment does not resolve", "c6_ghostc.md",
+           f"`{fixture}` (`GhostComment`)\n", True, 1)
+        c6("C6 a name only in a string does not resolve", "c6_ghosts.md",
+           f"`{fixture}` (`GhostString`)\n", True, 1)
+
+        # OUT-OF-GRAMMAR shapes, pinned so widening one is a visible decision
+        # rather than a drift — each would otherwise be an easy accidental
+        # false positive.
+        c6("C6 historical qualifier exempts the symbol half", "c6_hist.md",
+           f"`DeletedLongAgo` (`{fixture}` of that tree; deleted by "
+           "`aihub#402`)\n", False, 0)
+        c6("C6 an unbackticked parenthetical is prose, not an anchor",
+           "c6_prose.md", f"`{fixture}` (write)\n", False, 0)
+        c6("C6 a file enumeration is not an anchor", "c6_files.md",
+           f"`{fixture}`, `memory.go`\n", False, 0)
+        c6("C6 a path-only reference is C2's, not C6's", "c6_pathonly.md",
+           f"see `{fixture}` alone\n", False, 0)
+        c6("C6 a missing file is C2's finding, not a second report here",
+           "c6_missing.md", "`internal/domain/gone.go` (`Whatever`)\n",
+           False, 0)
 
         # The pointer every C1 error hands the author must resolve. Same style
         # as above: through the real function, against a temp REPO_ROOT.
@@ -1264,15 +1716,21 @@ def main() -> int:
     # matters concretely: docs/superpowers/ now holds exactly two archived
     # files, so one reorganization would turn C2 into a no-op that still
     # prints OK. Treat an empty scan as instrument failure, not a pass.
-    # Guard the globs that can legitimately go empty. Note this checks the
-    # SUPERPOWERS glob on its own rather than C2's full input list: c2_files
-    # always contains MCP_TOOLS_MD, so a guard on the combined list could never
-    # fire and would only look like protection.
+    # Guard the globs that can legitimately go empty, and guard EACH glob on
+    # its own rather than C2's full input list: c2_files always contains
+    # MCP_TOOLS_MD, so a guard on the combined list could never fire and would
+    # only look like protection.
     c1_files = markdown_files(DOCS)
     superpowers_files = markdown_files(SUPERPOWERS)
+    audits_files = [
+        path
+        for path in markdown_files(AUDITS)
+        if not path.startswith(AUDITS_CORPUS_EXCLUDE + os.sep)
+    ]
     for label, files, root in (
         ("C1", c1_files, DOCS),
         ("C2", superpowers_files, SUPERPOWERS),
+        ("C2", audits_files, AUDITS),
     ):
         if not files:
             print(
@@ -1342,18 +1800,38 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    c2_files = superpowers_files + [MCP_TOOLS_MD]
+    # C2/C6 scope: superpowers, the audits (minus the aihub#412 corpus — see
+    # AUDITS_CORPUS_EXCLUDE), and docs/mcp-tools.md, where this gate's own
+    # headline fix put path-qualified anchors. An anchor nothing checks rots
+    # exactly as quietly as the line number it replaced. The scope deliberately
+    # does NOT cover docs/design/polyforge-v1-design.md, which is a design
+    # document and legitimately names files that do not exist yet, nor
+    # docs/mcp-cards/, which the Go-side K6 gate already resolves
+    # (internal/mcp/contract_cards_gate_test.go).
+    c2_files = superpowers_files + audits_files + [MCP_TOOLS_MD]
+
+    # C6's anti-vacuity guard is a COUNT, not a file-list check: its grammar
+    # could rot while the files stay plentiful, and a recogniser that matched
+    # nothing across a live population in the hundreds did not run — it only
+    # looks like it did.
+    c6_errors, c6_checked = check_c6_symbol_anchors_resolve(c2_files)
+    if c6_checked == 0:
+        print(
+            "error: C6 recognised no symbol anchors across its whole scope. "
+            "The live population is in the hundreds, so this is instrument "
+            "failure — the anchor grammar rotted, not the docs. Fix "
+            "C6_FORWARD/C6_REVERSE; do not let the symbol half disappear "
+            "silently (aihub#406).",
+            file=sys.stderr,
+        )
+        return 2
 
     errors: list[str] = []
     errors += check_c1_no_line_citations(c1_files)
-    # C2 covers docs/mcp-tools.md as well as the archive: that file is where
-    # this gate's own headline fix put path-qualified anchors, and an anchor
-    # nothing checks rots exactly as quietly as the line number it replaced.
-    # It deliberately does NOT cover docs/design/polyforge-v1-design.md, which
-    # is a design document and legitimately names files that do not exist yet.
     errors += check_c2_referenced_go_files_exist(c2_files)
     errors += c4_errors
     errors += c5_errors
+    errors += c6_errors
 
     with open(args.schemas, encoding="utf-8") as fh:
         schema_tools = set(json.load(fh)["tools"])
@@ -1367,10 +1845,11 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: docs/ line-number citations closed; superpowers Go references "
-        f"resolve; mcp-tools.md matches all {len(schema_tools)} registered "
-        f"tools; the aihub#411 §6 tally matches a recount of its rows; the "
-        f"design doc's lock-cause unions cover exactly the "
+        f"OK: docs/ line-number citations closed; superpowers/audits Go "
+        f"references resolve and {c6_checked} symbol anchors resolve to real "
+        f"declarations; mcp-tools.md matches all {len(schema_tools)} "
+        f"registered tools; the aihub#411 §6 tally matches a recount of its "
+        f"rows; the design doc's lock-cause unions cover exactly the "
         f"{len(set(GO_LOCK_CAUSE_RE.findall(resource_events_text)))} "
         f"lockCause* constants."
     )

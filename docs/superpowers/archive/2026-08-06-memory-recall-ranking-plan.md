@@ -26,8 +26,8 @@
 >    zeroes the trio after `Bind` (`b41c60f`); see
 >    `internal/server/routes_memory.go` (`handleRemember`).
 > 2. **The cursor became a compound keyset**, not the single RFC3339Nano
->    timestamp Task 2 Step 4 specifies — see `formatRecallCursor` in
->    `internal/domain/memory.go` (`1e74314`).
+>    timestamp Task 2 Step 4 specifies — see
+>    `internal/domain/memory.go` (`formatRecallCursor`), landed at `1e74314`.
 > 3. **Carry-over covers every supersede path**, not only `UpdateMemory`.
 > 4. **Reference time also reached the GC sweep and the vector path**
 >    (`internal/domain/gc.go`, `internal/domain/memory_vector.go`) — not in this

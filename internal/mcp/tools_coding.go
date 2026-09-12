@@ -9,6 +9,7 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/coding"
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
 // emitCodingEvent resolves the state file and emits an event, best-effort.
@@ -556,6 +557,7 @@ func (s *Server) registerCodingTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_wrap",
 		Description: "Wrap a work item: push + PR + complete_attempt(wrapped) + delete state file. Idempotent only when a PR on the branch already covers local HEAD; local commits no PR covers are pushed, and a new PR is opened if the existing one is merged/closed. The response's pr_action says which happened. " +
+			"`derived` is required: the disposition list for findings this attempt noticed but did not fix, refused if omitted. " +
 			"Pass `note` to record the closing note in the same call rather than emitting it with a separate pf_emit_event beforehand.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),
@@ -564,7 +566,14 @@ func (s *Server) registerCodingTools() {
 			"pr_title":       prop("string", "PR title (if PR doesn't exist yet)"),
 			"pr_body":        prop("string", "PR body (if PR doesn't exist yet)"),
 			"note":           prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\"). Replaces a separate pf_emit_event call."),
-		}, []string{"work_item_id", "repo"}),
+			"derived": prop("array", "One disposition per finding this attempt noticed but did not fix. Required - "+
+				"a wrap that omits it is refused before anything is pushed; found nothing, send [] explicitly. Entries: "+
+				"\"folded\" or \"folded:<text>\" (kept in this wi's record - the default, and deliberately the cheapest), "+
+				"\"filed:<wi id or slug>\" (a new wi you really opened; the ref must resolve or the wrap is refused), "+
+				"\"dropped:<reason>\" (judged not worth tracking; the reason is required). Recorded on the attempt row "+
+				"and in the attempt_completed event. The server cannot check the list against the note's prose, so its "+
+				"honesty is yours."),
+		}, []string{"work_item_id", "repo", "derived"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
 		if err != nil {
@@ -577,6 +586,30 @@ func (s *Server) registerCodingTools() {
 		repo := strArg(args, "repo")
 		if repo == "" {
 			return errResult(fmt.Errorf("repo is required"))
+		}
+
+		// aihub#350: this tool always completes as "wrapped", so derived is
+		// unconditionally required, and the refusal fires HERE - before the state
+		// file is resolved, before the push/PR half runs and before the note is
+		// emitted - so a refused wrap has changed nothing anywhere: no push, no
+		// PR, no timeline event. Shape via domain.ValidateDerived, the same
+		// function the server runs, so the hops cannot drift; only the
+		// filed:-must-resolve half is left to the server, which holds the
+		// database that answers it.
+		if err := normalizeStringSliceArg(args, "derived"); err != nil {
+			return errResult(err)
+		}
+		derived, derivedPresent := args["derived"].([]string)
+		if !derivedPresent {
+			return errResult(fmt.Errorf(
+				"derived is required to wrap: list a disposition per finding this attempt noticed " +
+					"but did not fix - \"folded\" (kept in this wi's record; the default), " +
+					"\"filed:<wi id or slug>\" (a new wi you really opened), or \"dropped:<reason>\". " +
+					"Found nothing? Send derived: [] explicitly - an omitted list is refused because " +
+					"it cannot be told apart from findings nobody dispositioned"))
+		}
+		if aerr := domain.ValidateDerived(derived); aerr != nil {
+			return errResult(aerr)
 		}
 
 		sf, err := config.ResolveStateFile(wiID)
@@ -631,11 +664,15 @@ func (s *Server) registerCodingTools() {
 		}
 
 		// Complete attempt — server expects wi_id in URL path; attempt_id in body for credential check.
+		// derived rides the same body (aihub#350); it was validated before the
+		// push half ran, and the server refuses the wrap outright if it is
+		// missing, so an empty list travels as [] rather than being dropped.
 		body := map[string]any{
 			"status":         "wrapped",
 			"attempt_id":     sf.AttemptID,
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
+			"derived":        derived,
 		}
 		completeResult, err := s.client.CompleteAttempt(ctx, sf.WIID, body)
 		if err != nil {

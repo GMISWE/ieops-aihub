@@ -176,6 +176,7 @@ func TestE2ETerminalWithoutClaim_ADetachedSessionWithTheLiveCredentialWraps(t *t
 		"work_item_id": wiID,
 		"status":       "wrapped",
 		"note":         "wrapped from a detached session (aihub#421 control arm)",
+		"derived":      []any{},
 	})
 	if isErr {
 		t.Fatalf("a detached session holding the live credential must be able to wrap — this is the "+
@@ -239,6 +240,7 @@ func TestE2ETerminalWithoutClaim_ATamperedSecretIsRefused(t *testing.T) {
 	text, isErr := detached("pf_complete_attempt", map[string]any{
 		"work_item_id": wiID,
 		"status":       "wrapped",
+		"derived":      []any{},
 	})
 	if !isErr {
 		t.Fatalf("a terminal transition with a wrong session_secret must be refused, got success: %s", text)
@@ -321,6 +323,7 @@ func TestE2ETerminalWithoutClaim_ASupersededAttemptIsRefusedWithWhoTookOver(t *t
 	text, isErr := detached("pf_complete_attempt", map[string]any{
 		"work_item_id": wiID,
 		"status":       "wrapped",
+		"derived":      []any{},
 	})
 	if !isErr {
 		t.Fatalf("a superseded attempt must not be able to wrap the work item, got success: %s", text)
@@ -360,6 +363,7 @@ func TestE2ETerminalWithoutClaim_ASupersededAttemptIsRefusedWithWhoTookOver(t *t
 	text, isErr = detached("pf_complete_attempt", map[string]any{
 		"work_item_id": wiID,
 		"status":       "wrapped",
+		"derived":      []any{},
 	})
 	if isErr {
 		t.Fatalf("the CURRENT attempt must still be able to wrap after a stale actor was refused: %s", text)

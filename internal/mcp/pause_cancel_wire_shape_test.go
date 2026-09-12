@@ -363,6 +363,7 @@ func TestPauseKeepsTheStateFileAndATerminalCompletionDeletesIt(t *testing.T) {
 		result, isErr := callTool(t, f, "pf_complete_attempt", map[string]any{
 			"work_item_id": pauseWIID,
 			"status":       "wrapped",
+			"derived":      []any{},
 		})
 		if isErr {
 			t.Fatalf("pf_complete_attempt(wrapped) failed: %v", result)

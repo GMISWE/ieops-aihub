@@ -587,6 +587,13 @@ var elementShapes = map[string]func(token string) any{
 	"attrs_patch": func(tok string) any {
 		return map[string]any{"pf419": tok}
 	},
+	// aihub#350: derived entries must match domain.ValidateDerived's grammar,
+	// which both hops run - a bare token is refused at hop 2 before any request
+	// is built. "dropped:" is the carrier because it is the one verb whose
+	// payload is free text that must merely be non-blank: "folded:" would also
+	// carry the token but is the one entry whose payload is a courtesy, and
+	// "filed:" must resolve against work_items, which a probe token never will.
+	"derived":            func(tok string) any { return []any{"dropped:" + tok} },
 	"payload":            func(tok string) any { return map[string]any{"pf419": tok} },
 	"structured_payload": func(tok string) any { return map[string]any{"pf419": tok} },
 }
@@ -1878,6 +1885,14 @@ var serverNamesNoToolCanReach = map[string]string{
 		"terminate an in-progress step instead of answering 409 — is what pausing does " +
 		"unconditionally. It stays published on pf_complete_attempt, where Status is the " +
 		"caller's and the flag therefore decides something.",
+	"handlePauseAttempt.derived": "the third field of the same shared struct (aihub#350), and " +
+		"REFUSED rather than inert on this route: handlePauseAttempt forces Status to \"paused\" " +
+		"and FnCompleteAttempt's pre-transaction guard answers 400 to a non-empty derived on any " +
+		"status but \"wrapped\" — dispositions belong to the terminal transition, and a pause is " +
+		"not one. An empty list states nothing and is ignored. Publishing it on pf_pause_attempt " +
+		"would advertise a parameter whose only reachable effect is its own rejection, aihub#394's " +
+		"signature via aihub#530's precedent. It stays published on pf_complete_attempt and " +
+		"pf_wrap, the two tools that can reach the wrapped transition it exists for.",
 }
 
 // TestContractEveryServerReadNameIsReachableFromSomeTool is G4.

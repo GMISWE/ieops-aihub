@@ -397,7 +397,7 @@ func TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements(t *
 		if aerr := FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 			AttemptID: first.AttemptID, ClaimEpoch: first.ClaimEpoch,
 			SessionSecret: testSecret, Status: "paused",
-		}); aerr != nil {
+		}, nil, ""); aerr != nil {
 			t.Fatalf("pause: %v", aerr)
 		}
 		key := "repo-a/" + branch
@@ -689,7 +689,7 @@ func TestForceTakeoverLockSteal_ControlsStillAllowTheLegitimateDisplacements(t *
 		if aerr := FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 			AttemptID: secondResp.NewAttemptID, ClaimEpoch: secondResp.NewClaimEpoch,
 			SessionSecret: takerSecret, Status: "paused",
-		}); aerr != nil {
+		}, nil, ""); aerr != nil {
 			t.Fatalf("pause the attempt this arm just created: %v", aerr)
 		}
 		if status := ftsWorkItemStatus(t, pool, wi.ID); status == "running" {

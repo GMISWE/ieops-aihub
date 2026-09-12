@@ -1436,6 +1436,8 @@ func (s *Server) registerLifecycleTools() {
 	s.addTool(&sdkmcp.Tool{
 		Name: "pf_complete_attempt",
 		Description: "Complete the current run attempt (wrapped|failed|paused). Deletes state file for terminal statuses. " +
+			"Wrapping requires `derived`, the disposition list for findings this attempt noticed but did not fix; " +
+			"a wrap that omits it is refused. " +
 			"Pass `note` to record the closing note in the same call instead of emitting it with a separate " +
 			"pf_emit_event beforehand, which is the only order that works, since this call deletes the " +
 			"credentials pf_emit_event needs. The response's note_emitted says whether it landed.",
@@ -1445,6 +1447,13 @@ func (s *Server) registerLifecycleTools() {
 			"force_terminate_step": prop("boolean", "Force terminate in-progress step"),
 			"note":                 prop("string", "Closing note recorded as a `note` event before the attempt is completed (e.g. \"wrapped: <one sentence>\" / \"failed reason: <why>\"). Replaces a separate pf_emit_event call."),
 			"pause_reason":         prop("string", "Why the attempt is being paused. Read only when status=\"paused\" (sending one with any other status is refused, not ignored) and recorded on the attempt row and in the attempt_completed event, unlike `note`, which becomes its own timeline event whatever the status."),
+			"derived": prop("array", "One disposition per finding this attempt noticed but did not fix. Required when "+
+				"status=\"wrapped\" and refused if omitted; found nothing, send [] explicitly. Entries: \"folded\" or "+
+				"\"folded:<text>\" (kept in this wi's record - the default, and deliberately the cheapest), "+
+				"\"filed:<wi id or slug>\" (a new wi you really opened; the ref must resolve or the wrap is refused), "+
+				"\"dropped:<reason>\" (judged not worth tracking; the reason is required). Recorded on the attempt row "+
+				"and in the attempt_completed event; only a wrap records it. The server cannot check the list against "+
+				"the note's prose, so its honesty is yours."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1483,6 +1492,41 @@ func (s *Server) registerLifecycleTools() {
 					"drop pause_reason or use note, which is recorded on every status", status))
 		}
 
+		// aihub#350: the derived checks a refusal must not follow a side effect
+		// for, raised HERE - before the state file is resolved and before the
+		// note below is emitted (the aihub#452 placement, for the same reason: a
+		// refusal that fires after the note has written a timeline event for a
+		// call it then rejects). Two checks, not three, and the asymmetry is
+		// deliberate: a wrap with derived ABSENT or MALFORMED is refused at this
+		// hop, because every pre-aihub#350 wrap call looks exactly like the first
+		// and the fix is one argument away; but a non-empty list on a non-wrapped
+		// status is left for the server to refuse, because a hop-2 refusal keyed
+		// on the status/derived combination makes this tool's other parameters
+		// unmeasurable to the aihub#419 G1 probe, whose status value is pinned to
+		// "paused" (see semanticValuesByTool) while derived travels only
+		// meaningfully on "wrapped". The server's guard is the authority either
+		// way; what moves between hops is only which refusal spares the note.
+		//
+		// The shape check is domain.ValidateDerived - the server's own function,
+		// imported rather than restated, so the two hops cannot drift.
+		if err := normalizeStringSliceArg(args, "derived"); err != nil {
+			return errResult(err)
+		}
+		derived, derivedPresent := args["derived"].([]string)
+		if status == "wrapped" {
+			if !derivedPresent {
+				return errResult(fmt.Errorf(
+					"derived is required to wrap: list a disposition per finding this attempt noticed " +
+						"but did not fix - \"folded\" (kept in this wi's record; the default), " +
+						"\"filed:<wi id or slug>\" (a new wi you really opened), or \"dropped:<reason>\". " +
+						"Found nothing? Send derived: [] explicitly - an omitted list is refused because " +
+						"it cannot be told apart from findings nobody dispositioned"))
+			}
+			if aerr := domain.ValidateDerived(derived); aerr != nil {
+				return errResult(aerr)
+			}
+		}
+
 		sf, err := config.ResolveStateFile(wiID)
 		if err != nil {
 			return errResult(config.StateFileMissingErr(wiID, err))
@@ -1514,6 +1558,15 @@ func (s *Server) registerLifecycleTools() {
 		// reason not given" into "paused for no stated reason".
 		if pauseReason != "" {
 			body["pause_reason"] = pauseReason
+		}
+		// aihub#350: forwarded whenever the caller supplied it, INCLUDING empty -
+		// [] is the explicit "no findings" declaration and dropping it here would
+		// turn every honest empty declaration into the very omission the server
+		// refuses. Presence-gated so a call that never mentioned derived sends no
+		// key, keeping absent and [] distinguishable at hop 3, which is the whole
+		// nil-versus-empty contract of CompleteAttemptRequest.Derived.
+		if derivedPresent {
+			body["derived"] = derived
 		}
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)

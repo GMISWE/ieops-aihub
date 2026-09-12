@@ -1434,6 +1434,32 @@ jobs:
           ! grep -q -- '--- SKIP' dep_requeue.log \
             || { echo "::error::a TestDeleteDependency case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#350: the derived-disposition gate's database halves — what a wrap
+      # stores on run_attempts.derived and in the attempt_completed payload,
+      # that filed:<ref> existence refuses the wrap whole, that the visibility
+      # scoping admits cross-project refs exactly when the caller holds a role,
+      # and that the default disposition moves the work-item count by zero.
+      # The shape halves run with a nil pool in the always-on Unit tests step
+      # (complete_attempt_derived_guard_test.go) and are deliberately not here.
+      # Same Postgres service, already migrated by the "Apply migrations
+      # (aihub#242 DB tests)" step above.
+      - name: aihub#350 derived disposition DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestWrapDerived|TestWrapFiled' -count=1 -v 2>&1 | tee derived_disposition.log
+          for want in TestWrapDerivedFoldedLeavesNoNewWorkItem \
+                      TestWrapDerivedExplicitEmptyIsStoredAsEmptyNotNull \
+                      TestWrapDerivedIsNotWrittenOnNonWrappedCompletions \
+                      TestWrapFiledMustNameAnExistingWorkItem \
+                      TestWrapFiledCrossProjectIsScopedByCallerRoles; do
+            grep -q -- "--- PASS: $want" derived_disposition.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#350 derived-disposition DB coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' derived_disposition.log \
+            || { echo "::error::a TestWrapDerived/TestWrapFiled case SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#241: exercise the declared_resources compare-and-set (CAS) fix
       # against the same Postgres service, already migrated by the "Apply
       # migrations (aihub#242 DB tests)" step above — reused here rather than

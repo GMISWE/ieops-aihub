@@ -188,6 +188,7 @@ var projectRoleReaders = map[string]string{
 	"ui_handlers_queue.go:handleUIQueuePartial": "authorizes",
 
 	"router.go:handleCreateWorkItem":        "forwards",
+	"router.go:handleCompleteAttempt":       "forwards",
 	"router.go:handleUpdateWorkItem":        "forwards",
 	"router.go:handleCancelWorkItem":        "forwards",
 	"router.go:handleForceTakeover":         "forwards",

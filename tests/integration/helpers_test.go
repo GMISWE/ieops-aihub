@@ -129,12 +129,18 @@ func mustCompleteAttempt(t *testing.T, c *client.Client, ctx context.Context, wi
 	attemptID := claim["attempt_id"].(string)
 	claimEpoch := int64(claim["claim_epoch"].(float64))
 	sessionSecret := claim["session_secret"].(string)
-	_, err := c.CompleteAttempt(ctx, wiID, map[string]any{
+	body := map[string]any{
 		"attempt_id":     attemptID,
 		"claim_epoch":    claimEpoch,
 		"session_secret": sessionSecret,
 		"status":         status,
-	})
+	}
+	// aihub#350: a wrap that omits derived is refused; these fixtures wrap with
+	// nothing left behind, and the explicit empty list is how that is said.
+	if status == "wrapped" {
+		body["derived"] = []string{}
+	}
+	_, err := c.CompleteAttempt(ctx, wiID, body)
 	if err != nil {
 		t.Fatalf("CompleteAttempt(%s → %s): %v", wiID, status, err)
 	}

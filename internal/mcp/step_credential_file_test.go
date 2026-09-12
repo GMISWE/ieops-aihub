@@ -126,7 +126,7 @@ func TestTerminalToolsDeleteTheCredentialFileOnlyOnSuccess(t *testing.T) {
 			return http.StatusOK, map[string]any{"status": "wrapped"}
 		})
 		result, isErr := callToolBounded(t, f, "pf_complete_attempt", map[string]any{
-			"work_item_id": credWIID, "status": "wrapped",
+			"work_item_id": credWIID, "status": "wrapped", "derived": []any{},
 		}, 20*time.Second)
 		if isErr {
 			t.Fatalf("pf_complete_attempt failed against a 200: %v", result)
@@ -150,7 +150,7 @@ func TestTerminalToolsDeleteTheCredentialFileOnlyOnSuccess(t *testing.T) {
 				"code": "INTERNAL_ERROR", "message": "commit attempt"}
 		})
 		result, isErr := callToolBounded(t, f, "pf_complete_attempt", map[string]any{
-			"work_item_id": credWIID, "status": "wrapped",
+			"work_item_id": credWIID, "status": "wrapped", "derived": []any{},
 		}, 20*time.Second)
 		if !isErr {
 			t.Fatalf("a 500 from the server must reach the caller as an error, not a success: %v", result)
@@ -201,6 +201,7 @@ func TestTerminalToolsDeleteTheCredentialFileOnlyOnSuccess(t *testing.T) {
 		result, isErr := callToolBounded(t, f, "pf_wrap", map[string]any{
 			"work_item_id": credWIID, "repo": "aihub",
 			"pr_title": "aihub#543 probe", "pr_body": "body",
+			"derived": []any{},
 		}, 60*time.Second)
 		if !isErr {
 			t.Fatalf("a wrap whose completion was refused must be reported as an error: %v", result)

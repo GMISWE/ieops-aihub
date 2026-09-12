@@ -432,6 +432,8 @@ func runLiveGitKeyWalk(t *testing.T, w *liveKeyWalk) {
 		"pr_title": "aihub#501 live key walk",
 		"pr_body":  "wrapped by the aihub#501 live git walk",
 		"note":     "wrapped: the aihub#501 live git walk finished with this work item",
+		// aihub#350: a wrap that omits derived is refused before the push half.
+		"derived": []any{},
 	}))
 	if ok, _ := wrapped["ok"].(bool); !ok {
 		t.Errorf("pf_wrap did not succeed, so the keys of its success path went unmeasured: %v\n"+

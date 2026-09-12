@@ -180,7 +180,7 @@ func TestWrapSendsNoForceTerminateStep(t *testing.T) {
 	f := wrapFixture(t, false)
 	out, isErr := callToolBounded(t, f, "pf_wrap", map[string]any{
 		"work_item_id": resolveCanonical, "repo": "aihub",
-		"pr_title": "wrapped", "pr_body": "body",
+		"pr_title": "wrapped", "pr_body": "body", "derived": []any{},
 	}, 60*time.Second)
 	if isErr {
 		t.Fatalf("pf_wrap failed: %v", out)
@@ -285,6 +285,7 @@ func TestWrapRecordsTheNoteAgainWhenTheCompletionFailed(t *testing.T) {
 	args := map[string]any{
 		"work_item_id": resolveCanonical, "repo": "aihub",
 		"pr_title": "wrapped", "pr_body": "body", "note": note,
+		"derived": []any{},
 	}
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -397,13 +398,13 @@ func assertBothStateKeysDeleted(t *testing.T, tool string) {
 
 	args := map[string]any{
 		"work_item_id": resolveSlug, "repo": "aihub",
-		"pr_title": "wrapped by slug", "pr_body": "body",
+		"pr_title": "wrapped by slug", "pr_body": "body", "derived": []any{},
 	}
 	if tool != "pf_wrap" {
 		// The mirrored tool is a lifecycle call, not a coding one: it takes the
 		// terminal status rather than a PR, and the status is what gates the
 		// cleanup at all.
-		args = map[string]any{"work_item_id": resolveSlug, "status": "wrapped"}
+		args = map[string]any{"work_item_id": resolveSlug, "status": "wrapped", "derived": []any{}}
 	}
 	out, isErr := callToolBounded(t, f, tool, args, 60*time.Second)
 	if isErr {

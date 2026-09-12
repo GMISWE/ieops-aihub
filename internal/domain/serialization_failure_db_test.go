@@ -335,7 +335,8 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 				ClaimEpoch:    1,
 				SessionSecret: secret,
 				Status:        "wrapped",
-			})
+				Derived:       []string{},
+			}, nil, "")
 		}()
 
 		waitForRowLockWaiter(t, pool)
@@ -726,7 +727,7 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 				ClaimEpoch:    1,
 				SessionSecret: secret,
 				Status:        "paused",
-			})
+			}, nil, "")
 		}()
 
 		waitForLockWaiter(t, pool, "%last_active_at%",
@@ -809,7 +810,7 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 				ClaimEpoch:    1,
 				SessionSecret: secret,
 				Status:        "paused",
-			})
+			}, nil, "")
 		}()
 
 		waitForRowLockWaiter(t, pool)

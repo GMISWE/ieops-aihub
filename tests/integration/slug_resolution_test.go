@@ -92,6 +92,7 @@ func TestSlugResolution_NoFKViolation(t *testing.T) {
 		"session_secret":       claim["session_secret"],
 		"status":               "wrapped",
 		"force_terminate_step": true,
+		"derived":              []string{},
 	}); err != nil {
 		t.Fatalf("CompleteAttempt by slug %q: %v", slug, err)
 	}

@@ -789,7 +789,9 @@ func handleCompleteAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 
 		// Pass the resolved canonical id (c.Param("id") may be a slug). (aihub#127)
-		if aihubErr := domain.FnCompleteAttempt(ctx, pool, wi.ID, &req); aihubErr != nil {
+		// The caller's roles scope which work items derived filed: entries may
+		// name (aihub#350), the same way they scope blocked_by on the create path.
+		if aihubErr := domain.FnCompleteAttempt(ctx, pool, wi.ID, &req, u.ProjectRoles, u.Role); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})

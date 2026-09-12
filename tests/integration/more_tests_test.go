@@ -293,6 +293,7 @@ func TestCompleteAttemptTerminalGuard(t *testing.T) {
 		"claim_epoch":    claimEpoch,
 		"session_secret": sessionSecret,
 		"status":         "wrapped",
+		"derived":        []string{},
 	})
 	if err == nil {
 		t.Error("second wrap on wrapped attempt should fail with 409, got nil")
@@ -613,6 +614,7 @@ func TestWorkItemErrorCases(t *testing.T) {
 		"claim_epoch":    claimEpoch,
 		"session_secret": "wrong-secret-deadbeef-not-the-real-one",
 		"status":         "wrapped",
+		"derived":        []string{},
 	})
 	if err == nil {
 		t.Error("expected auth error with wrong session_secret, got nil")

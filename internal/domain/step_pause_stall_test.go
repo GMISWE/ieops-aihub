@@ -84,7 +84,7 @@ func TestPauseReasonSurfacedInReadyQueue(t *testing.T) {
 		SessionSecret: "secret123",
 		Status:        "paused",
 		PauseReason:   strp(reason),
-	})
+	}, nil, "")
 	require.Nil(t, aerr)
 
 	// (a) persisted on run_attempts.
@@ -119,7 +119,8 @@ func TestPauseReasonOmittedWhenNil(t *testing.T) {
 		ClaimEpoch:    1,
 		SessionSecret: "secret456",
 		Status:        "wrapped",
-	})
+		Derived:       []string{},
+	}, nil, "")
 	require.Nil(t, aerr)
 
 	var gotReason *string

@@ -1287,7 +1287,10 @@ func handlePauseAttempt(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		// Delegate to FnCompleteAttempt(paused) — correctly keeps locks, emits events.
 		// Pass the resolved canonical id (wiID may be a slug). (aihub#127)
-		if aihubErr := domain.FnCompleteAttempt(c.Request().Context(), pool, wi.ID, &req); aihubErr != nil {
+		// nil/"" visibility: derived filed: resolution (aihub#350) runs only on
+		// status=wrapped, which this route forces away one line up, so no filed:
+		// ref is ever resolved here and nothing needs the caller's roles.
+		if aihubErr := domain.FnCompleteAttempt(c.Request().Context(), pool, wi.ID, &req, nil, ""); aihubErr != nil {
 			return writeError(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "paused"})

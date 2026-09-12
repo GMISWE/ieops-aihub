@@ -172,6 +172,7 @@ func TestPublishedNoteOrderingIsTheOrderTheToolUses(t *testing.T) {
 			"work_item_id": completeWIID,
 			"status":       "wrapped",
 			"note":         "wrapped: the ordering the description publishes",
+			"derived":      []any{},
 		})
 		if isErr {
 			t.Fatalf("pf_complete_attempt failed: %v", result)
@@ -254,8 +255,9 @@ func TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote(t *testing.T)
 
 	t.Run("note_never_reaches_this_endpoint", func(t *testing.T) {
 		body := drive(t, map[string]any{
-			"status": "wrapped",
-			"note":   "wrapped: this text belongs on the timeline, not on the completion",
+			"status":  "wrapped",
+			"note":    "wrapped: this text belongs on the timeline, not on the completion",
+			"derived": []any{},
 		})
 		if v, present := body["note"]; present {
 			t.Errorf("the complete body carries note=%#v.\nThe card draws the whole distinction "+
@@ -264,16 +266,16 @@ func TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote(t *testing.T)
 				"status. A note on this body is a second place the same sentence could be "+
 				"recorded, and the two would not have to agree.", v)
 		}
-		want := append([]string{"status"}, completeAttemptCredentials...)
+		want := append([]string{"status", "derived"}, completeAttemptCredentials...)
 		sort.Strings(want)
 		if got := sortedBodyKeys(body); len(got) != len(want) {
 			t.Errorf("the complete body carries %v, want exactly %v for a call that supplied only "+
-				"a status and a note", got, want)
+				"a status, a note and a derived list", got, want)
 		}
 	})
 
 	t.Run("the_flag_is_forwarded_when_true", func(t *testing.T) {
-		body := drive(t, map[string]any{"status": "wrapped", "force_terminate_step": true})
+		body := drive(t, map[string]any{"status": "wrapped", "force_terminate_step": true, "derived": []any{}})
 		if body["force_terminate_step"] != true {
 			t.Errorf("force_terminate_step = %#v, want true. It is the one parameter on this tool "+
 				"that decides anything server-side on a terminal status, so a caller that sets it "+
@@ -283,7 +285,7 @@ func TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote(t *testing.T)
 	})
 
 	t.Run("the_flag_is_omitted_when_false", func(t *testing.T) {
-		body := drive(t, map[string]any{"status": "wrapped", "force_terminate_step": false})
+		body := drive(t, map[string]any{"status": "wrapped", "force_terminate_step": false, "derived": []any{}})
 		if v, present := body["force_terminate_step"]; present {
 			t.Errorf("the complete body carries force_terminate_step=%#v on a call that sent "+
 				"false.\nBoth directions are the claim: a handler that always forwards satisfies "+
@@ -300,7 +302,13 @@ func TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote(t *testing.T)
 		// the way to observe that is that the request happens at all.
 		for _, status := range []string{"wrapped", "failed", "paused"} {
 			t.Run(status, func(t *testing.T) {
-				body := drive(t, map[string]any{"status": status, "force_terminate_step": true})
+				args := map[string]any{"status": status, "force_terminate_step": true}
+				if status == "wrapped" {
+					// aihub#350: a wrap without derived is refused at this hop,
+					// before the request this arm exists to observe.
+					args["derived"] = []any{}
+				}
+				body := drive(t, args)
 				if body["status"] != status {
 					t.Errorf("status = %#v, want %q", body["status"], status)
 				}
@@ -367,11 +375,17 @@ func TestTheRefusalNamesNoteAsTheFieldThatRecordsOnEveryStatus(t *testing.T) {
 			t.Run(status, func(t *testing.T) {
 				seedCompleteState(t, nil)
 				f := newFakeAihub(t)
-				result, isErr := callTool(t, f, "pf_complete_attempt", map[string]any{
+				args := map[string]any{
 					"work_item_id": completeWIID,
 					"status":       status,
 					"note":         status + ": recorded whatever the status",
-				})
+				}
+				if status == "wrapped" {
+					// aihub#350: a wrap without derived is refused before the
+					// note this arm counts is ever emitted.
+					args["derived"] = []any{}
+				}
+				result, isErr := callTool(t, f, "pf_complete_attempt", args)
 				if isErr {
 					t.Fatalf("pf_complete_attempt(status=%q, note=…) failed: %v", status, result)
 				}
@@ -422,10 +436,15 @@ func TestCompleteAttemptResultCarriesTheWorktreesAndIsNotProjected(t *testing.T)
 			// projected this response it would be dropped here.
 			return http.StatusOK, map[string]any{"ok": true, serverOnlyKey: "2026-09-10T00:00:00Z"}
 		})
-		result, isErr := callTool(t, f, "pf_complete_attempt", map[string]any{
+		args := map[string]any{
 			"work_item_id": completeWIID,
 			"status":       status,
-		})
+		}
+		if status == "wrapped" {
+			// aihub#350: a wrap without derived is refused before any request.
+			args["derived"] = []any{}
+		}
+		result, isErr := callTool(t, f, "pf_complete_attempt", args)
 		if isErr {
 			t.Fatalf("pf_complete_attempt(status=%q) failed: %v", status, result)
 		}

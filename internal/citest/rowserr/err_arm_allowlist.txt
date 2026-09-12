@@ -1,0 +1,61 @@
+# Err arms exempted from TestNoRowsErrCheckArmLeaksTheError (aihub#623).
+#
+# One `<file>:<func>:<rows>` per line — the exact line the gate prints when it
+# fails. No line numbers, same reasoning as allowlist.txt (see Loop.Key in
+# rowserr.go); the same coarseness too: a function with several checks over one
+# variable name shares one key (fetchWIFacets below holds two Err arms under
+# one entry, and the entry defends both at once).
+#
+# Like scan_swallow_allowlist.txt — and UNLIKE allowlist.txt — this file is NOT
+# expected to be empty. It is the justification ledger for Err arms adjudicated
+# best-effort in aihub#623: every entry cites the WRITTEN policy that makes the
+# fall-through defensible, the reason lives here rather than in a nolint, and
+# the gate fails on an entry that matches nothing — a stale exemption
+# pre-authorises whatever lands on that key next.
+#
+# The bar an entry has to clear: the arm sees a real mid-stream failure (pgx v5
+# defers execute-time errors to Err(), and a poisoned Scan lands here too), so
+# letting it fall through means publishing the partial result as the complete
+# one. An entry is defensible only when a DOCUMENTED contract says exactly
+# that: the caller can see the degradation, or the failure direction is closed
+# and recoverable. "The rows are probably fine" does not clear it — that was
+# FnClaimWorkItem's shape, and it published truncated AcquiredLocks on the one
+# field aihub#345 established has to be complete or unusable.
+
+# unblockDependentWI — published-as-success (`return nil` after the class-40
+# check): written best-effort policy at EVERY error arm of this sweep
+# (aihub#334 comments in the function; aihub#607 ledgered its send-time arm and
+# aihub#608 its Scan arm with the same citation). The sweep is a convenience on
+# a terminal transition; the failure direction is CLOSED — a dependent wi stays
+# blocked, the recoverable outcome, and the next terminal transition retries.
+internal/domain/run_attempts.go:unblockDependentWI:rows
+
+# checkDedup — published-as-success (`return nil` after the class-40 check):
+# dedup is best-effort by documented policy (aihub#522-verified; the send-time
+# arm carries the same ruling in aihub#607's ledger, the Scan arm in
+# aihub#608's). Class 40 returns because the transaction is dead; anything else
+# fails OPEN into creation — the direction every other failure of this function
+# already takes, and a duplicate wi is recoverable where a blocked creation is
+# a lie.
+internal/domain/work_items.go:checkDedup:rows
+
+# attachStepState — fall-through (log to stderr, then the enrichment loop ends):
+# best-effort by design per its declaration comment (aihub#280): a failure
+# leaves StepState nil, the same shape as "never claimed", because
+# include_step_state=true must not break a list call that works without it. The
+# function is void — there is no error path to return through — and the
+# stderr log makes the truncation visible to an operator (aihub#607 recorded
+# the same justification for its send arm, aihub#608 for its Scan arm).
+internal/domain/work_items.go:attachStepState:rows
+
+# /ui page decorations — fall-through (log to stderr): each function's
+# declaration comment documents that errors degrade to an empty or partial
+# result by design — filter dropdowns, owner avatars, dep-list adornments and
+# count badges render without the decoration rather than 500ing the page, and
+# the caller can SEE the decoration is missing; nothing plans around its
+# absence. Same population, same ruling and same citations as the /ui block of
+# scan_swallow_allowlist.txt (aihub#608), one arm further out.
+internal/server/ui_handlers_wi.go:fetchDepMeta:rows
+internal/server/ui_helpers.go:fetchWIFacets:rows
+internal/server/ui_helpers.go:fetchAttemptOwners:rows
+internal/server/ui_helpers.go:fetchProjectWICounts:rows

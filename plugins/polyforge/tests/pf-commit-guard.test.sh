@@ -114,6 +114,38 @@ pass_ck "empty message inert"      "$(p_commit '')"
 pass_ck "no python field inert"    '{"tool_name":"mcp__plugin_polyforge_polyforge__pf_commit","tool_input":{}}'
 
 echo ""
+echo "== aihub#536: dot-prefixed claude PATHS pass; the word form stays blocked =="
+# aihub#513's PR body was denied for citing the config path literally and had to be
+# reworded. A dot-prefixed claude is a filename segment, never an attribution.
+pass_ck "tilde claude config path in pr body" "$(p_pr 'The hook is installed under ~/.claude on the dev box.')"
+pass_ck "dot-claude settings path in commit"  "$(p_commit 'read timeout from .claude/settings.json instead of env')"
+pass_ck "dot-claude-plugin path in commit"    "$(p_commit 'bump the version stamp in .claude-plugin/marketplace.json')"
+# Anchors: the path exemption must not widen into the word form or model ids.
+block_ck "bare claude word still blocked"      "$(p_pr 'reworded per claude review feedback')"
+block_ck "bedrock anthropic.claude id blocked" "$(p_commit 'switch default model to anthropic.claude-sonnet-4')"
+
+echo ""
+echo "== aihub#561: tier names blocked even in TECHNICAL prose (contract), paraphrase recommended =="
+# Adjudicated: unlike the dot-path shape above, NO shape separates a technical tier mention
+# from an attribution ("model: opus" is both the dispatch argument and the attribution
+# spelling), and the deny path would teach any lexical carve-out as the rewrite. So the block
+# stays — as a documented contract (see the ALTS note in the hook) — and the denial hands over
+# the lossless paraphrase instead of leaving each writer to rediscover it (the 1.1.31 batch
+# measured that cost). The block pins the contract; the passes pin the paraphrase's legality.
+block_ck "technical tier-change prose (deliberate — see ALTS contract note)" \
+  "$(p_commit 'raise the review tier from sonnet to opus')"
+out="$(run "$(p_commit 'raise the review tier from sonnet to opus')")"
+if has "$out" "the default tier"; then echo "  PASS: tier denial recommends the paraphrase";
+else echo "  FAIL: tier denial does not recommend the paraphrase (got: ${out:-<empty>})" >&2; fails=$((fails+1)); fi
+# The remedy is scoped to tier hits: a non-tier denial must not carry tier advice.
+out="$(run "$(p_commit 'tweak per Claude review')")"
+if has "$out" '"permissionDecision": "deny"' && ! has "$out" "the default tier"; then
+  echo "  PASS: non-tier denial carries no tier advice";
+else echo "  FAIL: non-tier denial should deny without tier advice (got: ${out:-<empty>})" >&2; fails=$((fails+1)); fi
+pass_ck "recommended tier paraphrase" "$(p_commit 'raise review steps from the default tier to the raised tier')"
+pass_ck "tier constant names"         "$(p_commit 'swap DEFAULT_TIER and RAISED_TIER in engine.native.md')"
+
+echo ""
 echo "== aihub#272 half 1: text DESTINED for git is still blocked =="
 # This half has no discriminating power on its own — every case here was blocked
 # before the fix too. It is the anchor that stops the fix from degenerating into

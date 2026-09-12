@@ -596,6 +596,15 @@ elif base_tool.startswith("polyforge_"):
     base_tool = base_tool[len("polyforge_"):]
 fields = []
 bash_cmd = None
+# aihub#536 — the per-tool field scope below is DELIBERATELY asymmetric: each entry
+# point scans exactly the text IT is about to write into git. pf_commit scans the
+# commit message it creates; pf_pr scans the title/body it posts; pf_wrap/pf_ship
+# scan the union of what they fuse. pf_pr does NOT re-scan the branch's commit
+# messages: those were already scanned at their own write point (pf_commit, or the
+# Bash backstop for a raw `git commit`), and a PR-time re-scan could only deny text
+# that is no longer editable — a pushed commit message can be changed solely by
+# rewriting history, which the workflow forbids. Guard at the write point, where a
+# deny is still cheap to correct; do not "unify" the scopes.
 if base_tool == "pf_commit":
     fields = [field("message")]
 elif base_tool == "pf_pr":
@@ -654,8 +663,32 @@ if not fields:
 B  = r"(?<![A-Za-z0-9])"   # left boundary
 B2 = r"(?![A-Za-z0-9])"    # right boundary
 ALTS = [
-    r"claude",            # also catches claude-opus-4-8, claude code (word "claude")
+    # aihub#536: `(?<!\.)` exempts the dot-prefixed PATH form only. `~/.claude`,
+    # `.claude/settings.json`, `.claude-plugin/marketplace.json` are config-path
+    # segments cited in ordinary technical prose, not attribution — aihub#513 had
+    # to reword a PR body for naming the config path literally. Same shape-over-
+    # whitelist reasoning as the `ai` narrowing below: attribution names Claude as
+    # a WORD ("Claude", "Claude Code", "claude-opus-4-8" — all still caught); only
+    # a filename ever spells it `.claude`. Bedrock-style model ids
+    # (`anthropic.claude-...`) stay blocked via their other tokens (`anthropic`,
+    # `opus`, `sonnet`, `haiku`) — pinned by a test fixture.
+    r"(?<!\.)claude",     # also catches claude-opus-4-8, claude code (word "claude")
     r"anthropic",
+    # aihub#561 — CONTRACT: the three tier names below are blocked even in clearly technical
+    # prose ("raise the review tier from X to Y" in the 1.1.31 batch had to be paraphrased).
+    # That is deliberate, adjudicated against the alternative of a technical-context carve-out:
+    #   - Unlike `.claude` (a filename form attribution never uses) there is NO shape that
+    #     separates a technical tier mention from an attribution — "model: <name>" is at once
+    #     the dispatch argument and the attribution spelling, so any lexical carve-out
+    #     (backticks, quotes, nearby words like "tier") admits both populations.
+    #   - Worse, the deny path TEACHES the carve-out: the guard asks for a rewrite, so any
+    #     escapable shape becomes the rewrite, and the block is hollow within a batch.
+    #   - A context allowlist is the aihub#272 value allowlist one level up — it rots silently
+    #     in the direction of more false negatives as the vocabulary around the mapping grows.
+    # The lossless alternative already exists in the repo's own vocabulary: write "the default
+    # tier" / "the raised tier", or name the DEFAULT_TIER / RAISED_TIER constants — prose that
+    # also survives a re-tier, which the literal names do not. The deny reason below recommends
+    # exactly that when one of these three is the hit.
     r"opus",
     r"sonnet",
     r"haiku",
@@ -722,6 +755,15 @@ for fname, value in fields:
             f"/ AI-assisted trailers. Rewrite the text to describe only what the change does "
             f"and why, in a plain human-authored tone, then retry."
         )
+        if term.lower() in ("opus", "sonnet", "haiku"):
+            # aihub#561: tier names are blocked even in technical prose (see the ALTS
+            # contract note). Hand the writer the lossless paraphrase instead of leaving
+            # them to invent one per denial.
+            reason += (
+                " For technical prose about the model-tier mapping, say \"the default tier\" "
+                "/ \"the raised tier\" or name the DEFAULT_TIER / RAISED_TIER constants "
+                "instead of the model names."
+            )
         deny(reason)
 
 # no hit -> no output, call proceeds

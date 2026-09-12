@@ -118,6 +118,29 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 			return err
 		}
 
+		// aihub#627: a supersede is a WRITE against an existing row — it
+		// rewrites the target lineage's latest_id — so the target must be
+		// visible to the caller, exactly as handleUpdateMemory now requires
+		// for the same operation. Without this, POST /v1/memories with
+		// supersedes_memory_id was a bypass around handleUpdateMemory's gate.
+		// All three refusals here are the shared 404 bytes: a target that does
+		// not exist (or is redacted; loadMemoryFn filters those), a target in
+		// a project the caller is no member of, and a target row the caller
+		// cannot read. domain.Remember's own same-project/same-wi 403s are
+		// therefore only ever said about targets the caller can see.
+		if req.SupersedesMemID != nil && *req.SupersedesMemID != "" {
+			target, tgtErr := loadMemoryFn(ctx, pool, *req.SupersedesMemID)
+			if tgtErr != nil {
+				return writeError(c, hideNotFound(tgtErr))
+			}
+			if !hasProjectAccess(u, target.Project, "viewer") {
+				return writeError(c, errNotVisible())
+			}
+			if err := checkMemoryVisibility(c, u, target); err != nil {
+				return err
+			}
+		}
+
 		// C5 (aihub#210): methodology.* artifacts (spec/plan/review/...) are
 		// wi-scoped and may only be written by the session holding the target wi's
 		// current attempt. Project-writer alone is not enough — otherwise any writer
@@ -677,11 +700,9 @@ func handleActivateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// so it requires the same writer gate as handleResolveCommit/handleV1ReplyCommit.
 		// Without this any authed user could strengthen/revive any memory (IDOR, aihub#146).
 		// A memory's project is immutable, so a pre-check has no TOCTOU concern.
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		// aihub#627: the gate also applies the per-memory visibility rule, so a
+		// writer who cannot read a private row cannot strengthen it either.
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 
@@ -712,11 +733,12 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		// (IDOR). The project gate is the one that expires; the author check is
 		// not a substitute for it. A memory's project is immutable, so a
 		// pre-check has no TOCTOU concern.
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		// aihub#627: the gate also applies the per-memory visibility rule. For
+		// this handler that changes the SHAPE, not the outcome: domain.Redact
+		// already refused a non-author, but with a 403 that confirmed the
+		// private row's existence; now the refusal is the shared 404. Every
+		// caller Redact would have allowed (author, admin) passes the gate.
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 
@@ -731,11 +753,18 @@ func handleRedactMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		}
 		_ = c.Bind(&body)
 
-		if aihubErr := domain.Redact(ctx, pool, memID, u.UserID, u.DisplayName, u.Role, body.Reason); aihubErr != nil {
+		if aihubErr := doRedactFn(ctx, pool, memID, u.UserID, u.DisplayName, u.Role, body.Reason); aihubErr != nil {
 			return domainErr(c, aihubErr)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}
+}
+
+// doRedactFn wraps domain.Redact; swappable in tests (same pattern as
+// doActivateFn / doReplyCommitFn) so handleRedactMemory's entry gate can be
+// unit-tested without a database.
+var doRedactFn = func(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, callerDisplay, callerRole, reason string) error {
+	return domain.Redact(ctx, pool, memID, callerUserID, callerDisplay, callerRole, reason)
 }
 
 // handleResolveCommit handles POST /v1/memories/:id/commit/:commit_id/resolve.
@@ -763,18 +792,15 @@ func handleResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "reply is required"))
 		}
 
-		// Enforce project-writer access before mutating — mirrors handleUIEditCommit
-		// and handleUIArtifactCommit. A memory's project is immutable, so a pre-check
-		// is safe with no TOCTOU concern.
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		// Enforce project-writer access and per-memory visibility (aihub#627)
+		// before mutating — mirrors handleUIEditCommit and handleUIArtifactCommit.
+		// A memory's project is immutable, so a pre-check is safe with no TOCTOU
+		// concern.
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 
-		if err := domain.ResolveCommit(ctx, pool, memID, commitID, req.Reply, u.UserID, u.DisplayName); err != nil {
+		if err := doResolveCommitFn(ctx, pool, memID, commitID, req.Reply, u.UserID, u.DisplayName); err != nil {
 			return domainErr(c, err)
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
@@ -806,11 +832,7 @@ func handleV1ReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "body is required"))
 		}
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 
@@ -1067,7 +1089,17 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		// Load existing memory metadata (project for access check, attrs/strength for mutation).
+		// aihub#627: writer access AND per-memory visibility before the row's
+		// metadata is loaded for mutation. This also moves the redacted
+		// refusal below BEHIND the gate: it used to answer 403 before any
+		// access check ran, confirming a redacted row's existence (and state)
+		// to arbitrary callers; now only a caller who may see the row is told.
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
+			return err
+		}
+
+		// Load existing memory metadata (attrs/strength for the mutation; the
+		// gate above already authorized project + per-memory visibility).
 		var memProject, memType, memStatus string
 		var memWorkItemID *string
 		var memAttrsRaw []byte
@@ -1082,10 +1114,6 @@ func handleReinforceMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		if memStatus == "redacted" {
 			return writeError(c, domain.NewErr(domain.ErrForbidden,
 				"cannot reinforce a redacted memory"))
-		}
-
-		if err := checkProjectAccess(c, u, memProject, "writer"); err != nil {
-			return err
 		}
 
 		// C5 (aihub#210): methodology.* memories require the target wi's attempt
@@ -1266,19 +1294,30 @@ func handleUpdateMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		// Load current lineage head for the access check (project) and to know
-		// which memory record actually gets superseded.
-		head, aerr := domain.GetLatestByID(ctx, pool, memID)
+		// Load current lineage head for the access checks and to know which
+		// memory record actually gets superseded. Through the resolveLatestFn
+		// seam (production-wired to the same GetLatestByID) so the aihub#627
+		// gate below is unit-testable.
+		head, aerr := resolveLatestFn(ctx, pool, memID)
 		if aerr != nil {
 			return writeError(c, hideNotFound(aerr))
+		}
+		// aihub#627: per-memory visibility, checked on the HEAD — the row this
+		// write actually supersedes — not on the requested id, whose own
+		// version could carry a wider tier than the head. An invisible head
+		// answers the shared 404; it used to be updatable by any project
+		// writer, and the redacted refusal below used to run before ANY access
+		// check. Order now: visibility (404), writer role (404 non-member /
+		// 403 member), then the object-state refusal.
+		if err := checkMemoryVisibility(c, u, head); err != nil {
+			return err
+		}
+		if err := checkProjectAccess(c, u, head.Project, "writer"); err != nil {
+			return err
 		}
 		if head.Status == "redacted" {
 			return writeError(c, domain.NewErr(domain.ErrForbidden,
 				"cannot update a redacted memory"))
-		}
-
-		if err := checkProjectAccess(c, u, head.Project, "writer"); err != nil {
-			return err
 		}
 
 		// C5 (aihub#210): superseding a methodology.* memory via update requires the

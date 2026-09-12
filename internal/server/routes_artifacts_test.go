@@ -2561,10 +2561,24 @@ func TestVisibilityTierSetsMatchTheSchema(t *testing.T) {
 // for a memory that is not currently public would let a caller pick the tier an
 // unshare moves it to. An unshare of something that is not shared changes nothing.
 func TestUnshareArtifact_NonPublicIsANoOp(t *testing.T) {
-	for _, vis := range []string{"project", "team", "private", "admin"} {
-		t.Run(vis, func(t *testing.T) {
+	// CONTRACT CHANGE (aihub#627), not a red test adjusted to green: the
+	// admin-tier arm used to run as authorUser() and expect the 200 no-op —
+	// which echoed the tier of a row the caller cannot READ. The handler now
+	// answers such a caller with the shared 404 (pinned by the write-entry
+	// visibility suite in memory_write_visibility_test.go), so the no-op
+	// guard for the admin tier is exercised by a caller who may see the row.
+	for _, tc := range []struct {
+		vis    string
+		caller *UserContext
+	}{
+		{"project", authorUser()},
+		{"team", authorUser()},
+		{"private", authorUser()},
+		{"admin", adminUser()},
+	} {
+		t.Run(tc.vis, func(t *testing.T) {
 			mem := publicSharedMem()
-			mem.Visibility = vis
+			mem.Visibility = tc.vis
 			mem.Attrs = shareAttrs("private") // a tier the caller could have planted
 
 			defer withLoadMemoryOverride(mem, nil)()
@@ -2573,7 +2587,7 @@ func TestUnshareArtifact_NonPublicIsANoOp(t *testing.T) {
 
 			e := echo.New()
 			c, rec := newUIContext(e, http.MethodDelete, "/v1/artifacts/mem_share1/share", "mem_share1")
-			setUser(c, authorUser())
+			setUser(c, tc.caller)
 			if err := handleUnshareArtifact(nil)(c); err != nil {
 				e.HTTPErrorHandler(err, c)
 			}
@@ -2582,9 +2596,9 @@ func TestUnshareArtifact_NonPublicIsANoOp(t *testing.T) {
 				t.Fatalf("status: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 			}
 			if *gotID != "" {
-				t.Fatalf("the visibility setter ran for a %q memory; unsharing something that is not shared must write nothing", vis)
+				t.Fatalf("the visibility setter ran for a %q memory; unsharing something that is not shared must write nothing", tc.vis)
 			}
-			if !strings.Contains(rec.Body.String(), `"visibility":"`+vis+`"`) {
+			if !strings.Contains(rec.Body.String(), `"visibility":"`+tc.vis+`"`) {
 				t.Fatalf("response must report the tier the memory still has: %s", rec.Body.String())
 			}
 		})

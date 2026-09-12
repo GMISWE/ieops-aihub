@@ -564,11 +564,27 @@ func TestUIMemoryDetail_SupersededSpecToNonSpec_NoWrongTypeRedirect(t *testing.T
 
 // ─── UI Commit Handler Tests ──────────────────────────────────────────────────
 
-// withCommitMemoryProjectOverride replaces commitMemoryProjectFn for the duration of a test.
+// withCommitMemoryProjectOverride replaces commitMemoryProjectFn for the
+// duration of a test. The row it fakes is project-tier (visible to every
+// member), so callers exercising the writer gate are unaffected by the
+// aihub#627 visibility check; tests that need a private/admin row use
+// withCommitMemoryMetaOverride instead.
 func withCommitMemoryProjectOverride(project, status string, err error) func() {
+	return withCommitMemoryMetaOverride(memWriteMeta{
+		Project:      project,
+		Status:       status,
+		Visibility:   "project",
+		AuthorUserID: "u_author",
+	}, err)
+}
+
+// withCommitMemoryMetaOverride replaces commitMemoryProjectFn with a fake
+// returning the full memWriteMeta, for tests that exercise the per-memory
+// visibility half of checkMemoryWriteAccess (aihub#627).
+func withCommitMemoryMetaOverride(meta memWriteMeta, err error) func() {
 	prev := commitMemoryProjectFn
-	commitMemoryProjectFn = func(_ context.Context, _ *pgxpool.Pool, _ string) (string, string, error) {
-		return project, status, err
+	commitMemoryProjectFn = func(_ context.Context, _ *pgxpool.Pool, _ string) (memWriteMeta, error) {
+		return meta, err
 	}
 	return func() { commitMemoryProjectFn = prev }
 }

@@ -1109,7 +1109,30 @@ func TestPendingEscapeHatchIsWiredIntoTheArm(t *testing.T) {
 // anchors (69%) were in the wrapped shape, all invisible. A blank line (two
 // newlines) still ends the anchor: a parenthesised symbol opening the next
 // paragraph is prose, not a citation of the path above it.
-var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?:(?: |[ \\t]*\\n[ \\t]*)\\(`([\\w.]+)`\\))?")
+//
+// The third alternative is the COMMA form: `path`, `Symbol`[, `Symbol2`…] —
+// comma-separated inside a parenthetical note, symbols backticked but not
+// themselves parenthesised. 🔴 Until aihub#612 this shape was also path-only:
+// measured 2026-09-12 on this tree, 28 citations carrying 29 symbols, all
+// invisible (the population was 26 when aihub#528's PR measured it two days
+// earlier — it grows). The tail is captured whole (group 3) because RE2 keeps
+// only the last iteration of a repeated capture; the caller splits it with
+// cardCommaSymItem. Each list item allows the same one-space-or-one-wrap
+// separator after its comma.
+//
+// ⚠️ Still invisible, deliberately left so (found while fixing the comma form,
+// aihub#612): the PAREN-LIST form `path` (`Sym1`, `Sym2`) — a comma-separated
+// list INSIDE the parens. The paren alternative below requires exactly one
+// symbol, so the whole list degrades to path-only. Distinct shape, and some of
+// its list items are t.Run subtest names (underscored), which declaredNames
+// cannot see — recognizing it without a subtest-aware resolver would turn real
+// citations red. Follow-up, not this regex.
+var cardGoPathRef = regexp.MustCompile("`((?:[\\w.-]+/)+[\\w.-]+\\.go)`(?:(?: |[ \\t]*\\n[ \\t]*)\\(`([\\w.]+)`\\)|((?:,(?: |[ \\t]*\\n[ \\t]*)`[\\w.]+`)+))?")
+
+// cardCommaSymItem extracts the backticked symbols from cardGoPathRef's comma
+// tail (group 3). Only ever applied to that tail — as a standalone pattern it
+// would match any backticked word.
+var cardCommaSymItem = regexp.MustCompile("`([\\w.]+)`")
 
 // cardBareGoFileRef matches a backticked Go filename with NO directory component,
 // which K6 REPORTS rather than resolves.
@@ -1171,7 +1194,7 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 		}
 
 		for _, m := range cardGoPathRef.FindAllStringSubmatch(string(raw), -1) {
-			ref, sym := m[1], m[2]
+			ref := m[1]
 			abs := filepath.Join(cardsRepoRoot, ref)
 			if _, statErr := os.Stat(abs); statErr != nil {
 				t.Errorf("K6 ANCHOR_PATH_MISSING: %s/%s cites `%s`, which does not exist. "+
@@ -1180,27 +1203,39 @@ func TestContractCardAnchorsResolve(t *testing.T) {
 				continue
 			}
 			resolved++
-			if sym == "" {
+			// m[2] is the paren form's single symbol; m[3] is the comma form's
+			// whole tail, split here because RE2 keeps only the last iteration
+			// of a repeated capture group. The two alternatives are exclusive.
+			var syms []string
+			if m[2] != "" {
+				syms = append(syms, m[2])
+			}
+			for _, sm := range cardCommaSymItem.FindAllStringSubmatch(m[3], -1) {
+				syms = append(syms, sm[1])
+			}
+			if len(syms) == 0 {
 				continue
 			}
-			symChecked++
 			names, ok := declared[ref]
 			if !ok {
 				names = declaredNames(t, abs)
 				declared[ref] = names
 			}
-			// A dotted anchor (`Type.Method`) is resolved on its last segment, which
-			// is the method or field name the file declares.
-			leaf := sym
-			if i := strings.LastIndex(leaf, "."); i >= 0 {
-				leaf = leaf[i+1:]
-			}
-			if !names[leaf] {
-				t.Errorf("K6 ANCHOR_SYMBOL_MISSING: %s/%s cites `%s` (`%s`), and that file "+
-					"declares no such symbol. A semantic anchor that resolves to nothing "+
-					"rots exactly as quietly as the line number it replaced — which is the "+
-					"whole reason line numbers are banned here.",
-					cardsDirRel, e.Name(), ref, sym)
+			for _, sym := range syms {
+				symChecked++
+				// A dotted anchor (`Type.Method`) is resolved on its last segment,
+				// which is the method or field name the file declares.
+				leaf := sym
+				if i := strings.LastIndex(leaf, "."); i >= 0 {
+					leaf = leaf[i+1:]
+				}
+				if !names[leaf] {
+					t.Errorf("K6 ANCHOR_SYMBOL_MISSING: %s/%s cites `%s` (`%s`), and that file "+
+						"declares no such symbol. A semantic anchor that resolves to nothing "+
+						"rots exactly as quietly as the line number it replaced — which is the "+
+						"whole reason line numbers are banned here.",
+						cardsDirRel, e.Name(), ref, sym)
+				}
 			}
 		}
 	}

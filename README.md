@@ -206,10 +206,15 @@ that touches `docs/**`:
 | code-formatted range | `` `:1195-1202` `` | does not even say which file |
 | filename-less anchor in prose | `at :2698-2709`, `` `queryFloat` :157 ``, `**:981**` | same, and it usually sits beside a symbol name that already says where to look |
 
-The symbol half is what survives a refactor; check C2 verifies the file half
-exists. If the thing you want to point at has no symbol name, name the nearest
-one and describe the part - "the `RECOVERY:` clause of its state-file-write
-error" beats a line number even when it is longer.
+Both halves are verified (aihub#406): check C2 confirms the file exists, and
+check C6 confirms the symbol is actually declared in it - substring hits in
+comments or strings do not count. If the thing you want to point at has no
+symbol name, name the nearest one and describe the part - "the `RECOVERY:`
+clause of its state-file-write error" beats a line number even when it is
+longer. To cite a PAST tree (an audit describing code that was since deleted),
+write the symbol first and qualify the file: `` `FormatIDOrSlug`
+(`internal/domain/ids.go` of that tree; since deleted, `aihub#402`) `` - the
+qualifier exempts the symbol half, and only the symbol half.
 
 Two notes for anyone **briefing** a documentation task, which is where this rule
 actually gets broken:

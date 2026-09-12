@@ -312,6 +312,15 @@ func TestFileScopeRepoKey_ForceTakeoverDerivesRepoQualifiedKey(t *testing.T) {
 // TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos covers the
 // pf_acquire_locks site — the mid-attempt reconcile path, which derives its own
 // targets and has its own collision SQL.
+//
+// It carries BOTH arms of the pairing the file header promises (aihub#571).
+// The cross-repo arm alone asserts only the ABSENCE of a collision, and absence
+// is also what a build whose acquire_locks cannot collide on ANYTHING produces:
+// measured before the positive control below existed, neutralizing the
+// foreign-holder branch in FnAcquireLocks left this whole test green. The
+// same-repo arm is what makes the cross-repo green mean "the key is finer", not
+// "the collision path is dead" — the same shape its Predict sibling already has
+// (rule 1 must stay silent across repos AND still fire within one).
 func TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos(t *testing.T) {
 	pool := setupLatestTestDB(t)
 	ctx := context.Background()
@@ -320,7 +329,8 @@ func TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos(t *testing.T) {
 
 	// A holds repo-a's Dockerfile.
 	wiA := seedWIWithResources(t, pool, proj, uid, "holds repo-a Dockerfile", declaredWithRepo("repo-a", "Dockerfile"))
-	if _, aerr := claimWI(t, pool, uid, wiA.ID, "idem-261-al-a"); aerr != nil {
+	claimA, aerr := claimWI(t, pool, uid, wiA.ID, "idem-261-al-a")
+	if aerr != nil {
 		t.Fatalf("claim A: %v", aerr)
 	}
 
@@ -346,6 +356,44 @@ func TestFileScopeRepoKey_AcquireLocksDoesNotCollideAcrossRepos(t *testing.T) {
 	got := fileScopeKeys(resp.Acquired)
 	if want := proj + ":repo-b:Dockerfile"; len(got) != 1 || got[0] != want {
 		t.Errorf("acquire_locks acquired %v, want [%q]", got, want)
+	}
+
+	// Positive control: the SAME repo and path as A, through the SAME reconcile
+	// sequence as B, must be refused. C is a third work item rather than a reuse
+	// of B so the refusal cannot be a self-conflict no-op in disguise.
+	wiC := seedWIWithResources(t, pool, proj, uid, "later declares repo-a Dockerfile too", json.RawMessage(`[]`))
+	claimC, aerr := claimWI(t, pool, uid, wiC.ID, "idem-261-al-c")
+	if aerr != nil {
+		t.Fatalf("claim C: %v", aerr)
+	}
+	mustExec(t, pool, `UPDATE work_items SET declared_resources='`+
+		string(declaredWithRepo("repo-a", "Dockerfile"))+`'::jsonb WHERE id='`+wiC.ID+`'`)
+
+	_, aerr = retryOnSerializationConflict(t, "acquire_locks same-repo", func() (*AcquireLocksResponse, *AihubError) {
+		return FnAcquireLocks(ctx, pool, wiC.ID, &AcquireLocksRequest{
+			AttemptID: claimC.AttemptID, ClaimEpoch: claimC.ClaimEpoch, SessionSecret: testSecret,
+		})
+	})
+	if aerr == nil {
+		t.Fatalf("acquire_locks for repo-a's Dockerfile SUCCEEDED while A holds %s:repo-a:Dockerfile — "+
+			"either the collision path is dead (and the cross-repo arm above is green for the wrong reason) "+
+			"or the orphan-reclaim path just stole a live attempt's lock", proj)
+	}
+	if aerr.Code != ErrConflictLockTaken {
+		t.Fatalf("same-repo acquire_locks error code = %q, want %q (message: %s)", aerr.Code, ErrConflictLockTaken, aerr.Message)
+	}
+	// The refusal must name A as the holder: a 409 that collided with anything
+	// else (or reported nobody) is not the collision this arm exists to prove.
+	details, ok := aerr.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("409 details = %#v, want a conflict_with payload naming the holder", aerr.Details)
+	}
+	cw, ok := details["conflict_with"].(map[string]any)
+	if !ok {
+		t.Fatalf("409 details carry no conflict_with: %#v", aerr.Details)
+	}
+	if cw["attempt_id"] != claimA.AttemptID {
+		t.Errorf("conflict_with.attempt_id = %v, want A's attempt %s", cw["attempt_id"], claimA.AttemptID)
 	}
 }
 

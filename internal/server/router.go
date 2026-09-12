@@ -842,7 +842,21 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		defer cancel()
 
 		u := GetUser(c)
-		wiID := c.Param("id")
+
+		// 🔴 Resolve id-or-slug BEFORE anything touches a work_items(id)
+		// position (aihub#362 — the FIFTH instance of the aihub#127/#343/#357
+		// class, found by aihub#357's independent review the day the fourth
+		// was fixed). The raw parameter used to feed three sites below: the
+		// status probe, the UPDATE, and the audit event's work_item_id (an FK
+		// into work_items). A slug — which is what every human and every
+		// polyforge skill types — read as `WHERE id='aihub#123'`, matched
+		// nothing, and this admin endpoint answered 404 for a work item that
+		// exists and is blocked. internal/citest/slugres now gates the whole
+		// shape repo-wide.
+		wi, aihubErr := domain.GetWorkItem(ctx, pool, c.Param("id"))
+		if aihubErr != nil {
+			return writeError(c, aihubErr)
+		}
 
 		var req struct {
 			Reason string `json:"reason"`
@@ -850,19 +864,14 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		_ = c.Bind(&req) // reason is optional in v1 but recorded if present
 
 		// Only unblock work_items that are actually in 'blocked' state; terminal/running → 409.
-		var status string
-		err := pool.QueryRow(ctx, `SELECT status FROM work_items WHERE id=$1`, wiID).Scan(&status)
-		if err != nil {
-			return writeError(c, domain.NewErr(domain.ErrNotFound, "work item not found"))
-		}
-		if status != "blocked" {
+		if wi.Status != "blocked" {
 			return writeError(c, domain.NewErr(domain.ErrConflictTerminalState,
-				fmt.Sprintf("work item is not blocked (status=%s); cannot unblock", status)))
+				fmt.Sprintf("work item is not blocked (status=%s); cannot unblock", wi.Status)))
 		}
 
 		if _, err := pool.Exec(ctx, `
 			UPDATE work_items SET status='queued', updated_at=clock_timestamp()
-			WHERE id=$1 AND status='blocked'`, wiID); err != nil {
+			WHERE id=$1 AND status='blocked'`, wi.ID); err != nil {
 			return internalError(c, "failed to unblock work item")
 		}
 
@@ -874,7 +883,7 @@ func handleUnblockWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 				INSERT INTO agent_events (id, work_item_id, actor_user_id, api_key_id, event_type, payload, project)
 				VALUES ($1, $2, $3, $4, 'admin_unblock', $5::jsonb,
 				    (SELECT project FROM work_items WHERE id=$2))`,
-				domain.NewID("evt"), wiID, u.UserID, u.APIKeyID, string(payloadJSON))
+				domain.NewID("evt"), wi.ID, u.UserID, u.APIKeyID, string(payloadJSON))
 		}
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	}

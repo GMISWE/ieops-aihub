@@ -1305,15 +1305,7 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		if existing != nil {
 			sim := jaccardSimilarity(req.Content, existing.Content)
 			if req.DedupMode == "strict" && sim >= memoryDedupHigh {
-				return nil, false, NewErrDetails(ErrConflictSimilarMemory,
-					"similar memory already exists",
-					map[string]any{"existing": map[string]any{
-						"id":         existing.ID,
-						"type":       existing.Type,
-						"content":    existing.Content,
-						"similarity": sim,
-					}},
-				)
+				return nil, false, memoryConflictErr(existing, sim)
 			}
 			// suggest mode (or strict-below-high): annotate attrs.similar_to
 			attrs := make(map[string]any)

@@ -266,11 +266,16 @@ func TestReinforceMemory_IntegralDeltaStillMoves(t *testing.T) {
 	//
 	// The pf_reinforce_memory card records which candidates lost when aihub#506
 	// adjudicated the clamp: "a 400 on an overflowing sum and a `clamped: true`
-	// field in the response; the second is why the response shape is untouched
-	// and K10's declared key set with it." K10 is a one-directional ratchet on
-	// keys that ARE carried, so a key ARRIVING is exactly what it cannot see —
-	// and this call, a delta of 99 onto a row at the top, is the one request
-	// where the withdrawn field would have had something to say.
+	// field in the response; the second is why the response shape is untouched".
+	// An earlier card revision credited that unchanged shape to K10's declared
+	// key set; aihub#531 corrected it, and what the card now cites as holding
+	// the shape untouched is THIS arm's exact key set. K10 would in fact redden
+	// on an arriving undeclared key — its ratchet is "every top-level key a live
+	// response actually carries must be declared" — but its walk drives its one
+	// reinforce with no strength_delta, so the only reinforce body it ever reads
+	// is a non-saturating one. This call, a delta of 99 onto a row at the top,
+	// is the one request where the withdrawn field would have had something to
+	// say, and it is out of K10's reach.
 	//
 	// An EXACT key set, not a check that `clamped` is absent: the ruling was
 	// that the shape is untouched, and "no key named clamped" is satisfied by a
@@ -290,6 +295,6 @@ func TestReinforceMemory_IntegralDeltaStillMoves(t *testing.T) {
 	require.Equal(t, []string{"activation_count", "base_strength", "memory_id"}, keys,
 		"the saturating call answered with the keys %v. The owner's aihub#506 ruling kept the "+
 			"clamp and REJECTED a `clamped: true` field, so this is the request that would "+
-			"disclose one if it existed — and the card's claim that the response shape is "+
-			"untouched, K10's declared key set with it, is about exactly this body.", keys)
+			"disclose one if it existed — and since aihub#531 the card cites exactly this "+
+			"assertion, not K10, as what holds the response shape untouched.", keys)
 }

@@ -391,8 +391,18 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		for rows.Next() {
 			var ownerAttemptID, actorDisplay, wiSlug, wiID string
 			var lastActive time.Time
+			// aihub#608: the Scan arms of all six drains here used to
+			// `continue` — a prediction dropped by a row-level Scan failure
+			// would be the same fake all-clear the rows.Err() arm below
+			// refuses. On pgx v5 a failed Scan poisons the rows (rows.fatal),
+			// so that arm did catch it, under the READ arm's message; the Scan
+			// arm now returns directly so the failure names its own site and
+			// stops leaning on the driver's side effect. These loops close
+			// explicitly rather than by defer (they run per resource), so each
+			// return closes first.
 			if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan rule 2 repo declaration row")
 			}
 			result.Predictions = append(result.Predictions, ConflictPrediction{
 				Rule:                 2,
@@ -445,7 +455,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		for rows.Next() {
 			var existingKey, actorDisplay, wiSlug, wiID string
 			if err := rows.Scan(&existingKey, &actorDisplay, &wiSlug, &wiID); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan rule 3 file_scope row")
 			}
 			if probe.Overlaps(existingKey) {
 				severity := SeveritySoftBlock
@@ -496,7 +507,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			var actorDisplay, wiSlug, wiID string
 			var lastActive time.Time
 			if err := rows.Scan(&actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan rule 4 refactor row")
 			}
 			result.Predictions = append(result.Predictions, ConflictPrediction{
 				Rule:         4,
@@ -543,7 +555,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		for rows.Next() {
 			var actorDisplay, wiSlug, wiID string
 			if err := rows.Scan(&actorDisplay, &wiSlug, &wiID); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan rule 5 external_ref row")
 			}
 			result.Predictions = append(result.Predictions, ConflictPrediction{
 				Rule:         5,
@@ -604,7 +617,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			var ownerAttemptID, actorDisplay, wiSlug, wiID string
 			var lastActive time.Time
 			if err := rows.Scan(&ownerAttemptID, &actorDisplay, &wiSlug, &wiID, &lastActive); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan rule 6 service declaration row")
 			}
 			result.Predictions = append(result.Predictions, ConflictPrediction{
 				Rule:                 6,
@@ -659,7 +673,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		for rows.Next() {
 			var item WillUnlockItem
 			if err := rows.Scan(&item.ID, &item.Slug, &item.Goal); err != nil {
-				continue
+				rows.Close()
+				return nil, dbErrCause(err, "failed to scan will_unlock row")
 			}
 			result.WillUnlock = append(result.WillUnlock, item)
 		}

@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"html/template"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -194,7 +192,15 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 			var projName string
 			var membersRaw []byte
 			if err := prows.Scan(&projName, &membersRaw); err != nil {
-				continue
+				// aihub#608: BearerAuth's twin, one row further in — the
+				// `continue` here plus the log-only rows.Err() arm below built
+				// a session with a PARTIAL ProjectRoles map (pgx v5's failed
+				// Scan poisons the rows and stops the drain), rendering the
+				// missing projects invisible on /ui. The caller
+				// (RequireUISession) turns the error into the login redirect,
+				// same as the send-time arm.
+				prows.Close()
+				return nil, err
 			}
 			role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
 			if decodeErr != nil {
@@ -208,8 +214,11 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 			}
 		}
 		// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+		// aihub#608: a mid-stream failure truncates the same map the Scan arm
+		// above protects, so it stopped being a stderr log for the same reason.
 		if err := prows.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "ui session: project membership rows: %v\n", err)
+			prows.Close()
+			return nil, err
 		}
 		prows.Close()
 	}

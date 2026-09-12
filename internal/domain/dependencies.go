@@ -342,7 +342,12 @@ func ListChildren(ctx context.Context, pool *pgxpool.Pool, parentWiID string, ca
 		var ref WIRef
 		var slug string
 		if err := rows.Scan(&ref.ID, &slug, &ref.Project); err != nil {
-			continue
+			// aihub#608: this used to `continue` — spelling "publish a shorter
+			// children list as the complete one". pgx v5's Scan poisons the
+			// rows on error, so the rows.Err() arm below caught it under the
+			// read arm's message; returning here names the actual site and
+			// drops the dependence on that side effect.
+			return nil, dbErrCause(err, "failed to scan child work item row")
 		}
 		if callerRole == "admin" || callerProjectRoles[ref.Project] != "" {
 			ref.Slug = &slug
@@ -543,7 +548,10 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		var entry DependencyListEntry
 		var slug string
 		if err := blockingRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
-			continue
+			// aihub#608: same repair as ListChildren, both directions of this
+			// function — an edge dropped from a dependency graph would be a
+			// blocker the caller is never shown.
+			return nil, dbErrCause(err, "failed to scan blocking dependency row")
 		}
 		// Slug unconditionally; only ID is withheld. Membership is compared through
 		// roleLevel rather than tested for non-emptiness, matching
@@ -580,7 +588,7 @@ func ListDependencies(ctx context.Context, pool *pgxpool.Pool, wiID string, call
 		var entry DependencyListEntry
 		var slug string
 		if err := blockedByRows.Scan(&entry.ID, &slug, &entry.Project, &entry.Kind, &entry.Note); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan blocked_by dependency row")
 		}
 		// Slug unconditionally; only ID is withheld. Membership is compared through
 		// roleLevel rather than tested for non-emptiness, matching

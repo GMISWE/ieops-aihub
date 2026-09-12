@@ -1243,7 +1243,11 @@ func handleListUsers(pool *pgxpool.Pool) echo.HandlerFunc {
 		for rows.Next() {
 			var id, email, displayName, userType, role string
 			if err := rows.Scan(&id, &email, &displayName, &userType, &role); err != nil {
-				continue
+				// aihub#608: this used to `continue` — spelling "publish a
+				// partial roster". pgx v5's Scan poisons the rows, so the
+				// rows.Err() arm below answered this failure already; returning
+				// here gives it the same 500 without the indirection.
+				return internalError(c, "failed to list users")
 			}
 			items = append(items, map[string]any{
 				"id":           id,

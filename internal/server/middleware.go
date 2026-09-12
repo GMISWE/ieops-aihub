@@ -205,7 +205,16 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 					var projName string
 					var membersRaw []byte
 					if perr := prows.Scan(&projName, &membersRaw); perr != nil {
-						continue
+						// aihub#608: this used to `continue`, and the rows.Err()
+						// arm below only LOGGED — the pair authenticated the
+						// caller with a PARTIAL ProjectRoles map (pgx v5's failed
+						// Scan poisons the rows, so the drain stopped and the
+						// truncated map was published). Every missing project
+						// then answered the membership 404 (errNotVisible), the
+						// exact aihub#522 second lie the send-time arm above
+						// refuses, one row further in.
+						prows.Close()
+						return c.JSON(http.StatusInternalServerError, errorResponse(domain.NewErr(domain.ErrInternalError, "database error during auth")))
 					}
 					role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
 					if decodeErr != nil {
@@ -220,8 +229,12 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 					}
 				}
 				// pgx defers execute-time errors to Err() (aihub#382, aihub#386).
+				// aihub#608: a mid-stream failure truncates the same map the Scan
+				// arm above protects, so it stopped being a stderr log for the
+				// same reason.
 				if err := prows.Err(); err != nil {
-					fmt.Fprintf(os.Stderr, "bearer auth: project membership rows: %v\n", err)
+					prows.Close()
+					return c.JSON(http.StatusInternalServerError, errorResponse(domain.NewErr(domain.ErrInternalError, "database error during auth")))
 				}
 				prows.Close()
 			}

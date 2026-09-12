@@ -991,6 +991,13 @@ func checkDedup(ctx context.Context, tx pgx.Tx, req *CreateWorkItemRequest) *Aih
 		var c candidate
 		var labelsRaw []string
 		if scanErr := rows.Scan(&c.ID, &c.Slug, &c.Goal, &labelsRaw, &c.Resources, &c.Status); scanErr != nil {
+			// aihub#608: a deliberate discard, same policy as the send-time arm
+			// above — dedup is best-effort. On pgx v5 a failed Scan poisons the
+			// rows, so this continue reaches Next()==false and the rows.Err()
+			// arm below, which applies the documented policy: class 40 returns
+			// (the transaction is dead), anything else allows creation — the
+			// fail-OPEN direction this function's every failure already takes.
+			// Allowlisted in internal/citest/rowserr/scan_swallow_allowlist.txt.
 			continue
 		}
 		c.Labels = labelsRaw
@@ -3698,6 +3705,28 @@ func newReadyQueue(requestedMax int) (*ReadyQueue, int) {
 // made all seven keys always-present precisely so that an empty one asserts
 // "nothing is here" rather than "no data reached you".
 //
+// # A row that cannot be scanned fails the whole call, naming its segment (aihub#608)
+//
+// The same contract, one row further in: every segment's per-row Scan error used
+// to `continue`. What that spelled was "skip this row and publish the rest as
+// the complete answer" — aihub#500's silent-empty defect at row granularity, and
+// it had already fired (aihub#206: stalled rows with a NULL actor_display
+// vanished from stalled[] back when nothing checked rows.Err()). What it DID on
+// pgx v5 is narrower, measured during aihub#608 rather than assumed: pgx's
+// Rows.Scan calls rows.fatal() on every error (rows.go, v5.9.2), so the failed
+// Scan closes the rows, Next() answers false, and the segment's rows.Err() arm
+// fails the call — with the READ arm's message, misattributing the site. So the
+// `continue` was a lie about intent kept honest by an undocumented driver side
+// effect, one arm downstream, under somebody else's error text. The Scan arms
+// now return directly: the failure names its own site, and the contract stops
+// depending on pgx's poisoning behaviour. Legitimate NULLs are handled by
+// nullable scan targets (WIType, PauseReason, the aihub#206 locals), so a Scan
+// error here means column drift or a malformed row.
+// internal/citest/rowserr's swallow gate holds the shape for every drain in the
+// repo — including the loops whose rows.Err() arm does NOT return (BearerAuth's
+// membership drain was one), where the same `continue` really did publish
+// partial results as complete.
+//
 // # The send-time guards classify class 40 too (aihub#548)
 //
 // aihub#500 gave all seven segments the same SHAPE — every Query error is
@@ -3723,7 +3752,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 	for itemRows.Next() {
 		var item ReadyItem
 		if err := itemRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan ready item row")
 		}
 		result.Items = append(result.Items, item)
 	}
@@ -3750,7 +3779,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		var item RunningItem
 		var lat time.Time
 		if err := runRows.Scan(&item.ID, &item.Slug, &item.Goal, &item.OwnerDisplay, &lat); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan running item row")
 		}
 		item.LastActiveAt = lat.Format(time.RFC3339)
 		result.Running = append(result.Running, item)
@@ -3791,7 +3820,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		// set), which can't scan into item.LastActorDisplay's plain
 		// string directly — scan through a nullable local instead.
 		if err := stalledRows.Scan(&item.ID, &item.Slug, &stall, &stalledAt, &actorDisplay); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan stalled item row")
 		}
 		if stall != nil {
 			item.StallReason = *stall
@@ -3826,7 +3855,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		var lat *time.Time
 		var actorDisplay *string
 		if err := pausedRows.Scan(&item.ID, &item.Slug, &lat, &actorDisplay, &item.PauseReason); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan paused item row")
 		}
 		if lat != nil {
 			item.PausedSince = lat.Format(time.RFC3339)
@@ -3865,7 +3894,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		var item ReadyItem
 		var cat time.Time
 		if err := humanRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan needs_human_session item row")
 		}
 		catStr := cat.Format(time.RFC3339)
 		item.CreatedAt = catStr
@@ -3906,7 +3935,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		var item ReadyItem
 		var cat time.Time
 		if err := unclRows.Scan(&item.ID, &item.Slug, &item.WIType, &item.Priority, &item.Goal, &cat); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan unclassified item row")
 		}
 		catStr := cat.Format(time.RFC3339)
 		item.CreatedAt = catStr
@@ -3937,7 +3966,7 @@ func GetReadyQueue(ctx context.Context, pool *pgxpool.Pool, project string, max 
 		var item RunningItem
 		var lat time.Time
 		if err := staleRows.Scan(&item.ID, &item.Slug, &item.Goal, &item.OwnerDisplay, &lat); err != nil {
-			continue
+			return nil, dbErrCause(err, "failed to scan stale_running item row")
 		}
 		item.LastActiveAt = lat.Format(time.RFC3339)
 		result.StaleRunning = append(result.StaleRunning, item)

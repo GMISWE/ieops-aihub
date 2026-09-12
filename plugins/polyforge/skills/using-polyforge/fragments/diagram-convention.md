@@ -2,7 +2,7 @@
 
 When an artifact destined for aihub contains a diagram, author it as a fenced ` ```d2 `
 block in **D2** syntax. aihub's `/ui` artifact viewer compiles ` ```d2 ` blocks to inline
-SVG server-side (aihub#160). Other diagram syntaxes (mermaid, etc.) are **not** rendered —
+SVG server-side (aihub#160). Other diagram syntaxes (mermaid, etc.) are **not** rendered -
 they stay as plain code blocks.
 
 This applies to every artifact that lands in aihub: `/pf-spec` and `/pf-plan` output, and any

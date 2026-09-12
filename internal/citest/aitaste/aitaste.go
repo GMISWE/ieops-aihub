@@ -22,13 +22,12 @@
 //     comments, {{...}} actions, HTML comments, script/style blocks and tag
 //     markup masked out. HTML entities are decoded first, so writing &mdash;
 //     instead of the literal character does not dodge the gate.
-//
-// TEMPORARY surface exclusion (must eventually be deleted):
-//
-//   - plugins/**: skill markdown hits on ~100% of files, but any plugins/**
-//     change forces a marketplace version bump, i.e. a release, and releases
-//     are batched. That sweep needs its own work item (not yet filed). When it
-//     lands, add a markdown surface for plugins/** and delete this bullet.
+//   - Markdown under plugins/** (skill, fragment and agent copy). An agent
+//     reads these files verbatim, so the WHOLE raw file is the surface: no
+//     masking pass and no entity decoding, because the Read tool returns the
+//     bytes as written. This surface was a TEMPORARY exclusion from aihub#378
+//     until aihub#633 cleared its 800 occurrences and rode a release with
+//     them (any plugins/** change forces a marketplace version bump).
 //
 // Exemptions are per occurrence, never per file or per directory. The
 // directive
@@ -75,11 +74,14 @@ var goSurfaceDirs = []string{
 // templateDir holds the server-rendered HTML templates.
 const templateDir = "internal/server/templates"
 
-// TemporarySurfaceExclusions is printed by the gate on every run so the
-// remaining carve-out stays visible until it is deleted.
-var TemporarySurfaceExclusions = []string{
-	"plugins/**: TEMPORARY, release-gated (any change there forces a marketplace version bump); follow-up work item not yet filed",
-}
+// markdownDir holds the plugin markdown an agent reads verbatim.
+const markdownDir = "plugins"
+
+// TemporarySurfaceExclusions is printed by the gate on every run so any
+// carve-out stays visible until it is deleted. It has been empty since
+// aihub#633 removed the last entry (plugins/**, release-gated, cleared by
+// that work item); the mechanism stays so a future entry cannot be silent.
+var TemporarySurfaceExclusions = []string{}
 
 // Classify names the ban class of r, or returns "" for a rune the gate does
 // not care about. The classes are copied from the aihub#373 v3 instrument
@@ -378,6 +380,31 @@ func ScanTemplateFile(path, rel string) (FileResult, error) {
 	return fr, nil
 }
 
+// ScanMarkdownFile scans the raw text of one markdown file. The whole file is
+// the surface: an agent reads skill markdown verbatim through the Read tool,
+// so nothing in it is "not rendered" the way template markup is, and there is
+// no masking pass and no entity decoding. The bytes are read as UTF-8 with no
+// encoding round-trip (the aihub#373 F3 lesson), and directives are parsed
+// from the same raw lines (they conventionally live in HTML comments, which
+// markdown renderers hide but this scan still sees).
+func ScanMarkdownFile(path, rel string) (FileResult, error) {
+	fr := FileResult{File: rel}
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fr, err
+	}
+	lines := strings.Split(string(src), "\n")
+	var malformed []string
+	fr.Directives, malformed = parseDirectives(rel, lines)
+	if len(malformed) > 0 {
+		return fr, fmt.Errorf("%s", strings.Join(malformed, "\n"))
+	}
+	for i, ln := range lines {
+		countText(&fr, ln, i+1, ln)
+	}
+	return fr, nil
+}
+
 // Result is the outcome of a full scan after directives are applied.
 type Result struct {
 	Violations      []Occurrence
@@ -469,6 +496,21 @@ func ScanRepo(root string) (Result, error) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		fr, ferr := ScanTemplateFile(path, rel)
+		if ferr != nil {
+			return fmt.Errorf("scanning %s: %w", rel, ferr)
+		}
+		files = append(files, fr)
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	err = filepath.Walk(filepath.Join(root, markdownDir), func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		fr, ferr := ScanMarkdownFile(path, rel)
 		if ferr != nil {
 			return fmt.Errorf("scanning %s: %w", rel, ferr)
 		}

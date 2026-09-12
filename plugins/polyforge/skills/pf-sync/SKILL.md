@@ -5,11 +5,11 @@ description: >
   such as Jira or GitHub Issues, pulling issues in or pushing a wrapped wi back out.
 ---
 
-# pf-sync — External System Sync (Phase 2 stub)
+# pf-sync - External System Sync (Phase 2 stub)
 
 ## Usage
 
-**Purpose**: Sync work items between polyforge and external trackers (Jira / GitHub Issues). Currently a Phase 2 stub — emits a note event only.
+**Purpose**: Sync work items between polyforge and external trackers (Jira / GitHub Issues). Currently a Phase 2 stub - emits a note event only.
 
 **Pattern**: `/pf-sync { pull | push } [<external_id>]`
 
@@ -20,7 +20,7 @@ description: >
 ## When to use
 
 When the user wants to sync work items between polyforge and an external tracker
-(Jira, GitHub Issues). Currently a Phase 2 feature — v1 emits a diagnostic note
+(Jira, GitHub Issues). Currently a Phase 2 feature - v1 emits a diagnostic note
 and tracks the sync request as a follow-up work item.
 
 ## Mechanic
@@ -36,7 +36,7 @@ and tracks the sync request as a follow-up work item.
    pf_emit_event(
      work_item_id=<current or create tracking wi>,
      event_type="note",
-     payload={text: "pf-sync pull requested — external sync not yet implemented in v1. Tracked in Phase 2 backlog."}
+     payload={text: "pf-sync pull requested - external sync not yet implemented in v1. Tracked in Phase 2 backlog."}
    )
    ```
 
@@ -68,7 +68,7 @@ and tracks the sync request as a follow-up work item.
    pf_emit_event(
      work_item_id=<current>,
      event_type="note",
-     payload={text: "pf-sync push requested — external push not yet implemented in v1."}
+     payload={text: "pf-sync push requested - external push not yet implemented in v1."}
    )
    ```
 
@@ -80,9 +80,9 @@ and tracks the sync request as a follow-up work item.
 
 When implemented, `pf-sync pull` will:
 1. Authenticate with Jira/GitHub via stored credentials
-2. `pf_sync_pull(project, source="jira"|"github", filter="open")` → list of imported wi's
+2. `pf_sync_pull(project, source="jira"|"github", filter="open")` -> list of imported wi's
 3. For each imported wi: `pf_create_work_item(source="sync_jira"|"sync_github", ...)`
-   — `source` is a CLOSED vocabulary (`human`, `auto_execute`, `auto_debug`, `auto_review`,
+   - `source` is a CLOSED vocabulary (`human`, `auto_execute`, `auto_debug`, `auto_review`,
    `sync_jira`, `sync_github`, `admin`), published as a JSON-Schema enum since aihub#396.
    This line said `jira_import`/`github_import`, which are in no vocabulary: before the enum
    existed the value crossed all four hops and died on the `work_items_source_check`

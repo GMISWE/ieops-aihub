@@ -145,7 +145,7 @@ const (
 // worst-case check on the gate (9,424 + 2 pointers x 125 = 9,674) stays under the harness
 // limit.
 var routerBudget = map[string]int{
-	"pf-execute/superpowers": 6954 + routerGateSlack,
+	"pf-execute/superpowers": 6939 + routerGateSlack,
 	"pf-execute/native":      9274 + routerGateSlack,
 	"pf-plan/native":         1701 + routerGateSlack,
 	"pf-plan/superpowers":    1701 + routerGateSlack,
@@ -180,7 +180,7 @@ var onDemandFiles = []struct {
 	},
 	{
 		rel:    "skills/pf-execute/references/engine-native-details.md",
-		marker: "Execute (rhs=true, interactive mode) — the loop in full",
+		marker: "Execute (rhs=true, interactive mode) - the loop in full",
 		branch: "native",
 	},
 }
@@ -676,7 +676,7 @@ type headerResidentFragment struct {
 var (
 	ironRulesResident = headerResidentFragment{
 		rel:     ironRulesFragment,
-		markers: []string{"IR1 —", "IR2 —", "IR3 —"},
+		markers: []string{"IR1 -", "IR2 -", "IR3 -"},
 		lost:    "no Iron Rules at all (aihub#338 layer 2)",
 	}
 	outputFormatResident = headerResidentFragment{

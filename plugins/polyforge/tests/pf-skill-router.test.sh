@@ -80,14 +80,16 @@ done
 echo "== pf-execute =="
 o="$(run polyforge:pf-execute "$ws_off")"
 ck "$o" "parse_review_result" "execute native main loop injected"
-# aihub#338 layer 3: the native loop picks a tier from the STEP KIND. Assert the two tier
-# constants and the predicate separately — a check for "sonnet" alone stayed green through the
-# whole aihub#358 period, when the selector existed but could never match.
-ck "$o" "DEFAULT_TIER"        "execute native fragment defines the default tier"
-ck "$o" "RAISED_TIER"         "execute native fragment defines the raised tier"
-ck "$o" "sonnet"              "execute native default tier = sonnet"
-ck "$o" "opus"                "execute native raised tier = opus"
-ck "$o" "sid.endswith("     "execute native selects the raised tier by step kind"
+# aihub#338 layer 3 / aihub#555: the native loop picks an AGENT from the STEP KIND; the agent
+# definition files (agents/*.md) carry the models, so the payload names agents and never model
+# names. Assert the two agent constants and the predicate separately — a single-name check
+# stayed green through the whole aihub#358 period, when the selector existed but never matched.
+ck "$o" "STEP_AGENT"                "execute native fragment defines the default-tier agent"
+ck "$o" "REVIEW_AGENT"              "execute native fragment defines the raised-tier agent"
+ck "$o" "polyforge:step-executor"   "execute native default agent id present"
+ck "$o" "polyforge:step-reviewer"   "execute native review agent id present"
+ck "$o" "sid.endswith("             "execute native selects the review agent by step kind"
+ck_not "$o" "dispatch Agent(model=" "execute native dispatch passes no explicit model (aihub#555)"
 # aihub#338 layer 2: IR1-IR3 ride this hook because a dispatched subagent never sees the
 # SessionStart payload. Verbatim coverage is gated in internal/cli/skill_router_payload_test.go;
 # these three are the cheap smoke check that the header carries them at all. Matched on the rule
@@ -108,21 +110,24 @@ ck "$o" "Memory-First recall"              "execute memory common in superpowers
 ck "$o" "model: sonnet"                    "execute pointer: cheap/standard tier -> sonnet"
 ck "$o" "model: opus"                      "execute pointer: review/architecture tier -> opus"
 ck_not "$o" "superpowers:executing-plans"  "execute pointer fixed on SDD (executing-plans removed)"
-# aihub#557: the two greps above pin TODAY'S names; these pin the DERIVATION — the pointer's
-# tier names must equal what engine.native.md's constants line declares, read from the source
-# here so a legitimate re-tier moves this check along with both engine branches.
-tier_line="$(grep -oE 'DEFAULT_TIER, RAISED_TIER = "[a-z][a-z0-9.-]*", "[a-z][a-z0-9.-]*"' \
-  "$plugin_root/skills/pf-execute/engine.native.md")"
-src_default="$(printf '%s' "$tier_line" | sed -E 's/.*= "([^"]*)", "([^"]*)"/\1/')"
-src_raised="$(printf '%s' "$tier_line" | sed -E 's/.*= "([^"]*)", "([^"]*)"/\2/')"
+# aihub#557 (re-sourced by aihub#555): the two greps above pin TODAY'S names; these pin the
+# DERIVATION — the pointer's tier names must equal the `model:` frontmatter of the agent
+# definition files (the mapping's single copy, the same text the harness reads when the native
+# loop dispatches them), read from the source here so a legitimate re-tier moves this check
+# along with both engine branches.
+agent_model() { # path -> model: value from the frontmatter block only
+  awk '/^---[ \t]*$/{f++; next} f==1 && /^model:/{sub(/^model:[ \t]*/,""); sub(/[ \t]*$/,""); print; exit}' "$1"
+}
+src_default="$(agent_model "$plugin_root/agents/step-executor.md")"
+src_raised="$(agent_model "$plugin_root/agents/step-reviewer.md")"
 if [ -n "$src_default" ] && [ -n "$src_raised" ]; then
   # Anchored on each bullet's closing words, not on "model: <name>" alone — a hook that
   # derives both names but SWAPS them still contains both substrings, so only the pairing
   # of role text to tier name can catch it.
-  ck "$o" "debugging -> model: $src_default" "execute pointer default tier matches engine.native.md constants"
-  ck "$o" "judgement -> model: $src_raised"  "execute pointer raised tier matches engine.native.md constants"
+  ck "$o" "debugging -> model: $src_default" "execute pointer default tier matches agents/step-executor.md"
+  ck "$o" "judgement -> model: $src_raised"  "execute pointer raised tier matches agents/step-reviewer.md"
 else
-  echo "  FAIL: engine.native.md no longer declares the tier constants line — the derivation checks matched nothing" >&2
+  echo "  FAIL: the agent definition files no longer declare a model: frontmatter line — the derivation checks matched nothing" >&2
   fails=$((fails+1))
 fi
 ck_not "$o" "@@DEFAULT_TIER@@" "no unsubstituted default-tier placeholder leaks"
@@ -183,39 +188,38 @@ ck     "$o" "THIS HEADER IS TRUNCATED"        "over-budget step-body payload nam
 ck     "$o" "_common/lifecycle.md"            "...while still naming the dropped fragments for disk recovery"
 ck_not "$o" "THIS STEP BODY IS INCOMPLETE"    "...and drops the fragment-blaming wording"
 
-echo "== aihub#557: superpowers pointer derives its tiers from engine.native.md at run time =="
+echo "== aihub#557/aihub#555: superpowers pointer derives its tiers from the agent files at run time =="
 # The checks above prove the shipped names agree; only a fixture whose SOURCE disagrees can
 # prove derivation — a hook with the names baked in passes every equality check forever.
 fx2="$tmp/plugin_fx2"; rm -rf "$fx2"; cp -r "$plugin_root" "$fx2"
-python3 - "$fx2/skills/pf-execute/engine.native.md" <<'RETIER'
+python3 - "$fx2/agents/step-executor.md" "$fx2/agents/step-reviewer.md" <<'RETIER'
 import re, sys
-p = sys.argv[1]
-s = open(p, encoding="utf-8").read()
-# Match the constants line by SHAPE, not by today's names, so this fixture survives a
+# Match the frontmatter model line by SHAPE, not by today's names, so this fixture survives a
 # legitimate re-tier (the whole point of the derivation it tests).
-s2, n = re.subn(r'DEFAULT_TIER, RAISED_TIER = "[a-z][a-z0-9.-]*", "[a-z][a-z0-9.-]*"',
-                'DEFAULT_TIER, RAISED_TIER = "tinker", "tailor"', s, count=1)
-if n != 1:
-    sys.exit("RETIER MUTATION DID NOT APPLY: constants line not found")
-open(p, "w", encoding="utf-8").write(s2)
+for p, name in ((sys.argv[1], "tinker"), (sys.argv[2], "tailor")):
+    s = open(p, encoding="utf-8").read()
+    s2, n = re.subn(r'(?m)^model:[ \t]*[a-z][a-z0-9.-]*[ \t]*$', 'model: ' + name, s, count=1)
+    if n != 1:
+        sys.exit("RETIER MUTATION DID NOT APPLY: model line not found in " + p)
+    open(p, "w", encoding="utf-8").write(s2)
 RETIER
 o="$(run polyforge:pf-execute "$ws_on" "$fx2")"
 ck     "$o" "debugging -> model: tinker" "re-tiered source -> pointer default tier follows"
 ck     "$o" "judgement -> model: tailor" "re-tiered source -> pointer raised tier follows"
 ck_not "$o" "model: $src_default" "re-tiered source -> shipped default tier gone from the pointer"
 ck_not "$o" "model: $src_raised"  "re-tiered source -> shipped raised tier gone from the pointer"
-# Failure mode: constants line gone entirely -> the superpowers payload is NOT emitted
+# Failure mode: model frontmatter gone entirely -> the superpowers payload is NOT emitted
 # (fail-silent, stub fallback), never a payload carrying raw @@…@@ placeholders.
-python3 - "$fx2/skills/pf-execute/engine.native.md" <<'DETIER'
+python3 - "$fx2/agents/step-reviewer.md" <<'DETIER'
 import sys, re
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-s2 = re.sub(r'DEFAULT_TIER, RAISED_TIER = "[^"]*", "[^"]*"\n', "", s)
+s2 = re.sub(r'(?m)^model:[ \t]*[a-z][a-z0-9.-]*[ \t]*\n', "", s, count=1)
 if s2 == s:
-    sys.exit("DETIER MUTATION DID NOT APPLY: constants line not found")
+    sys.exit("DETIER MUTATION DID NOT APPLY: model line not found")
 open(p, "w", encoding="utf-8").write(s2)
 DETIER
-ck_empty "$(run polyforge:pf-execute "$ws_on" "$fx2")" "missing tier constants -> superpowers payload not emitted (inert)"
+ck_empty "$(run polyforge:pf-execute "$ws_on" "$fx2")" "missing agent model frontmatter -> superpowers payload not emitted (inert)"
 
 echo "== malformed / empty payloads are safe =="
 ck_empty "$(run_raw '' "$ws_off")"            "empty stdin -> no output"

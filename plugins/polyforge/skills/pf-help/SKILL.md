@@ -5,11 +5,11 @@ description: >
   quick reference of the available polyforge skills.
 ---
 
-# pf-help — /pf-* Skill Quick Reference
+# pf-help - /pf-* Skill Quick Reference
 
 ## Usage
 
-**Purpose**: Show a quick reference of `/pf-*` skills — either all-at-once (table view) or a single skill's `## Usage` block.
+**Purpose**: Show a quick reference of `/pf-*` skills - either all-at-once (table view) or a single skill's `## Usage` block.
 
 **Pattern**: `/pf-help [<skill-name>]`
 
@@ -20,8 +20,8 @@ description: >
 ## When to use
 
 Any time the user asks "how do I use /pf-X?", "what flags does /pf-X take?", or wants a
-quick reference of available pf skills — when a quick reference is faster than reading
-the whole SKILL.md. This skill is a **read-only contract** — it prints help and stops.
+quick reference of available pf skills - when a quick reference is faster than reading
+the whole SKILL.md. This skill is a **read-only contract** - it prints help and stops.
 It does NOT dispatch other skills or perform any wi-lifecycle action.
 
 ## Mechanic
@@ -29,7 +29,7 @@ It does NOT dispatch other skills or perform any wi-lifecycle action.
 This skill is short on purpose. The calling agent (you, when the user invokes
 `/pf-help`) does the work; the body below is the contract.
 
-### Mode A — no argument (`/pf-help`)
+### Mode A - no argument (`/pf-help`)
 
 1. List all sibling skill directories under `plugins/polyforge/skills/`:
 
@@ -41,7 +41,7 @@ This skill is short on purpose. The calling agent (you, when the user invokes
    using-polyforge
    ```
 
-2. For each sibling, read `<sibling>/SKILL.md` and extract the `## Usage` block —
+2. For each sibling, read `<sibling>/SKILL.md` and extract the `## Usage` block -
    specifically the `**Purpose**:` and `**Pattern**:` lines. Skip any skill whose
    SKILL.md has no `## Usage` block (and surface that as a one-line warning, since
    every skill is expected to have one after aihub#84).
@@ -64,10 +64,10 @@ This skill is short on purpose. The calling agent (you, when the user invokes
    any single skill, or read `plugins/polyforge/skills/<skill-name>/SKILL.md` for full
    docs (When-to-use, Mechanic, NL Triggers)."
 
-### Mode B — with argument (`/pf-help pf-work`)
+### Mode B - with argument (`/pf-help pf-work`)
 
 1. Normalize the argument:
-   - Accept `pf-work`, `/pf-work`, or `work` — strip leading `/` and any leading
+   - Accept `pf-work`, `/pf-work`, or `work` - strip leading `/` and any leading
      `pf-` if the user typed `/pf-help work`.
    - Re-prefix to `pf-<arg>` if needed; `using-polyforge` is the one exception (no
      `pf-` prefix).
@@ -88,9 +88,9 @@ This skill is short on purpose. The calling agent (you, when the user invokes
 
 ## Non-goals
 
-- Do **not** invoke or dispatch the target skill — only print its Usage block.
+- Do **not** invoke or dispatch the target skill - only print its Usage block.
 - Do **not** edit any SKILL.md from inside `/pf-help`.
-- Do **not** call any `pf_*` MCP tool — this skill is purely local-filesystem read.
+- Do **not** call any `pf_*` MCP tool - this skill is purely local-filesystem read.
 
 ## NL Triggers
 

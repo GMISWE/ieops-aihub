@@ -3443,7 +3443,8 @@ jobs:
           # Before these tests there was no DB coverage of items[] contents at all.
           go test ./internal/domain/ -run 'TestGetReadyQueue_' -count=1 -v 2>&1 | tee ready_queue.log
           for want in TestGetReadyQueue_ItemsExcludesHumanSessionAndBlocked \
-                      TestGetReadyQueue_ItemsAgreesWithReadyOnlyFilter; do
+                      TestGetReadyQueue_ItemsAgreesWithReadyOnlyFilter \
+                      TestGetReadyQueue_RowScanFailureFailsTheCall; do
             grep -q -- "--- PASS: $want" ready_queue.log \
               || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#280 ready-queue behavioural coverage is not actually executing"; exit 1; }
           done

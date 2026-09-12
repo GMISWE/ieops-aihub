@@ -2053,7 +2053,7 @@ func CommitMemory(ctx context.Context, pool *pgxpool.Pool, memID, body, callerUs
 		memID, entryArrayJSON,
 	)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to commit memory: %v", execErr))
+		return dbErrCause(execErr, "failed to commit memory")
 	}
 
 	// Emit memory_committed event (best-effort, fire-and-forget).
@@ -2139,7 +2139,7 @@ func EditCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, body, 
 		memID, commitID, body, updatedAt,
 	)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to edit commit: %v", execErr))
+		return dbErrCause(execErr, "failed to edit commit")
 	}
 
 	// best-effort audit event
@@ -2181,7 +2181,7 @@ func DeleteCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, call
 		memID, commitID,
 	)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to delete commit: %v", execErr))
+		return dbErrCause(execErr, "failed to delete commit")
 	}
 
 	payload, _ := json.Marshal(map[string]any{
@@ -2275,7 +2275,7 @@ func ReplyCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, autho
 
 	_, execErr := pool.Exec(ctx, replyCommitSQL, memID, commitID, replyArrayJSON)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to reply to commit: %v", execErr))
+		return dbErrCause(execErr, "failed to reply to commit")
 	}
 
 	// Look up the memory's work_item_id for the event row. Best-effort BY the
@@ -3190,7 +3190,7 @@ func SetMemoryVisibility(ctx context.Context, pool *pgxpool.Pool, id, visibility
 		  WHERE id = $4`,
 		visibility, PreShareVisibilityKey, []string{PreShareVisibilityKey}, id)
 	if err != nil {
-		return NewErr(ErrInternalError, "failed to update memory visibility")
+		return dbErr(err, "failed to update memory visibility")
 	}
 	if tag.RowsAffected() == 0 {
 		return NewErr(ErrNotFound, "memory not found")
@@ -3352,7 +3352,7 @@ func Redact(ctx context.Context, pool *pgxpool.Pool, memID, callerUserID, caller
 		    expires_at = clock_timestamp(), updated_at = clock_timestamp()
 		WHERE id = $1`, memID, reason)
 	if err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to redact memory: %v", err))
+		return dbErrCause(err, "failed to redact memory")
 	}
 
 	// Emit memory_redacted (already on migration 0025's agent_events whitelist,
@@ -3438,7 +3438,7 @@ func repointHeadIfRedacted(ctx context.Context, pool *pgxpool.Pool, redactedID s
 	if _, err := pool.Exec(ctx,
 		`UPDATE memories SET latest_id = $1 WHERE latest_id = $2`, newHead, redactedID,
 	); err != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to repoint lineage head: %v", err))
+		return dbErrCause(err, "failed to repoint lineage head")
 	}
 	return nil
 }
@@ -3715,7 +3715,7 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		req.EventType, req.Payload, req.Pinned, project,
 	)
 	if err != nil {
-		return "", NewErr(ErrInternalError, fmt.Sprintf("failed to insert event: %v", err))
+		return "", dbErrCause(err, "failed to insert event")
 	}
 	return evtID, nil
 }
@@ -3804,7 +3804,7 @@ func ResolveCommit(ctx context.Context, pool *pgxpool.Pool, memID, commitID, rep
 		memID, commitID, reply, resolvedAt, callerDisplay,
 	)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("failed to resolve commit: %v", execErr))
+		return dbErrCause(execErr, "failed to resolve commit")
 	}
 
 	// Look up the memory's work_item_id for the event row.

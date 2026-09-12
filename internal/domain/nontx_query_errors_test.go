@@ -36,6 +36,10 @@ package domain
 // or a new site be born in one — without a named entry going stale or missing
 // here, which is a red test either way.
 //
+// Both scanners here match READ shapes. The write shape — `_, err :=
+// pool.Exec(…)` — joined the census in aihub#620 (nontx_exec_errors_test.go),
+// with its own scanner, ledger and blind-spot pins over the same function set.
+//
 // No database:
 //
 //	GOWORK=off go test ./internal/domain/ -run 'NonTransactional|NonTxBlindSpot|DetectCycleSurfaces|CredentialSimpleSurfaces' -count=1

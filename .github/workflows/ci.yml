@@ -3752,6 +3752,37 @@ jobs:
           ! grep -q -- '--- SKIP' acquire_locks_reporting.log \
             || { echo "::error::an aihub#345 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#370: the commit-time lock gate's DB-touching half
+      # (FnReconcileCommitLocks, aihub#366). The resident tests aihub#366 left
+      # behind cover only the pure-logic parts — key-form coverage, the MCP
+      # wiring, the git change surface. The three paths that exist only against
+      # a live lock table (auto-acquire, refusal of a live foreign holder,
+      # orphan-reclaim) were measured on 2026-09-06 in a throwaway file deleted
+      # before commit (timeline notes "REQUIREMENT 2 measured live" and
+      # "MUTATION PROBES" on aihub#366); this step makes those measurements a
+      # resident gate.
+      #
+      # The repeat-call arm is aihub#366's requirement 3 preserved by mutation:
+      # its Probed=0 assertion is the ONLY instrument that goes red when the
+      # gate derives its held set from declared_resources instead of
+      # resource_locks (mutant M5) — a redundant probe writes no row and no
+      # event, so lock-row and event counts cannot see that mutant.
+      - name: aihub#370 commit-gate lock reconcile DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestCommitLockGateDB_AcquireConflictOrphanReclaim$' -count=1 -v 2>&1 | tee commit_gate_locks.log
+          for want in 'TestCommitLockGateDB_AcquireConflictOrphanReclaim/an_undeclared_path_is_locked_without_interrupting_the_commit' \
+                      'TestCommitLockGateDB_AcquireConflictOrphanReclaim/a_repeat_call_probes_nothing_and_covers_the_never-declared_path' \
+                      'TestCommitLockGateDB_AcquireConflictOrphanReclaim/a_path_held_by_another_live_attempt_refuses_the_whole_call' \
+                      'TestCommitLockGateDB_AcquireConflictOrphanReclaim/an_orphan_lock_from_an_ended_attempt_is_reclaimed'; do
+            grep -q -- "--- PASS: $want" commit_gate_locks.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); that commit-gate path is back to being verified only by aihub#366's deleted throwaway"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' commit_gate_locks.log \
+            || { echo "::error::an aihub#370 test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#329: the SERVER's fill of the response fields the MCP client
       # consumes to name or key something local — ClaimResponse.Goal (the task
       # branch name), and ID/Slug/Project on both claim exits and on
@@ -5260,6 +5291,30 @@ jobs:
           done
           ! grep -q -- '--- SKIP' paused_emit_grant.log \
             || { echo "::error::an aihub#585 paused-attempt grant test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#362: POST /v1/work_items/:id/unblock resolves id-or-slug — the
+      # FIFTH instance of the aihub#127/#343/#357 slug-resolution class, found
+      # by aihub#357's independent review. The static side is the
+      # internal/citest/slugres census (DB-free, runs in the "Unit tests" step
+      # and fails on the unfixed handler body); these two functions are the
+      # behavioural side, which only a real database can hold: the slug arm
+      # must requeue the row AND key the admin_unblock audit event by the
+      # canonical id (the event insert is best-effort, so a slug there vanishes
+      # without an error), and resolution must not widen the endpoint — a
+      # non-blocked work item answers 409 by slug exactly as it does by id.
+      - name: aihub#362 unblock-by-slug DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestUnblockBySlug_' -count=1 -v 2>&1 | tee unblock_slug.log
+          for want in TestUnblockBySlug_UnblocksAndKeysTheEventCanonically \
+                      TestUnblockBySlug_StatusGateStillApplies; do
+            grep -q -- "--- PASS: $want (" unblock_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#362 unblock slug fix is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' unblock_slug.log \
+            || { echo "::error::an aihub#362 unblock slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
   publish-schemas:
     name: Publish MCP Schemas

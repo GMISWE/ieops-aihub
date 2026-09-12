@@ -2,7 +2,8 @@
 
 Tests that re-claiming with the same idempotency_key returns the same attempt_id
 and claim_epoch (no new attempt created). Critical for network retry safety.
-(Implements C6-2: run_attempts.go:142-187)
+(Implements C6-2: `internal/domain/run_attempts.go` (`FnClaimWorkItem`) — the
+idempotency lookup at the top of the claim transaction.)
 
 ## Setup
 

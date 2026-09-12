@@ -13,6 +13,11 @@
 # pf_get_ready_queue description — the copy the repo's Go gate
 # (internal/mcp/ready_queue_section_count_test.go) pins to the ReadyQueue
 # struct, the marshalling authority. Re-apply on refresh.
+# aihub#619 modification (2026-09-12): main() audits baseline usage after the
+# run — every baseline entry must have demoted at least one violation, or the
+# run fails with STALE_BASELINE_ENTRY (see audit_stale_entries). This is the
+# Python half of the double ratchet the Go gate gets from assertNoStaleEntries
+# in internal/mcp/universal_contract_gate_test.go. Re-apply on refresh.
 #
 # Rules
 # -----
@@ -40,11 +45,15 @@
 # JSON array of {"file": ..., "rule": ..., "match": ..., "wi": ...}.
 # Every baseline entry MUST have a "wi" field (enforced at load time).
 # Violations matching a baseline entry are demoted to NOTICE (still printed).
+# Every entry must in turn demote at least one violation per run, or the run
+# fails with STALE_BASELINE_ENTRY (aihub#619) — the baseline only holds
+# exemptions that a live violation still needs.
 #
 # Output
 # ------
 #   <file>:<line> [RULE] description
-# Exit code 1 if any un-baselined violations; 0 otherwise.
+# Exit code 1 if any un-baselined violations or stale baseline entries;
+# 0 otherwise.
 #
 # Usage
 # -----
@@ -409,6 +418,57 @@ def match_baseline(v: Violation, baseline: list) -> Optional[dict]:
     return None
 
 
+def audit_stale_entries(baseline: list, used_entry_ids: set,
+                        scanned_files: list, baseline_path: str) -> list[str]:
+    """Return one printable error line per baseline entry unused this run.
+
+    An entry is used when it demoted at least one violation. An unused entry is
+    an exemption with nothing behind it: either the drift it excused is fixed
+    (delete the entry in the same change), or the lint stopped looking where
+    the entry points — the shape aihub#613 and aihub#540 each had to find by
+    reading, because nothing made it red. Semantics mirror assertNoStaleEntries
+    in internal/mcp/universal_contract_gate_test.go, which does the same for
+    the Go contract gates' baseline (aihub#619).
+
+    The one legitimate way an entry matches nothing is a run whose --target set
+    never scanned the entry's file, so that case gets its own message: on the
+    full CI target set it means the file was deleted or renamed (stale, delete
+    or retarget); on a narrower local run it means re-run with the full set
+    before judging. Both are errors — a partial run cannot vouch for the
+    baseline, and an absent check is not a passing one.
+    """
+    errors = []
+    for entry in baseline:
+        if id(entry) in used_entry_ids:
+            continue
+        ident = (
+            f"rule={entry['rule']} file={entry['file']} "
+            f"match={entry['match']!r} (wi {entry['wi']})"
+        )
+        note = f" Note recorded: {entry['note']}" if entry.get("note") else ""
+        if any(f.endswith(entry["file"]) for f in scanned_files):
+            errors.append(
+                f"{baseline_path} [STALE_BASELINE_ENTRY] {ident}: matched no "
+                "violation this run. Either the drift is fixed — DELETE this "
+                "entry in the same change that fixed it — or the lint no longer "
+                "looks where the entry points, which is worse than the original "
+                "drift because it is an exemption with nothing behind it. A "
+                "deleted entry stays recoverable: "
+                f"git log -S '{entry['match']}' -- {baseline_path}.{note}"
+            )
+        else:
+            errors.append(
+                f"{baseline_path} [STALE_BASELINE_ENTRY] {ident}: its file is "
+                f"not among the {len(scanned_files)} scanned file(s), so the "
+                "entry can never match. Either the file was deleted or renamed "
+                "(then DELETE or retarget the entry), or this run's --target "
+                "set is narrower than the CI run's (then re-run with the full "
+                "target set, e.g. --target plugins/, before judging the entry "
+                f"stale).{note}"
+            )
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # File scanning
 # ---------------------------------------------------------------------------
@@ -660,6 +720,62 @@ def run_self_test():
                     else:
                         passed += 1
 
+        # ── Stale-entry audit checks (aihub#619) ──
+        # The audit is a main()-level mechanism (it needs the whole run's
+        # used-set), so it is exercised directly rather than through lint_file
+        # fixtures. The used-set is derived the way main() derives it: by
+        # matching real violations from a fixture against the baseline.
+        used_entry = _SELF_TEST_BASELINE[0]
+        stale_in_scope = {
+            "file": "baseline_demotion.md", "rule": "UNKNOWN_TOOL",
+            "match": "pf_never_called", "wi": "aihub#998",
+            "note": "self-test only: nothing in any fixture says pf_never_called",
+        }
+        stale_out_of_scope = {
+            "file": "deleted_elsewhere.md", "rule": "UNKNOWN_PARAM",
+            "match": "ghost", "wi": "aihub#997",
+        }
+        audit_baseline = [used_entry, stale_in_scope, stale_out_of_scope]
+        scanned = [os.path.join(tmpdir, name) for name in _FIXTURES]
+        demo_viols = lint_file(
+            os.path.join(tmpdir, "baseline_demotion.md"), _MINIMAL_SCHEMA
+        )
+        used_ids = set()
+        for v in demo_viols:
+            b = match_baseline(v, audit_baseline)
+            if b:
+                used_ids.add(id(b))
+        audit_errors = audit_stale_entries(
+            audit_baseline, used_ids, scanned, "test_baseline.json"
+        )
+        audit_checks = [
+            # A used entry must never be flagged: this is what keeps the audit
+            # from destroying live exemptions like the aihub#448 UNKNOWN_TOOL
+            # entries that carry aihub#613's republication recovery notes.
+            ("audit_used_entry_not_flagged",
+             not any("pf_nonexistent2" in e for e in audit_errors)),
+            # An in-scope entry that demoted nothing is stale — the aihub#613 /
+            # aihub#540 orphan shape must now be red, not silent.
+            ("audit_in_scope_stale_flagged",
+             any("pf_never_called" in e and "matched no violation" in e
+                 for e in audit_errors)),
+            # The note travels with the error, like the Go message's
+            # "Note recorded:" — it may carry recovery leads (aihub#613).
+            ("audit_note_recorded",
+             any("pf_never_called" in e and "Note recorded:" in e
+                 for e in audit_errors)),
+            # An entry whose file was never scanned gets the out-of-scope
+            # message (deleted file, or a partial --target run), still an error.
+            ("audit_out_of_scope_flagged",
+             any("ghost" in e and "not among" in e for e in audit_errors)),
+            ("audit_exactly_two_stale", len(audit_errors) == 2),
+        ]
+        for name, ok in audit_checks:
+            if ok:
+                passed += 1
+            else:
+                failures.append(f"FAIL {name}: audit errors: {audit_errors!r}")
+
     if failures:
         print(f"self-test: {len(failures)} failure(s):")
         for f in failures:
@@ -742,10 +858,12 @@ def main():
     has_error = False
     notice_count = 0
     error_count = 0
+    used_entry_ids = set()
 
     for v in sorted(all_violations, key=lambda x: (x.file, x.line)):
         b = match_baseline(v, baseline)
         if b:
+            used_entry_ids.add(id(b))
             level = "NOTICE"
             notice_count += 1
         else:
@@ -762,6 +880,23 @@ def main():
         f"\n{total} violation(s): {error_count} error(s), {notice_count} notice(s) "
         f"in {len(files)} file(s)"
     )
+
+    # Stale-entry audit (aihub#619): every baseline entry must have demoted at
+    # least one violation this run, or the baseline is only a one-way ratchet —
+    # entries get in with a wi reference but never leave, and orphans (aihub#613's
+    # seven, aihub#540's one) can only be found by reading.
+    if args.baseline:
+        stale_errors = audit_stale_entries(
+            baseline, used_entry_ids, files, args.baseline
+        )
+        for line in stale_errors:
+            print(line)
+        print(
+            f"baseline audit: {len(baseline)} entry(ies), "
+            f"{len(baseline) - len(stale_errors)} used, {len(stale_errors)} stale"
+        )
+        if stale_errors:
+            has_error = True
 
     if has_error:
         sys.exit(1)

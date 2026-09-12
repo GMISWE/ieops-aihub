@@ -78,10 +78,14 @@ func TestFormatDetails(t *testing.T) {
 	}
 }
 
-// TestFormatDetails_Truncation verifies the ~500B cap so a pathological details
-// blob cannot flood the error string.
+// TestFormatDetails_Truncation verifies the DetailsRenderLimit cap so a
+// pathological details blob cannot flood the error string. The blob is sized
+// relative to the cap rather than absolutely, so the test keeps measuring the
+// cut wherever the cap moves (it was 500 until aihub#375).
 func TestFormatDetails_Truncation(t *testing.T) {
-	big := make([]string, 200)
+	entry := `"k` + strings.Repeat("x", 5) + `":1,`
+	n := 2*DetailsRenderLimit/len(entry) + 1
+	big := make([]string, n)
 	for i := range big {
 		big[i] = `"k` + strings.Repeat("x", 5) + `":1`
 	}
@@ -90,9 +94,10 @@ func TestFormatDetails_Truncation(t *testing.T) {
 	if !strings.HasSuffix(got, "...(truncated)") {
 		t.Fatalf("oversized details must be truncated, got %q", got)
 	}
-	// " details=" (9) + 500 + "...(truncated)" (14) = 523.
-	if len(got) != 9+500+len("...(truncated)") {
-		t.Errorf("truncated length = %d, want %d", len(got), 9+500+len("...(truncated)"))
+	// " details=" (9) + DetailsRenderLimit + "...(truncated)" (14).
+	if len(got) != len(" details=")+DetailsRenderLimit+len("...(truncated)") {
+		t.Errorf("truncated length = %d, want %d", len(got),
+			len(" details=")+DetailsRenderLimit+len("...(truncated)"))
 	}
 }
 

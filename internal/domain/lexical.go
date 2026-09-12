@@ -62,9 +62,10 @@ package domain
 //     degrades to whole-blob tokens and matches nothing. It also stems English
 //     (`already_held empty` must still match the literal `already_held: []`,
 //     which AND-of-lexemes does not), and work_items has no tsvector column at
-//     all, so the wi side would have needed a migration anyway. The
-//     recall_algo="lexical" branch that uses content_tsv for RANKING is
-//     unchanged by this file.
+//     all, so the wi side would have needed a migration anyway. (A separate
+//     recall_algo="lexical" branch used content_tsv for RANKING; aihub#632
+//     retired it with the parameter, leaving this file's sections as the only
+//     lexical semantics.)
 //
 // The predicate is AND-of-tokens: the query is split on Unicode whitespace and
 // every token must appear as a case-insensitive substring. That keeps the two

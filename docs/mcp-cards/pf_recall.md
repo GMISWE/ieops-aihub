@@ -213,7 +213,7 @@ query string for `pkg/client/client.go` (`Recall`) → `GET /v1/memories`, bound
   both shapes pinned by value in `internal/mcp/recall_params_wiring_test.go`
   (`TestRecallForwardsEveryPublishedParamByValue`).
 
-Two deliberate asymmetries:
+One deliberate asymmetry:
 
 - **`fields` is NOT forwarded** (`TestRecallFieldsNeedsNoServerHop`). The projection is a property of what this process
   hands the model, and this process is the last hop before the model, so it is
@@ -223,13 +223,24 @@ Two deliberate asymmetries:
   unchanged by a brief call in `internal/mcp/recall_brief_wiring_test.go`
   (`TestRecallFieldsNeedsNoServerHop`). Adding it to the loop would make the server
   ignore an unread query param — a third instance of `aihub#148`.
-- **`recall_algo` is forwarded but not published**, from an explicit argument or the
-  `POLYFORGE_RECALL_ALGO` environment variable, with both sources and the
-  explicit-wins precedence driven by `internal/mcp/recall_params_wiring_test.go`
-  (`TestRecallUnpublishedForwardedParamsAreDocumented`), which also refuses an
-  entry that has since become published. Its exemption reason is contract
-  surface, not a dead end: nothing in any response advertises it, so no caller is
-  shown a value it cannot use.
+
+There used to be a second asymmetry the other way round: **`recall_algo` was
+forwarded but not published** (an explicit argument or the
+`POLYFORGE_RECALL_ALGO` environment variable, explicit wins), whose only
+non-default value `lexical` selected an alternate ts_rank ordering in the text
+path. `aihub#632` retired the parameter end to end — schema, both forwarding
+sources, the server read and the branch — because that branch was unreachable
+whenever an embedding provider was live and no `work_item_id` filter was set,
+and the `lexical` response section (below) now serves the lexical semantics on
+every recall that carries a query, driven by
+`internal/domain/recall_lexical_db_test.go`
+(`TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot`). Neither source reaches the wire any more,
+pinned by `internal/mcp/recall_params_wiring_test.go`
+(`TestRecallAlgoIsRetired`) and on a recorded request by
+`internal/mcp/recall_events_param_publication_test.go`
+(`TestBoundMemoryAndEventParamsReachTheWire`); a caller still sending it gets
+the `aihub#389` unknown-parameter disclosure in `request_adjusted`, driven for
+every tool by `internal/mcp/unknown_params_test.go`.
 
 `similarity_threshold` was published here, fully implemented in domain, and carried
 by **neither** hop in between. Confirmed live on the pre-fix build: passing 0.99 and
@@ -237,9 +248,9 @@ passing nothing returned the same 20 items in the same order.
 
 ## hop 4 — what it actually does
 
-- **Ordering, and why there is no knob for recency.** All three paths already rank
+- **Ordering, and why there is no knob for recency.** Both paths already rank
   by recency, so there was never a dimension for a caller to turn up:
-  - **text, default** — `ORDER BY GREATEST(last_activated_at, created_at) DESC,
+  - **text** — `ORDER BY GREATEST(last_activated_at, created_at) DESC,
     id DESC` (`memRefTimeSQL`). Recency is the only ranking SIGNAL — `id DESC`
     is the deterministic tiebreaker for rows sharing a reference time and
     `aihub#239`'s cursor key rather than a second signal, which
@@ -247,12 +258,13 @@ passing nothing returned the same 20 items in the same order.
     (`TestRecallOrderingSignalsAreTheOnesTheCardNames`) holds as a TERM COUNT
     against the clause quoted here, built from `memRefTimeSQL` so the card and
     the constant cannot move apart. There is no similarity
-    score on this path to blend it against.
-  - **text, `recall_algo=lexical`** — `ts_rank` first, then `tanh` of effective
-    strength, which carries `exp(-days/stability)`, the order of the two terms and
-    the decay factor inside the second both required by
+    score on this path to blend it against. (A third ordering sat here until
+    `aihub#632`: `recall_algo=lexical` re-ranked this page by `ts_rank`. It was
+    retired with the parameter, and
     `internal/domain/recall_card_claims_test.go`
-    (`TestRecallOrderingSignalsAreTheOnesTheCardNames`).
+    (`TestRecallOrderingSignalsAreTheOnesTheCardNames`) now requires that no
+    ORDER BY on the text path ranks by `ts_rank` — the `lexical` response
+    section below is where lexical matching lives.)
   - **vector** — cosine bucketed to 0.01 first, then effective strength inside a
     bucket, same decay term. `aihub#311` made cosine primary after a fused
     `0.7*cosine + 0.3*tanh(strength)` score ranked a memory below a LESS similar

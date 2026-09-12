@@ -700,7 +700,6 @@ type RecallRequest struct {
 	SimilarityThreshold float64  `json:"similarity_threshold,omitempty"`
 	MinStrength         float64  `json:"min_strength"`
 	IncludeArchived     bool     `json:"include_archived,omitempty"`
-	RecallAlgo          string   `json:"recall_algo,omitempty"`
 	Cursor              string   `json:"cursor,omitempty"`
 	CallerUserID        string   `json:"-"`
 	CallerRole          string   `json:"-"`
@@ -2489,8 +2488,8 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	}
 	resp.RequestAdjusted = adjusted
 	// aihub#360: the lexical section, attached HERE — around the router, like
-	// the two disclosures above — so one exit covers the vector, hybrid, text
-	// and lexical-algo paths alike. Keyed on the REQUEST (a non-empty query),
+	// the two disclosures above — so one exit covers the vector, hybrid and
+	// text paths alike. Keyed on the REQUEST (a non-empty query),
 	// never on what the router returned: an empty semantic page still gets the
 	// section, and a full one does too, because "the vector path answered" is
 	// precisely the state in which aihub#367 measured the misses (recall@1
@@ -2633,8 +2632,8 @@ func recallHybrid(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, v
 //
 // Interleaving rather than concatenating is the point: the two halves are ranked by
 // incomparable keys (the vector half by cosine bucketed to 0.01, with effective strength
-// deciding only within a bucket; the text half by reference time, or by lexical rank when
-// recall_algo=lexical), so there is no honest way to sort them into one list — and any
+// deciding only within a bucket; the text half by reference time), so there is no honest
+// way to sort them into one list — and any
 // scheme that appends one after the other reintroduces the aihub#270 starvation as soon
 // as the first half alone fills topK. Round-robin guarantees each half gets its share of
 // the budget while preserving the internal order of both.
@@ -2770,8 +2769,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 	// is a Go string (immutable — later `+=` rebinds the variable, it doesn't
 	// mutate this value) and `args` is only ever appended to, never rewritten at
 	// an existing index, so this snapshot's contents can't be altered by later
-	// appends. This total applies to both the plain and lexical branches below,
-	// since the lexical branch's own comment notes it doesn't use the cursor.
+	// appends.
 	total, terr := countMemories(ctx, pool, where, args)
 	if terr != nil {
 		return nil, dbErrCause(terr, "recall count query")
@@ -2805,34 +2803,15 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		}
 	}
 
-	// opt③ L1 recall precision (RecallAlgo=="lexical"): fuse lexical relevance
-	// (ts_rank over content_tsv vs the query) with the strength/recency prior via
-	// Reciprocal Rank Fusion, so req.Query actually drives ranking. Default
-	// (""/"recency") keeps the query-blind recency order verbatim — a zero-behavior-
-	// change opt-in. Lexical path skips cursor paging (fusion score is incompatible
-	// with the timestamp cursor); query terms that match nothing tie rlex, so ranking
-	// falls back to the strength prior and recall is preserved.
-	var query string
-	if req.RecallAlgo == "lexical" && req.Query != "" {
-		limitIdx := idx
-		args = append(args, req.TopK)
-		qIdx := idx + 1
-		args = append(args, req.Query)
-		query = fmt.Sprintf(`
-		SELECT id, project, type, content, author_user_id, author_display,
-			work_item_id, visibility, is_immortal, base_strength, stability_days,
-			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, embedded_len, status, attrs, commits, latest_id, created_at, updated_at
-		FROM memories
-		WHERE %s
-		ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
-			tanh(base_strength * exp(
-				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
-				/ NULLIF(stability_days, 0))) DESC
-		LIMIT $%d`, where, qIdx, limitIdx)
-	} else {
-		args = append(args, req.TopK+1)
-		query = fmt.Sprintf(`
+	// One ordering, recency only. A second SELECT used to sit here: the opt3 L1
+	// branch (RecallAlgo=="lexical") that ranked this page by ts_rank over
+	// content_tsv. aihub#632 retired it with the recall_algo parameter itself:
+	// the branch was unreachable while an embedding provider was live and no
+	// work_item_id filter was set (recallRouted answers such requests from the
+	// vector path), and the aihub#360 lexical section now serves the "lexical"
+	// semantics on every recall that carries a query, whichever path built items.
+	args = append(args, req.TopK+1)
+	query := fmt.Sprintf(`
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
@@ -2841,7 +2820,6 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		WHERE %s
 		ORDER BY `+memRefTimeSQL+` DESC, id DESC
 		LIMIT $%d`, where, idx)
-	}
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {

@@ -2119,29 +2119,32 @@ WHERE status='active'
 写的是公式、changelog L7 还声称「API 文档和实现对齐」，于是文档成了唯一权威，
 而它是错的。
 
-#### 实际排序（三条路径都已把 recency 计入：一条作主序，两条经 eff_strength 的时间衰减进入唯一 tiebreak）
+#### 实际排序（两条路径都已把 recency 计入：一条作主序，一条经 eff_strength 的时间衰减进入唯一 tiebreak）
 
 ```
 memRefTimeSQL = GREATEST(last_activated_at, created_at)   -- 参考时间
 eff_strength  = base_strength * exp(-days_since_ref / stability_days)
 
--- 1) 文本/标签路径（默认）  internal/domain/memory.go recallText
+-- 1) 文本/标签路径  internal/domain/memory.go recallText
 ORDER BY memRefTimeSQL DESC, id DESC
    ⇒ recency 是唯一的排序【信号】（`id DESC` 只是同一参考时刻内的确定性去歧，
       也是 aihub#239 的游标 tiebreaker，不是排序依据）；
       这条路径上根本没有 similarity 可供加权
 
--- 2) 文本路径 recall_algo=lexical
-ORDER BY ts_rank(content_tsv, ...) DESC, tanh(eff_strength) DESC
-
--- 3) 向量路径  internal/domain/memory_vector.go RecallWithVector
+-- 2) 向量路径  internal/domain/memory_vector.go RecallWithVector
 ORDER BY round(cosine, 2) DESC, eff_strength DESC
    ⇒ cosine 分桶到 0.01 为主键，eff_strength 只在桶【内】决胜
 
 min_strength 默认 0.3（raw 值，M7 修正，与 GC 归档阈值对齐）
 ```
 
-`eff_strength` 自带 `exp(-days/stability)` 时间衰减 ⇒ **recency 在三条路径上都已
+（历史：文本路径曾有第二种排序 `recall_algo=lexical`，
+`ORDER BY ts_rank(content_tsv, ...) DESC, tanh(eff_strength) DESC`。
+aihub#632 连参数一起退役：该分支在 embedding provider 在线且无 work_item_id
+过滤时不可达，而 aihub#360 的 lexical 段已在每个带 query 的 recall 上承担
+lexical 语义。）
+
+`eff_strength` 自带 `exp(-days/stability)` 时间衰减 ⇒ **recency 在两条路径上都已
 参与排序，没有任何一条缺席它**。这是 `recency_weight` 被撤下（aihub#469）而非
 实现的第一条依据：它提供的是给一个已经占主导的维度加权。
 
@@ -4830,7 +4833,7 @@ v2 在 MCP server 层硬限制（通过 step_context 检测活跃的 step_attemp
 -- L7: recency_weight 已撤下（aihub#469）。此行原文是「default = 0.3（API 文档和
     实现对齐）」——【那句话是假的，而且是本缺陷最贵的一部分】：参数从未被任何
     读点消费，changelog 却声称文档与实现已对齐，于是没人再去核。撤而不实现的
-    三条依据见 §7.5（recency 三条路径都已是主序或 tiebreak；文档那个公式实测会
+    三条依据见 §7.5（recency 各路径都已是主序或 tiebreak；文档那个公式实测会
     复现 aihub#311；真瓶颈是候选召回不是排序）。
 -- L8: idempotency_key ULID 格式：^[0-9A-HJKMNP-TV-Z]{26}$
 -- L9: v1 命名见 §0

@@ -138,12 +138,14 @@ var recallParamsKnownUnreadTrackedByWi = map[string]string{}
 // recallFieldsDeliberatelyUnpublished are RecallRequest fields the server fills
 // from a source other than a published MCP argument. Unlike the two maps above
 // these are not defects in either direction: something DOES write them.
-var recallFieldsDeliberatelyUnpublished = map[string]string{
-	"recall_algo": "forwarded but deliberately not published — set from an explicit " +
-		"argument or POLYFORGE_RECALL_ALGO, and recorded in the G4 allowlist as " +
-		"handleRecall.recall_algo. Nothing in any response advertises it, so no caller " +
-		"is shown a value it cannot use (aihub#425)",
-}
+//
+// The map is empty. Its one entry was `recall_algo` (aihub#425: set from an
+// explicit argument or POLYFORGE_RECALL_ALGO, recorded in the G4 allowlist as
+// handleRecall.recall_algo), retired whole by aihub#632 — struct field, server
+// read, both forwarding sources and the G4 entry deleted together, with the
+// retirement pinned by TestRecallAlgoIsRetired (recall_params_wiring_test.go).
+// Add an entry only for a field something genuinely writes.
+var recallFieldsDeliberatelyUnpublished = map[string]string{}
 
 // recallFieldsKnownDeadTrackedByWi is the ratchet for the OTHER direction: a
 // json-tagged RecallRequest field that no published parameter can reach and that

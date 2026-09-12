@@ -494,9 +494,13 @@ func handleRecall(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, archivedErr)
 		}
 		req.IncludeArchived = includeArchived
-		if algo := c.QueryParam("recall_algo"); algo != "" {
-			req.RecallAlgo = algo
-		}
+		// No `recall_algo` read here any more. aihub#632 retired the parameter
+		// (its only non-default value, "lexical", selected an alternate ORDER BY
+		// in recallText that was unreachable whenever an embedding provider was
+		// live and no work_item_id filter was set); the aihub#360 lexical section
+		// carries the lexical semantics now. An arriving recall_algo is ignored
+		// like any other unknown query param, and the MCP hop discloses it via
+		// request_adjusted.unknown_params (aihub#389).
 
 		// NO page-size cap on this path. domain.Recall bounds TopK itself — unset,
 		// zero or negative becomes 20, and 200 is the ceiling — and that is the only

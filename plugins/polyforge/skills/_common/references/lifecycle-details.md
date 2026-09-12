@@ -134,7 +134,7 @@ Cannot execute: file lock conflict.
 
 ## Next steps
 - Coordinate with <actor_display> or wait for their wi (<work_item_slug>) to wrap.
-- Use `/pf-stop --pause` to release your lease while waiting.
+- Use `/pf-stop --pause` to pause your attempt (releasing its `file_scope` locks) while waiting.
 - Or use `/pf-status` to check when the blocking wi finishes.
 ```
 

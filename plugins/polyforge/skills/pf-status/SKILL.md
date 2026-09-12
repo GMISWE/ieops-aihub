@@ -62,8 +62,8 @@ ready queue, or which items are stalled/blocked.
 ```
 📋 LCRS — project: <name>
 ──────────────────────────────────────────────────
-🏃 running      (2): wi_xxx "fix login bug" [Alice, attempt #3, 28min left]
-                     wi_yyy "add rate limiting" [Bot-1, attempt #1, 45min left]
+🏃 running      (2): wi_xxx "fix login bug" [Alice, last active 4min ago]
+                     wi_yyy "add rate limiting" [Bot-1, last active 2h ago]
 ⚡ items         (5): wi_aaa (urgent) "critical DB migration" [queued]
                      wi_bbb (high)   "auth refactor" [queued]
                      ... +3 more
@@ -78,14 +78,17 @@ ready queue, or which items are stalled/blocked.
 3. Highlight segments needing attention:
    - `needs you` → bold, shown first
    - `stalled` → show blocker wi slug
-   - Expired leases in `running` → flag with ⏰
+   - Idle `running` detection is server-side: >24h untouched arrives as its own
+     `stale_running` segment (ownership has no lease, so there is nothing to expire client-side)
 
 4. Output three-segment format. "Next steps" section suggests the most important next action
    (e.g., "2 items need human-led sessions — run `/pf-work <slug>` to start").
 
 ## Output format notes
 
-- `running`: show attempt owner (display name), attempt number, lease expiry
+- `running`: show attempt owner (display name) and last-active age — the segment carries
+  `id/slug/goal/owner_display/last_active_at` and nothing else (no attempt number, no expiry:
+  the lease family was deleted in v1.21)
 - `items` (ready queue): show priority, truncated goal (60 chars), status
 - `stalled`: show which wi_id is blocking
 - `needs you`: these are `requires_human_session=true` wi's awaiting a human session

@@ -26,6 +26,7 @@
 > | 11 | §4.3 与 §5.7 的 Ready Queue 响应体 | 六段视图；`items[]` 带 `unblocked_at`；`running[]` 带 `expires_at` 和 `owner_user_type`；`items[]`/`needs_human_session[]`/`unclassified[]` 三段都带 `kind` | **七段，且那四个字段一个都不存在**（实测 2026-09-08，基准 `538c0d8`）：`stale_running[]` 早在 aihub#36 就进了 `internal/domain/work_items.go` (`ReadyQueue`)，只是带 `omitempty`，所以调用方在它非空之前看不到；`unblocked_at` **全仓无写入方**（唯一一处出现就是字段声明本身）；`expires_at` 随 v1.21 的 ownership 模型删除；`kind` 是 v1.22 删掉的列；`owner_user_type` 是**审计时才发现的第四个**——`RunningItem` 从来没有过这个字段，全仓 Go 代码零命中（同名字段在 §17 的 409 错误体 `details.current_attempt` 里另有一处，不在本行射程内）。**aihub#449 已把正文回改**（这是本表少数「正文已改」的条目，故此行记录的是曾经的偏差而非现存偏差）：去掉 `omitempty` 使七段恒在（wire 变更：空的 `stale_running` 从缺键变成 `[]`）、从 (`ReadyItem`) 删除 `UnblockedAt`、并把段数的三处副本（本文档 / 结构体 / `pf_get_ready_queue` 的 description）用 `internal/mcp/ready_queue_section_count_test.go` 闸成一个数。`items[]` 不选 `created_at` 而另两段选，**是设计如此**，不在此列（aihub#401 取消时已复核） |
 > | 12 | §19 事件 Payload Schema 的 `attempt_started` | payload 含 `is_resume: boolean` | **该键已不再写入**（实测 2026-09-08，基准 `f128b69`）：它由 `internal/domain/run_attempts.go` (`FnClaimWorkItem`) 算自 `req.Mode == "resume"`，随 `domain.ClaimRequest.Mode` 一起被 **aihub#424**（PR #369，commit `a631ad2`）删除——**aihub#394** 先把 `mode` 从 MCP schema 撤下，于是这个审计值恒为 false，等于对每一次 claim（**包括真正的 resume**）断言「这不是 resume」。取法：`git log -S'"is_resume"' -- internal/domain/run_attempts.go` 在该文件上只有三笔（`fac405c` / `761f0db` 写入、`a631ad2` 删除），今天该 payload 只剩四个键 `machine_id` / `actor_display` / `is_takeover` / `claim_epoch`。**正文已回改**（本表少数「正文已改」的条目之一，故此行记录的是曾经的偏差而非现存偏差）。⚠️ 但事件是**不可变记录**：`a631ad2` 之前落库的历史行仍带 `is_resume`（`internal/mcp/testdata/corpus/pf_read_events/` 里 2026-08-29 实录的那份就含 2026-08-20 的此类行），所以「读不到这个键」只对删除之后写入的行成立。删而不派生是刻意的：(`FnClaimWorkItem`) 的注释写明，将来若要把这个区分放回时间线，必须在服务端**派生**（claim 之前 wi 的 status 是显然的来源），不能取调用方自报的那个词 |
 > | 13 | §6.1 三段式输出格式的 Status 示例（同源孪生：`plugins/polyforge/skills/using-polyforge/fragments/output-format.md`） | `locks` 示例为 `git_branch:polyforge/wi-xxx`；含 `expires: 28min` 行 | **正文已回改**（aihub#519，2026-09-10，随插件 1.1.31 批次，与孪生片段同一 commit）：普通 claim 自 aihub#423 起不再持有 git_branch 锁行（持有的是 declared_resources 派生的 file_scope 锁），示例改为 `file_scope ×2`；`expires` 行随 v1.21 删除的租约家族一并删除（PATCH …/renew 已答 410 Gone）。本行与 #11/#12 同类，记录曾经的偏差而非现存偏差 |
+> | 14 | §10.0 的 `claim_failed` 渲染行与 §10.3 LCRS 视图示例 | claim_failed 展示"expires <时间>"；LCRS Running 行画 `expires 28min` / `expires 25min` | **两处的 expires 都无处可取**（实测 2026-09-11，基准 `80f202a`，aihub#556）：`expires_at` 随 v1.21 的 ownership 模型删除（同 #11/#13 的租约家族）。`running[]` 只有 `id/slug/goal/owner_display/last_active_at`（`internal/domain/work_items.go` (`RunningItem`)）；§17 的 409 错误体 `error_details.current_attempt` 只有 `id/actor_display/claim_epoch/last_active_at`（`internal/domain/run_attempts.go` 的 claim-conflict 分支）——没有任何可渲染的到期时间。正文按本表开头的约定保留原文，已就地加「见勘误 #14」标记；现行渲染指导以 `plugins/polyforge/skills/pf-status/SKILL.md` 为准（同一批已回改） |
 
 ---
 
@@ -2934,7 +2935,7 @@ Orchestrator 收到 subagent 结果后：
 
 Orchestrator 根据 outcome 统计本轮结果（展示给用户）：
 - `wrapped`：计入成功，折叠展示
-- `claim_failed` + `error_details.current_attempt`：展示"#X 被 <actor_display> 抢走，expires <时间>"
+- `claim_failed` + `error_details.current_attempt`：展示"#X 被 <actor_display> 抢走，expires <时间>" ⚠️ 见勘误 #14：expires 随 v1.21 删除，该错误体里没有它（有 `last_active_at`）
 - `stalled` + `stall_context`：展示完整 stall 信息，提示人工处理
 - `paused`：展示，提示下轮 resume
 
@@ -3020,9 +3021,9 @@ declared_resources 预测，还是按已持有的 resource_locks？），而本�
 客户端一次拉取 snapshot（单事务，wi + dep 一致），Kahn 拓扑排序渲染：
 
 ```
-═══ Running (2) ═══
-  marketplace#38  bug  alice   "fix OAuth 401"      expires 28min
-  marketplace#41  feat claude  "kubeconfig switch"  expires 25min
+═══ Running (2) ═══                       ⚠️ 见勘误 #14：expires 列随 v1.21 删除，
+  marketplace#38  bug  alice   "fix OAuth 401"      expires 28min   ← running[] 无任何到期字段，
+  marketplace#41  feat claude  "kubeconfig switch"  expires 25min   ← 现行渲染示例见 pf-status/SKILL.md
 
 ═══ Ready Roots（auto，本波可并行）═══
 ▶ marketplace#42  fix_bug    urgent  "fix payment timeout"

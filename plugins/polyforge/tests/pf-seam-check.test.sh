@@ -14,7 +14,11 @@ probe="$here/../bin/pf-seam-check"
 fails=0
 has()     { case "$1" in *"$2"*) return 0;; *) return 1;; esac; }
 ck()      { if has "$1" "$2"; then echo "  PASS: $3"; else echo "  FAIL: $3 (missing: $2)" >&2; fails=$((fails+1)); fi; }
-ck_not()  { if has "$1" "$2"; then echo "  FAIL: $3 (unexpected: $2)" >&2; fails=$((fails+1)); else echo "  PASS: $3"; fi; }
+# ck_not refuses the vacuous pass (aihub#537, same guard as pf-skill-router.test.sh): a negative
+# check against EMPTY output proves nothing — a probe that crashed or printed nothing would PASS
+# every ck_not while asserting nothing. Both call sites in this file pair with a positive ck on
+# the same output, so an empty haystack here is a broken probe, never a pass.
+ck_not()  { if [ -z "$1" ]; then echo "  FAIL: $3 (vacuous: no output to assert against)" >&2; fails=$((fails+1)); elif has "$1" "$2"; then echo "  FAIL: $3 (unexpected: $2)" >&2; fails=$((fails+1)); else echo "  PASS: $3"; fi; }
 
 names=(subagent-driven-development executing-plans finishing-a-development-branch)
 

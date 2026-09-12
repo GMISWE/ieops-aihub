@@ -1204,6 +1204,96 @@ func TestRoutedSkillHook_HeaderOnlyOverBudgetBannerSurvives(t *testing.T) {
 	}
 }
 
+// TestRoutedSkillHook_StepBodyBlowoutBannerNamesTheHeaderCut is the step-body counterpart of
+// the header-only fixture above, previously skipped on both sides: assertDegradesLoudly pads a
+// DROPPABLE fragment, so its payload always fits once enough fragments are dropped, and the
+// header-only fixture never has fragments at all. A step-body payload whose HEADER outgrows the
+// limit reaches a third state — every fragment is dropped, the payload is still over, and the
+// ctx[:limit] tail cut slices the header's resident rules. Before aihub#558 the banner in that
+// state kept the fragment-drop wording: it blamed the droppable fragments and pointed at disk
+// recovery (`Read` under the plugin root), while the text actually lost — the resident rules —
+// is not recoverable from any single file and was never named. Latent on the shipped tree (the
+// header is ~1.7k chars against a 10k limit); this fixture is the only thing that drives it.
+func TestRoutedSkillHook_StepBodyBlowoutBannerNamesTheHeaderCut(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	modes := routerModes(t, pluginRoot)
+	drove := 0
+	for _, skill := range routedSkills(t, pluginRoot) {
+		if modes[skill] != routerModeStepBody {
+			continue
+		}
+		drove++
+		t.Run(skill, func(t *testing.T) {
+			overRoot := copyPluginTree(t, pluginRoot)
+			clean := renderRouter(t, overRoot, skill, false)
+			if clean.degraded {
+				t.Fatalf("the copied tree already degrades (%d chars) — this fixture could "+
+					"not be told apart from a real regression", clean.assembledLen)
+			}
+			// Pad a HEADER-resident fragment past the whole limit, not merely past the
+			// current payload: dropping fragments frees room, so only a header that alone
+			// exceeds the limit can prove the post-drop state. +500 mirrors the sibling
+			// fixtures' margin.
+			pad := routerHarnessHardLimit + 500
+			padFragment(t, filepath.Join(overRoot, ironRulesFragment), pad)
+
+			over := renderRouter(t, overRoot, skill, false)
+			if !over.degraded {
+				t.Fatalf("a %d-char step-body payload did not degrade — the harness would "+
+					"replace it with a ~%d-char preview silently, the aihub#285 failure",
+					clean.assembledLen+pad, routerPreviewChars)
+			}
+			if got := charLen(over.ctx); got == 0 || got > routerHarnessHardLimit {
+				t.Errorf("delivered payload is %d chars — must be non-empty and within %d",
+					got, routerHarnessHardLimit)
+			}
+			assertBannerLeads(t, over.ctx, over.stderr)
+			// The banner must describe the truncation that HAPPENED: the header was cut.
+			for _, want := range []string{
+				"THIS HEADER IS TRUNCATED",
+				"the resident rules — was cut",
+				"Treat any rule below as possibly incomplete",
+			} {
+				if !strings.Contains(over.ctx, want) {
+					t.Errorf("the delivered payload lost the banner sentence %q — the reader "+
+						"is not told the header itself was cut (stderr: %s)", want, over.stderr)
+				}
+			}
+			// ...and must NOT keep the fragment-blaming diagnosis: the fragments are all
+			// gone, recoverable, and not what the reader is missing.
+			for _, lie := range []string{
+				"THIS STEP BODY IS INCOMPLETE",
+				"This is a bug in the fragments",
+			} {
+				if strings.Contains(over.ctx, lie) {
+					t.Errorf("the banner still carries %q — it blames droppable fragments "+
+						"for a cut that took the header's resident rules", lie)
+				}
+			}
+			// Disk recovery for what IS recoverable stays: every dropped fragment is named.
+			for _, frag := range []string{
+				"_common/storage.md", "_common/memory.md", "_common/lifecycle.md",
+			} {
+				if !strings.Contains(over.ctx, frag) {
+					t.Errorf("the banner no longer names dropped fragment %s — the reader "+
+						"loses the pointer to the one part that IS on disk", frag)
+				}
+			}
+			if !strings.Contains(over.stderr, "over the 10000-char harness limit") {
+				t.Errorf("nothing usable on stderr for the over-budget payload: %q", over.stderr)
+			}
+			if !strings.Contains(over.stderr, "the header's tail was cut too") {
+				t.Errorf("stderr does not report the header cut — outside the model this "+
+					"state is indistinguishable from an ordinary fragment drop: %q", over.stderr)
+			}
+		})
+	}
+	if drove == 0 {
+		t.Error("no step-body skill in TARGETS — this test drove nothing; if the mode was " +
+			"removed, remove the test with it rather than leaving it green by vacancy")
+	}
+}
+
 // TestRoutedSkillHook_HeaderOnlyEmptyFragmentGuard is aihub#514 F5. In header-only mode the
 // resident rules ARE the payload: a render with iron-rules.md or output-format.md empty still
 // announced "the resident context a DISPATCHED subagent does not inherit" while carrying no

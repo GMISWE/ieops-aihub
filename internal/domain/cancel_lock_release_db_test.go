@@ -134,7 +134,7 @@ func TestCancelWorkItemReleasesEveryLockItStillHolds(t *testing.T) {
 	require.Nil(t, FnCompleteAttempt(ctx, pool, holder.ID, &CompleteAttemptRequest{
 		AttemptID: claim.AttemptID, ClaimEpoch: claim.ClaimEpoch,
 		SessionSecret: testSecret, Status: "paused",
-	}), "pause failed")
+	}, nil, ""), "pause failed")
 
 	// 🔴 NEGATIVE CONTROL, and the reason this test can conclude anything from an
 	// absence later. "the lock is gone" and "this query cannot see this lock" are

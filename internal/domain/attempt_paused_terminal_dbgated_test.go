@@ -96,7 +96,7 @@ func pausedAttemptFixture(t *testing.T, pool *pgxpool.Pool) (wiID, attemptID, se
 		SessionSecret: secret,
 		Status:        "paused",
 		PauseReason:   &reason,
-	})
+	}, nil, "")
 	require.Nil(t, aerr, "precondition: pausing the seeded attempt must succeed")
 
 	return wi.ID, attemptID, secret
@@ -172,7 +172,8 @@ func TestPausedAttemptTerminal_CompleteOnAPausedAttemptChangesNothing(t *testing
 		ClaimEpoch:    1,
 		SessionSecret: secret,
 		Status:        "wrapped",
-	})
+		Derived:       []string{},
+	}, nil, "")
 
 	require.NotNil(t, aerr, "completing a paused attempt must be refused")
 	assert.Equal(t, ErrAttemptPaused, aerr.Code,
@@ -234,7 +235,8 @@ func TestPausedAttemptTerminal_ResumeThenCompleteSucceeds(t *testing.T) {
 		ClaimEpoch:    resumed.ClaimEpoch,
 		SessionSecret: "aihub421-resumed-fedcba9876543210fedcba9876543210fedcba98",
 		Status:        "wrapped",
-	})
+		Derived:       []string{},
+	}, nil, "")
 	require.Nil(t, aerr, "after a resume the terminal transition must go through: %+v", aerr)
 
 	var wiStatus string
@@ -282,7 +284,8 @@ func TestPausedAttemptTerminal_ResumeDoesNotRevivateTheOldCredential(t *testing.
 		ClaimEpoch:    1,
 		SessionSecret: oldSecret,
 		Status:        "wrapped",
-	})
+		Derived:       []string{},
+	}, nil, "")
 
 	require.NotNil(t, aerr,
 		"the pre-pause credential must stay dead after a resume; recovery mints a new attempt, "+
@@ -360,7 +363,8 @@ func TestPausedAttemptTerminal_AnEndedAttemptAnswersMismatchNotPaused(t *testing
 		ClaimEpoch:    1,
 		SessionSecret: secret,
 		Status:        "wrapped",
-	})
+		Derived:       []string{},
+	}, nil, "")
 
 	require.NotNil(t, aerr, "an ended attempt must not be able to wrap")
 	assert.Equal(t, ErrAttemptMismatch, aerr.Code,

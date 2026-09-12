@@ -788,6 +788,8 @@ func runLiveKeyWalk(t *testing.T, w *liveKeyWalk) {
 	w.drive(t, "pf_complete_attempt", map[string]any{
 		"work_item_id": wiID, "status": "wrapped",
 		"note": "the live response-key walk finished with this work item",
+		// aihub#350: a wrap that omits derived is refused before any request.
+		"derived": []any{},
 		// The walk left `plan` in progress; without this the server answers 409
 		// CONFLICT_STEP_IN_PROGRESS and the tool goes unmeasured.
 		"force_terminate_step": true,

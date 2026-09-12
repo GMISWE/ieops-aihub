@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -975,11 +976,111 @@ type CompleteAttemptRequest struct {
 	Status             string  `json:"status"` // "wrapped" | "failed" | "paused"
 	ForceTerminateStep bool    `json:"force_terminate_step"`
 	PauseReason        *string `json:"pause_reason,omitempty"`
+	// Derived is the disposition list for findings this attempt produced but
+	// did not fix (aihub#350). REQUIRED on status=wrapped: nil (absent or JSON
+	// null) is refused rather than defaulted to empty, because an omitted list
+	// and "I declare there were no findings" are different statements and the
+	// whole gate exists to force the second to be made on purpose. A non-nil
+	// empty slice ([] on the wire) is that explicit declaration and is legal.
+	// Entry grammar is ValidateDerived's; filed: refs are additionally resolved
+	// against work_items inside the wrap transaction.
+	Derived []string `json:"derived"`
+}
+
+// Derived-disposition entry prefixes (aihub#350). One entry per finding the
+// attempt noticed and did not fix:
+//
+//	folded            recorded in this wi's record (wrap note / PR body), not
+//	                  tracked separately. The DEFAULT, and deliberately the
+//	                  cheapest legal entry: the bare verb is a complete entry,
+//	                  and "folded:<text>" is accepted so that attaching the
+//	                  finding's one-line summary costs nothing extra either.
+//	filed:<ref>       a new work item was really opened; <ref> is its id or
+//	                  slug and must resolve, which is checked in the wrap
+//	                  transaction rather than here (it needs the database).
+//	dropped:<reason>  judged not worth tracking. The reason is REQUIRED - a
+//	                  drop with no stated basis is indistinguishable from a
+//	                  finding that fell on the floor, which is the exact event
+//	                  this field exists to make impossible to do silently.
+//
+// The asymmetry is the point of aihub#350, not a nicety: measured 2026-09-02,
+// 18 of 24 derived open work items had an already-wrapped parent, because
+// filing a new wi cost one call and folding cost remembering not to make it.
+// folded is bare, the other two demand a payload, so the cheapest compliant
+// entry is now the one that leaves no queue residue.
+const (
+	derivedFolded        = "folded"
+	derivedFiledPrefix   = "filed:"
+	derivedDroppedPrefix = "dropped:"
+)
+
+// ValidateDerived checks the SHAPE of a derived-disposition list: every entry
+// must be "folded", "folded:<text>", "filed:<ref>" or "dropped:<reason>", with
+// the payload non-blank where the form demands one. It does not touch the
+// database - filed: existence is the wrap transaction's half - and it does not
+// decide presence: nil and empty are both shape-valid here, because "must the
+// list exist at all" depends on the status and belongs to the caller.
+//
+// Exported because both hops run it (aihub#452's two-hop precedent): the MCP
+// handler refuses a malformed list BEFORE emitting the closing note, and
+// FnCompleteAttempt refuses it before opening a transaction, so the two
+// refusals cannot drift apart the way two hand-written copies would.
+func ValidateDerived(derived []string) *AihubError {
+	for i, entry := range derived {
+		switch {
+		case entry == derivedFolded || strings.HasPrefix(entry, derivedFolded+":"):
+			// The bare verb is complete; a "folded:" payload is optional and
+			// unchecked. Refusing "folded:" with blank text would make the
+			// default disposition stricter than dropped:, which points the
+			// friction the wrong way.
+		case strings.HasPrefix(entry, derivedFiledPrefix):
+			if strings.TrimSpace(entry[len(derivedFiledPrefix):]) == "" {
+				return NewErr(ErrBadRequest, fmt.Sprintf(
+					"derived[%d] is %q with no work item after the colon; filed: claims a wi was "+
+						"really opened, so it must name that wi's id or slug", i, entry))
+			}
+		case strings.HasPrefix(entry, derivedDroppedPrefix):
+			if strings.TrimSpace(entry[len(derivedDroppedPrefix):]) == "" {
+				return NewErr(ErrBadRequest, fmt.Sprintf(
+					"derived[%d] is %q with no reason after the colon; dropped: is a judgement "+
+						"call and the reason is what makes it reviewable", i, entry))
+			}
+		default:
+			return NewErr(ErrBadRequest, fmt.Sprintf(
+				"derived[%d] = %q is not a disposition; each entry must be \"folded\" "+
+					"(optionally \"folded:<text>\"), \"filed:<wi id or slug>\" or "+
+					"\"dropped:<reason>\"", i, entry))
+		}
+	}
+	return nil
+}
+
+// derivedFiledRefs extracts the filed: targets from a shape-valid derived list,
+// trimmed, in order. Split out so the resolution loop in FnCompleteAttempt and
+// the tests that pin it read one definition of "which entries name a wi".
+func derivedFiledRefs(derived []string) []string {
+	var refs []string
+	for _, entry := range derived {
+		if strings.HasPrefix(entry, derivedFiledPrefix) {
+			refs = append(refs, strings.TrimSpace(entry[len(derivedFiledPrefix):]))
+		}
+	}
+	return refs
 }
 
 // FnCompleteAttempt implements the complete_attempt transaction.
 // Implements H-R9-11: if wi.status='paused', auto-force_terminate the step first.
-func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req *CompleteAttemptRequest) *AihubError {
+//
+// callerProjectRoles / callerRole scope which work items a derived "filed:<ref>"
+// entry may name, exactly as they scope blocked_by on the create path (see
+// resolveBlockedByRef, where they are the security boundary): the wi's own
+// project is always visible, and beyond it only projects the caller holds a role
+// in. They are parameters rather than request fields for the reason
+// CreateWorkItem states - the request is bound from the wire, so a field could
+// be supplied by the caller. Passing nil and "" means "nothing beyond this wi's
+// project is visible", which is the safe reading and what non-HTTP callers want.
+func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req *CompleteAttemptRequest,
+	callerProjectRoles map[string]string, callerRole string) *AihubError {
 	if req.Status != "wrapped" && req.Status != "failed" && req.Status != "paused" {
 		return NewErr(ErrBadRequest, "status must be wrapped, failed, or paused")
 	}
@@ -1015,6 +1116,57 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 				"drop pause_reason or use note, which is recorded on every status", req.Status))
 	}
 
+	// aihub#350: a wrap must disposition the findings it produced but did not
+	// fix, and "must" here means REFUSED, not defaulted. Measured 2026-09-02
+	// over all 349 aihub work items: 18 of 24 derived open items had a parent
+	// that was already wrapped - the open queue is sediment deposited at exactly
+	// this transition, when a parent wrapped and its findings' default fate was
+	// "whatever the agent happened to do". nil therefore cannot silently become
+	// []: an omitted list and an explicit "no findings" are different statements,
+	// and only the second is one the caller can be held to.
+	//
+	// The refusal sits HERE, on the server-side transition, and not only in a
+	// scenario template, because a third of derived inflow crosses projects
+	// (16 of 49 measured): a wrap in ieops or tether that files into aihub never
+	// passes through any aihub-project template, but it does pass through this
+	// function.
+	//
+	// 🔴 What this guard does NOT claim: that the list is truthful. The server
+	// cannot read the closing note's prose, so declaring [] while the note lists
+	// three findings is accepted. The gate moves the friction - folding is now
+	// the cheapest legal entry and filing demands a resolvable ref - it does not
+	// make honesty checkable, and pretending otherwise would be a gate that
+	// catches nothing (the wi says so in as many words).
+	//
+	// Refused BEFORE BeginTx, next to the status and pause_reason guards, for
+	// the same two reasons they sit there: the request is decided on its own
+	// contents without a database round-trip, and the nil-pool test instrument
+	// can then exercise the real function (complete_attempt_derived_guard_test.go).
+	// Only the filed: existence half waits for the transaction below.
+	if req.Status == "wrapped" {
+		if req.Derived == nil {
+			return NewErr(ErrBadRequest,
+				"derived is required to wrap: list a disposition per finding this attempt noticed "+
+					"but did not fix - \"folded\" (kept in this wi's record; the default), "+
+					"\"filed:<wi id or slug>\" (a new wi you really opened), or \"dropped:<reason>\". "+
+					"Found nothing? Send derived: [] explicitly - an omitted list is refused because "+
+					"it cannot be told apart from findings nobody dispositioned")
+		}
+		if aerr := ValidateDerived(req.Derived); aerr != nil {
+			return aerr
+		}
+	} else if len(req.Derived) > 0 {
+		// Same posture as pause_reason above (aihub#452): a non-empty value on a
+		// status that stores nothing is refused rather than dropped, because a
+		// caller who stated dispositions and got a 200 would believe them
+		// recorded. An EMPTY list on paused/failed states nothing and is let
+		// through untouched.
+		return NewErr(ErrBadRequest, fmt.Sprintf(
+			"derived is recorded only when status=\"wrapped\", but status=%q was sent with %d "+
+				"dispositions; wrap the attempt to record them, or put the findings in note",
+			req.Status, len(req.Derived)))
+	}
+
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return NewErr(ErrInternalError, "failed to begin transaction")
@@ -1045,6 +1197,27 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	// Verify attempt credential
 	if aihubErr := verifyAttemptCredential(ctx, tx, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); aihubErr != nil {
 		return aihubErr
+	}
+
+	// aihub#350: every filed:<ref> must resolve to a work item the caller can
+	// see, or the wrap is refused whole - filed: is the claim "I really opened a
+	// wi for this", and an unresolvable ref is that claim made about nothing.
+	// Resolution goes through resolveVisibleRefOnTx, the same statement
+	// blocked_by and parent_work_item_id resolve through, so a hidden work item
+	// answers exactly like an absent one and this field cannot become the
+	// existence oracle aihub#377 closed elsewhere. Cross-project refs are legal
+	// on purpose - a third of measured derived inflow crosses projects - scoped
+	// to the projects the caller holds a role in.
+	//
+	// AFTER verifyAttemptCredential, deliberately: resolution answers "does this
+	// wi exist", and that answer is not owed to a caller whose credential is bad.
+	if req.Status == "wrapped" {
+		for _, ref := range derivedFiledRefs(req.Derived) {
+			if _, aihubErr := resolveVisibleRefOnTx(ctx, tx, "derived filed:", ref, wi.Project,
+				callerProjectRoles, callerRole); aihubErr != nil {
+				return aihubErr
+			}
+		}
 	}
 
 	// H-R9-11: if there is a step in_progress and status=paused, force_terminate it first
@@ -1086,9 +1259,21 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	if req.Status != "paused" {
 		pauseReason = nil
 	}
+	// aihub#350: derived is written on wrapped and on nothing else, from the
+	// same normalisation discipline as pause_reason one line up - the guard
+	// before BeginTx has already refused a non-empty list on any other status,
+	// and this keeps the residue (an explicit [] sent with paused/failed, which
+	// states nothing) from landing as '[]' where NULL is the honest value.
+	// On wrapped the guard guarantees req.Derived is non-nil, so [] marshals as
+	// '[]' and "explicitly declared no findings" stays distinguishable from
+	// "completed before the gate existed". json.Marshal of []string cannot fail.
+	var derivedJSON []byte
+	if req.Status == "wrapped" {
+		derivedJSON, _ = json.Marshal(req.Derived)
+	}
 	_, err = tx.Exec(ctx, `
-		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2 WHERE id=$3`,
-		req.Status, pauseReason, req.AttemptID,
+		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2, derived=$3 WHERE id=$4`,
+		req.Status, pauseReason, derivedJSON, req.AttemptID,
 	)
 	if err != nil {
 		return dbErr(err, "failed to update run_attempt status")
@@ -1150,6 +1335,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	// disagree about whether a reason was recorded (aihub#452).
 	if pauseReason != nil {
 		evtPayloadMap["pause_reason"] = *pauseReason
+	}
+	// aihub#350: same discipline for derived - the event carries exactly what
+	// the column write got, so the timeline (the only record that survives the
+	// state file's deletion) and the row cannot disagree about what was
+	// dispositioned. Present on wrapped only, like the column.
+	if derivedJSON != nil {
+		evtPayloadMap["derived"] = req.Derived
 	}
 	evtPayload, _ := json.Marshal(evtPayloadMap)
 	// aihub#492: see bestEffortExec. This is the same defect the

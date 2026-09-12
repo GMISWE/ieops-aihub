@@ -402,8 +402,8 @@ func TestLockEventsDB_EveryMutationSiteEmits(t *testing.T) {
 		}
 		if aerr := FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 			AttemptID: claim.AttemptID, ClaimEpoch: claim.ClaimEpoch,
-			SessionSecret: testSecret, Status: "wrapped",
-		}); aerr != nil {
+			SessionSecret: testSecret, Status: "wrapped", Derived: []string{},
+		}, nil, ""); aerr != nil {
 			t.Fatalf("complete: %v", aerr)
 		}
 		got := lockEventsOfCause(projectEvents(t, pool, proj), EventLockReleased, lockCauseAttemptTerminal)
@@ -442,7 +442,7 @@ func TestLockEventsDB_EveryMutationSiteEmits(t *testing.T) {
 		if aerr := FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 			AttemptID: claim.AttemptID, ClaimEpoch: claim.ClaimEpoch,
 			SessionSecret: testSecret, Status: "paused",
-		}); aerr != nil {
+		}, nil, ""); aerr != nil {
 			t.Fatalf("complete paused: %v", aerr)
 		}
 		events := projectEvents(t, pool, proj)

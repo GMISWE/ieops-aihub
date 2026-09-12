@@ -166,7 +166,7 @@ func TestCompleteAttemptForwardsPauseReason(t *testing.T) {
 // FnCompleteAttempt writes to the column unconditionally — turning "this attempt
 // was not paused" into "paused for no stated reason" on 560 wraps out of 605.
 func TestCompleteAttemptOmitsPauseReasonWhenAbsent(t *testing.T) {
-	body := completeAttemptPauseReason(t, map[string]any{"status": "wrapped"})
+	body := completeAttemptPauseReason(t, map[string]any{"status": "wrapped", "derived": []any{}})
 	if v, present := body["pause_reason"]; present {
 		t.Errorf("pf_complete_attempt sent pause_reason=%#v on a wrap that supplied none — an "+
 			"unguarded assignment writes an empty reason to run_attempts.pause_reason for every "+
@@ -288,6 +288,7 @@ func TestCompleteAttemptWrapWithEmptyPauseReasonIsNotRefused(t *testing.T) {
 	body := completeAttemptPauseReason(t, map[string]any{
 		"status":       "wrapped",
 		"pause_reason": "",
+		"derived":      []any{},
 	})
 	if body["status"] != "wrapped" {
 		t.Errorf("status = %#v, want \"wrapped\"", body["status"])

@@ -542,6 +542,7 @@ func TestSlugAddressedWrapCompletesUnderTheCanonicalID(t *testing.T) {
 		"repo":         "aihub",
 		"pr_title":     "resolved by slug",
 		"pr_body":      "body",
+		"derived":      []any{},
 	}, 60*time.Second)
 	if isErr {
 		t.Fatalf("pf_wrap failed: %v\n"+

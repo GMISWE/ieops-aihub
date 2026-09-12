@@ -385,6 +385,7 @@ func TestForceTakeoverNewAttempt(t *testing.T) {
 			"attempt_id":  newAttemptID,
 			"claim_epoch": newEpoch,
 			"status":      "wrapped",
+			"derived":     []string{},
 		})
 	} else {
 		_, err = adminC.CompleteAttempt(ctx, newAttemptID, map[string]any{
@@ -392,6 +393,7 @@ func TestForceTakeoverNewAttempt(t *testing.T) {
 			"claim_epoch":    newEpoch,
 			"session_secret": newSecret,
 			"status":         "wrapped",
+			"derived":        []string{},
 		})
 	}
 	if err != nil {

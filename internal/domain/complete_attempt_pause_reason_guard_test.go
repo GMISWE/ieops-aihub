@@ -54,7 +54,7 @@ func runCompleteAttemptRequestChecks(t *testing.T, req *CompleteAttemptRequest) 
 			v = completeAttemptVerdict{ReachedPool: true}
 		}
 	}()
-	if aerr := FnCompleteAttempt(context.Background(), nil, "wi_452guard", req); aerr != nil {
+	if aerr := FnCompleteAttempt(context.Background(), nil, "wi_452guard", req, nil, ""); aerr != nil {
 		if aerr.Code != ErrBadRequest {
 			t.Fatalf("FnCompleteAttempt refused with code %q, want %q — the refusal has to be a "+
 				"request error the caller can act on, not a server fault", aerr.Code, ErrBadRequest)
@@ -154,6 +154,9 @@ func TestCompleteAttemptAllowsEmptyPauseReasonOnTerminal(t *testing.T) {
 	v := runCompleteAttemptRequestChecks(t, &CompleteAttemptRequest{
 		Status:      "wrapped",
 		PauseReason: strp(""),
+		// aihub#350: a wrap must carry a derived list or it is refused before
+		// this arm's subject - the pause_reason residue - is ever reached.
+		Derived: []string{},
 	})
 	if !v.ReachedPool {
 		t.Fatalf("FnCompleteAttempt refused a wrap carrying an EMPTY pause_reason: %q.\n"+

@@ -3,9 +3,13 @@
 ```json
 {
   "tool": "pf_complete_attempt",
-  "description_sha256": "3071ac903f2a848c7ce3531253ea0c9b665d68260c8dede7cb7eb66adada0ba1",
-  "input_schema_sha256": "ed855b04f59b06b43b339c55136f01c13dd45b784008bfdb4f3e317a00b8c89e",
+  "description_sha256": "4ec095b52008327a117469cabd90cc52a66dbc1c51cd2fe75b089849e084a580",
+  "input_schema_sha256": "ded51dfef13981256d43f3cdc2717a824be84b048a0d8b5d4048d07e1d822c2c",
   "params": {
+    "derived": {
+      "type": "array",
+      "required": false
+    },
     "force_terminate_step": {
       "type": "boolean",
       "required": false
@@ -38,8 +42,8 @@
 
 ## hop 0-1 — what the caller is told
 
-Five parameters. The description's second sentence is an ordering constraint rather
-than a convenience note: this call deletes the credentials `pf_emit_event` needs, so
+Six parameters. The description's ordering sentence is a constraint rather than a
+convenience note: this call deletes the credentials `pf_emit_event` needs, so
 a note emitted afterwards cannot authenticate — the published statement and the
 order the tool really uses are compared in one arm by
 `internal/mcp/complete_attempt_wire_shape_test.go`
@@ -54,10 +58,24 @@ order the tool really uses are compared in one arm by
 | `force_terminate_step` | boolean | no | force-terminate an in-progress step |
 | `note` | string | no | closing note recorded BEFORE the attempt is completed (`TestPublishedNoteOrderingIsTheOrderTheToolUses`) |
 | `pause_reason` | string | no | read only when `status="paused"`, and refused with any other status |
+| `derived` | array | on wrap | required when `status="wrapped"` and refused if omitted — dispositions for findings the attempt did not fix; `[]` legal, absence refused (`TestCompleteAttemptDerivedIsRequiredBeforeTheNote`) |
 
 `note` exists because the closing note and the terminal call were always two
 round-trips in a fixed order — 201 measured adjacent pairs, 0.325% of billed input —
 and the second read nothing out of the first.
+
+`derived` (`aihub#350`) exists because of a measured deposition mechanism: of 24
+internally-derived open work items on 2026-09-02, 18 had a parent that was already
+wrapped — the queue grows as residue left at exactly this transition, and filing a
+new wi cost one call while folding a finding into the parent's record cost
+remembering not to make it. The field's entry grammar is the friction inverted:
+`folded` travels bare (with `folded:<text>` optional), `filed:<wi id or slug>` must
+name a work item that resolves, `dropped:<reason>` must state its reason — the
+cheapest legal entry is now the one that leaves no queue residue, held with the
+real domain function by `internal/domain/complete_attempt_derived_guard_test.go`
+(`TestFoldedIsTheCheapestLegalDerivedEntry`). The gate is server-side rather than
+template-side because a third of the measured derived inflow crosses projects
+(16 of 49), and a wrap in another project never meets an aihub template.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -92,6 +110,32 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   (`TestCompleteAttemptBodyForwardsTheFlagUngatedAndCarriesNoNote`) and the event it
   becomes instead by `internal/mcp/tools_fusion_test.go`
   (`TestFusedNoteReachesTimelineBeforeTerminalCall`).
+- **`derived` is refused at this hop, before the note, when a wrap omits it or
+  shapes it wrongly** — the aihub#452 placement, so a declined call writes nothing —
+  driven with a note attached and the empty request list asserted by
+  `internal/mcp/derived_wire_shape_test.go`
+  (`TestCompleteAttemptDerivedIsRequiredBeforeTheNote`,
+  `TestCompleteAttemptDerivedShapeIsRefusedBeforeTheNote`). The shape check is
+  `internal/domain/run_attempts.go` (`ValidateDerived`), the server's own function,
+  and that the two hops share one authority is held by
+  `internal/domain/complete_attempt_derived_guard_test.go`
+  (`TestValidateDerivedIsTheSharedShapeAuthority`).
+- **When supplied, `derived` is forwarded verbatim, INCLUDING empty** — `[]` is the
+  explicit "no findings" declaration and must reach hop 3 as `[]`, while a call that
+  never sent the field produces a body with no `derived` key at all, both read off
+  the recorded body by `internal/mcp/derived_wire_shape_test.go`
+  (`TestCompleteAttemptDerivedTravelsVerbatimIncludingEmpty`,
+  `TestCompleteAttemptSendsNoDerivedKeyWhenAbsent`).
+- **A non-empty `derived` sent with `paused` or `failed` is refused by the SERVER's
+  pre-transaction guard alone**, held by
+  `internal/domain/complete_attempt_derived_guard_test.go`
+  (`TestDerivedIsRefusedOnNonWrappedStatuses`); this hop deliberately leaves that
+  combination to the server, because a hop-2 gate keyed on it would make this tool's
+  other parameters unmeasurable to the aihub#419 G1 probe, whose `status` for this
+  tool is pinned to `"paused"` while `derived` travels meaningfully only on
+  `"wrapped"`. The cost of that placement is stated in
+  `internal/mcp/derived_wire_shape_test.go`'s package comment rather than restated
+  here.
 
 ## hop 4 — what it actually does
 
@@ -160,6 +204,52 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   `internal/mcp/complete_attempt_wire_shape_test.go`
   (`TestTheRefusalNamesNoteAsTheFieldThatRecordsOnEveryStatus`) drives on all three
   statuses and against the refusal's own text.
+- **A wrap that omits `derived` is refused, never defaulted** (`aihub#350`) — nil
+  and `[]` are different statements, only the second is one the caller can be held
+  to, and both directions are exercised against a nil pool by
+  `internal/domain/complete_attempt_derived_guard_test.go`
+  (`TestCompleteAttemptRefusesAWrapWithoutDerived`,
+  `TestCompleteAttemptAcceptsAnExplicitlyEmptyDerived`). The refusal sits before
+  `BeginTx` next to the status and pause_reason guards, with the status check still
+  first (`TestDerivedStatusValidationStillFirst`).
+- **Every `filed:<ref>` must resolve to a work item the caller can see, or the wrap
+  refuses WHOLE** — attempt still running, work item untouched, no
+  `attempt_completed` event — held with a real database by
+  `internal/domain/complete_attempt_derived_db_test.go`
+  (`TestWrapFiledMustNameAnExistingWorkItem`). Resolution goes through
+  `internal/domain/work_items.go` (`resolveVisibleRefOnTx`), the same statement
+  `blocked_by` resolves through, so a hidden work item answers exactly like an
+  absent one and the field is not a new existence oracle; cross-project refs — a
+  third of the measured inflow — resolve exactly when the caller holds a role in
+  the target project (`TestWrapFiledCrossProjectIsScopedByCallerRoles`). Which
+  entries the loop resolves, and with what trimming, is pinned by
+  `internal/domain/complete_attempt_derived_guard_test.go`
+  (`TestDerivedFiledRefsExtraction`).
+- **On wrapped, the list lands on `run_attempts.derived` (migration 0040) and in the
+  `attempt_completed` payload, from one value** — so the row and the timeline cannot
+  disagree; `[]` is stored as `[]`, never normalised to `NULL`, and a pause stores
+  `NULL` whatever the request carried — all three held by
+  `internal/domain/complete_attempt_derived_db_test.go`
+  (`TestWrapDerivedFoldedLeavesNoNewWorkItem`,
+  `TestWrapDerivedExplicitEmptyIsStoredAsEmptyNotNull`,
+  `TestWrapDerivedIsNotWrittenOnNonWrappedCompletions`). A column rather than
+  `attrs`, because a plain `attrs` write is a whole-column REPLACE that destroys
+  every key it does not resend — held by
+  `internal/domain/work_items_attrs_db_test.go`
+  (`TestUpdateWorkItemAttrs_ReplaceStillDestroysUnsentKeys`) — so a disposition
+  parked there is one careless write away from vanishing.
+- **The default disposition provably leaves no queue residue**: a wrap whose only
+  entry is a fold succeeds and moves the project's work-item count by zero, driven
+  end to end by `internal/domain/complete_attempt_derived_db_test.go`
+  (`TestWrapDerivedFoldedLeavesNoNewWorkItem`).
+- 🔴 **What the gate does NOT hold: honesty.** The cheapest compliant call would be
+  `derived: []` from an attempt that found three things, and catching it would need
+  a read of the note's prose this transaction does not make.
+  The gate moves which disposition is cheapest — the same posture
+  polyforge-scenario#11's A/B/C wrap tags take on the template side — and the
+  parameter description says "The server cannot check the list against the note's
+  prose, so its honesty is yours" rather than implying an enforcement that is not
+  there.
 
 ## hop 5 — what comes back
 

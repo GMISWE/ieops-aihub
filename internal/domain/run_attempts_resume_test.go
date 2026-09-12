@@ -81,7 +81,7 @@ func TestResumeOwnLocks_NoSelfConflict(t *testing.T) {
 		t.Fatalf("first claim acquired no locks; declared_resources mapping may be broken")
 	}
 
-	// Pause: FnCompleteAttempt(status=paused) only releases file_scope locks
+	// Pause: FnCompleteAttempt(status=paused, nil, "") only releases file_scope locks
 	// acquired MID-ATTEMPT via pf_acquire_locks (acquireLocksReleasePausedSQL).
 	// Locks derived from declared_resources at CLAIM time are untouched by
 	// pause, so this attempt keeps holding the file_scope lock while paused
@@ -91,7 +91,7 @@ func TestResumeOwnLocks_NoSelfConflict(t *testing.T) {
 		ClaimEpoch:    claim1.ClaimEpoch,
 		SessionSecret: "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234567",
 		Status:        "paused",
-	}); aerr != nil {
+	}, nil, ""); aerr != nil {
 		t.Fatalf("pause: %v", aerr)
 	}
 

@@ -181,7 +181,7 @@ func credentialedTools(wiID string) []credentialedTool {
 			"work_item_id": wiID, "step_id": "execute", "status": "in_progress",
 		}},
 		{"pf_complete_attempt", map[string]any{
-			"work_item_id": wiID, "status": "wrapped",
+			"work_item_id": wiID, "status": "wrapped", "derived": []any{},
 		}},
 		{"pf_pause_attempt", map[string]any{
 			"work_item_id": wiID,

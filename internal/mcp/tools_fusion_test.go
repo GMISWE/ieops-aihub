@@ -177,6 +177,7 @@ func TestFusedNoteReachesTimelineBeforeTerminalCall(t *testing.T) {
 		"work_item_id": wiID,
 		"status":       "wrapped",
 		"note":         "wrapped: fused the adjacent round-trips",
+		"derived":      []any{},
 	})
 	if isErr {
 		t.Fatalf("pf_complete_attempt failed: %v", result)
@@ -217,7 +218,7 @@ func TestFusedNoteAbsentMeansNoEvent(t *testing.T) {
 	f := newFakeAihub(t)
 
 	result, isErr := callTool(t, f, "pf_complete_attempt", map[string]any{
-		"work_item_id": wiID, "status": "wrapped",
+		"work_item_id": wiID, "status": "wrapped", "derived": []any{},
 	})
 	if isErr {
 		t.Fatalf("pf_complete_attempt failed: %v", result)
@@ -245,6 +246,7 @@ func TestFusedNoteFailureIsReportedNotSwallowed(t *testing.T) {
 
 	result, isErr := callTool(t, f, "pf_complete_attempt", map[string]any{
 		"work_item_id": wiID, "status": "wrapped", "note": "wrapped: something",
+		"derived": []any{},
 	})
 	if isErr {
 		t.Fatalf("a failed note must not fail the wrap: %v", result)

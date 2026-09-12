@@ -143,7 +143,7 @@ func TestAttemptStatusVocabulary_CancelEndsTheLiveAttempt(t *testing.T) {
 	require.Nil(t, FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 		AttemptID: attemptID, ClaimEpoch: 1, SessionSecret: secret,
 		Status: "paused", PauseReason: &reason,
-	}), "precondition: pausing the seeded attempt must succeed")
+	}, nil, ""), "precondition: pausing the seeded attempt must succeed")
 
 	var wiStatus, attemptStatus string
 	require.NoError(t, pool.QueryRow(ctx,
@@ -204,7 +204,7 @@ func TestAttemptStatusVocabulary_ACancelledAttemptAnswersMismatchNotPaused(t *te
 	require.Nil(t, FnCompleteAttempt(ctx, pool, wi.ID, &CompleteAttemptRequest{
 		AttemptID: attemptID, ClaimEpoch: 1, SessionSecret: secret,
 		Status: "paused", PauseReason: &reason,
-	}))
+	}, nil, ""))
 
 	// CONTROL FIRST, while the work item is merely paused. This is the aihub#209
 	// property the change must leave alone, and running it before the cancel

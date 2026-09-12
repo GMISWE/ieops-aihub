@@ -112,6 +112,7 @@ func TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote(t *testing.
 			"repo":         "aihub",
 			"pr_title":     "probe the wrap body",
 			"pr_body":      "body",
+			"derived":      []any{},
 		}, 60*time.Second)
 		if isErr {
 			t.Fatalf("pf_wrap failed: %v", result)
@@ -138,7 +139,7 @@ func TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote(t *testing.
 				"refusal — and the duplicate note the next arm measures — happen at all. Setting "+
 				"it here would silently force-terminate somebody's running step on every wrap.", v)
 		}
-		want := append([]string{"status"}, completeAttemptCredentials...)
+		want := append([]string{"status", "derived"}, completeAttemptCredentials...)
 		sort.Strings(want)
 		if got := sortedBodyKeys(body); len(got) != len(want) {
 			t.Errorf("pf_wrap's completion body carries %v, want exactly %v", got, want)
@@ -167,6 +168,7 @@ func TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote(t *testing.
 				"pr_title":     "probe the wrap retry",
 				"pr_body":      "body",
 				"note":         note,
+				"derived":      []any{},
 			}, 60*time.Second)
 			if !isErr {
 				t.Fatalf("attempt %d succeeded against a server that refused the completion: %v — "+

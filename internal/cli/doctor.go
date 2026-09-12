@@ -258,7 +258,7 @@ func checkConfig(ctx context.Context, c *client.Client, endpoint, source string)
 		return checkResult{
 			Name:   "config",
 			Status: "warning",
-			Message: fmt.Sprintf("no API key, so nothing was contacted — the endpoint would be %s (%s)",
+			Message: fmt.Sprintf("no API key, so nothing was contacted; the endpoint would be %s (%s)",
 				endpoint, source),
 			FixCmd: "put your key in ~/.polyforge/config.toml under [auth] api_key " +
 				"(or export POLYFORGE_API_KEY)",
@@ -273,7 +273,7 @@ func checkConfig(ctx context.Context, c *client.Client, endpoint, source string)
 		}
 	}
 	res := healthVerdict(health)
-	res.Message = fmt.Sprintf("%s (%s) — %s", endpoint, source, res.Message)
+	res.Message = fmt.Sprintf("%s (%s): %s", endpoint, source, res.Message)
 	return res
 }
 
@@ -340,7 +340,7 @@ func healthVerdict(health map[string]any) checkResult {
 	}
 	if len(problems) == 0 && status == "degraded" {
 		problems = append(problems, "server reports status=degraded but names no dependency "+
-			"this client knows how to read — check the server log")
+			"this client knows how to read; check the server log")
 	}
 
 	var unreadable []string
@@ -371,7 +371,7 @@ func healthVerdict(health map[string]any) checkResult {
 
 	switch {
 	case len(problems) > 0:
-		msg := "aihub reachable but degraded — " + strings.Join(problems, "; ") + suffix
+		msg := "aihub reachable but degraded: " + strings.Join(problems, "; ") + suffix
 		if len(unreadable) > 0 {
 			msg += fmt.Sprintf("; also could not read %s from the health body", strings.Join(unreadable, ", "))
 		}
@@ -379,7 +379,7 @@ func healthVerdict(health map[string]any) checkResult {
 	case len(unreadable) > 0:
 		return checkResult{Name: name, Status: "warning",
 			Message: fmt.Sprintf("aihub reachable, but %s came back as a non-boolean, so its health "+
-				"could not be read — this is 'did not look', not 'looked and found nothing'%s",
+				"could not be read; this is 'did not look', not 'looked and found nothing'%s",
 				strings.Join(unreadable, ", "), suffix)}
 	}
 	return checkResult{Name: name, Status: "ok", Message: "aihub reachable" + suffix}
@@ -681,7 +681,7 @@ func checkRepos(wsRoot string, cfg *config.Config) checkResult {
 		// path. Naming a command that cannot repair the thing it is offered for
 		// is the same defect as --apply, one step further down.
 		fixCmd = "polyforge init (clones what is missing; a remote mismatch needs " +
-			"`git -C .repo/<name> remote set-url origin <url>` by hand — init only fetches and resets)"
+			"`git -C .repo/<name> remote set-url origin <url>` by hand; init only fetches and resets)"
 	}
 	return checkResult{
 		Name:    "repos",
@@ -984,21 +984,21 @@ func verifyOrphan(ctx context.Context, c *client.Client, dir string) orphanVerdi
 		// the last thing that should be deleted without being asked about.
 		return orphanVerdict{Dir: dir, Kind: verdictUnknown,
 			Note: "not a name polyforge produces (expected pf.<project>-<seq>, pf.<ulid8> or " +
-				"pf.<seq>.<ulid8>) — nothing to look up, so no status could be checked"}
+				"pf.<seq>.<ulid8>); nothing to look up, so no status could be checked"}
 	}
 	wi, err := c.GetWorkItem(ctx, key)
 	if err != nil {
 		return orphanVerdict{Dir: dir, Key: key, Kind: verdictUnknown,
-			Note: fmt.Sprintf("could not read %s: %v — refusing to delete on an unread work item", key, err)}
+			Note: fmt.Sprintf("could not read %s: %v; refusing to delete on an unread work item", key, err)}
 	}
 	status, _ := wi["status"].(string)
 	if status == "" {
 		return orphanVerdict{Dir: dir, Key: key, Kind: verdictUnknown,
-			Note: fmt.Sprintf("%s came back without a status field — refusing to delete", key)}
+			Note: fmt.Sprintf("%s came back without a status field; refusing to delete", key)}
 	}
 	if !isTerminalWIStatus(status) {
 		return orphanVerdict{Dir: dir, Key: key, Status: status, Kind: verdictActive,
-			Note: fmt.Sprintf("%s is %s, not a terminal state — its worktree may hold uncommitted work. "+
+			Note: fmt.Sprintf("%s is %s, not a terminal state; its worktree may hold uncommitted work. "+
 				"That it was selected at all means the active listing missed it; please report that", key, status)}
 	}
 	return orphanVerdict{Dir: dir, Key: key, Status: status, Kind: verdictTerminal,
@@ -1076,7 +1076,7 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	if c == nil || cfg == nil {
 		return checkResult{Name: "worktrees", Status: "warning",
 			Message: fmt.Sprintf("%d worktrees found, but they could not be cross-referenced "+
-				"(no aihub client or no .polyforge.yaml) — this is 'did not look', not 'none orphaned'", len(wt))}
+				"(no aihub client or no .polyforge.yaml); this is 'did not look', not 'none orphaned'", len(wt))}
 	}
 
 	var candidates []string
@@ -1131,7 +1131,7 @@ func checkWorktrees(ctx context.Context, c *client.Client, cfg *config.Config, w
 	msg := fmt.Sprintf("%d orphan worktrees: %s", len(listed), strings.Join(listed, ", "))
 	if blockers > 0 {
 		msg += fmt.Sprintf("; %d of them are NOT safe to remove (their work item is not in a terminal state, "+
-			"or is not a name polyforge produces) — --fix will refuse", blockers)
+			"or is not a name polyforge produces); --fix will refuse", blockers)
 	}
 	if len(unverifiable) > 0 {
 		msg += fmt.Sprintf("; %d more could not be verified and are left alone: %s",
@@ -1248,17 +1248,17 @@ func removeOrphans(ctx context.Context, c *client.Client, wsRoot string, total i
 		if why, ok := unverifiableWhy[dir]; ok {
 			_, _ = fmt.Fprintf(out, "       worktree %s: named by --force-remove; it was not selected because %s\n", dir, why)
 		}
-		_, _ = fmt.Fprintf(out, "       worktree %s: wi=%s status=%s — %s\n",
+		_, _ = fmt.Fprintf(out, "       worktree %s: wi=%s status=%s - %s\n",
 			v.Dir, keyText(v.Key), v.statusText(), v.Note)
 
 		allowed, why := forceAllows(v, stated, named)
 		if !allowed {
-			_, _ = fmt.Fprintf(out, "       worktree %s: KEPT — %s\n", v.Dir, why)
+			_, _ = fmt.Fprintf(out, "       worktree %s: KEPT - %s\n", v.Dir, why)
 			refused = append(refused, fmt.Sprintf("%s [%s]", v.Dir, v.statusText()))
 			continue
 		}
 		if v.Kind != verdictTerminal {
-			_, _ = fmt.Fprintf(out, "       worktree %s: removing anyway — %s\n", v.Dir, why)
+			_, _ = fmt.Fprintf(out, "       worktree %s: removing anyway - %s\n", v.Dir, why)
 			forced = append(forced, fmt.Sprintf("%s [%s]", v.Dir, v.statusText()))
 		}
 
@@ -1337,7 +1337,7 @@ func forceAllows(v orphanVerdict, stated string, named bool) (bool, string) {
 				"(--force-remove=%s:<status>) so it is clear that was looked up", v.Status, v.Dir)
 		}
 		if stated != v.Status {
-			return false, fmt.Sprintf("--force-remove=%s:%s does not match the current status %q — "+
+			return false, fmt.Sprintf("--force-remove=%s:%s does not match the current status %q; "+
 				"the work item moved since that was read, so the removal stops", v.Dir, stated, v.Status)
 		}
 		return true, fmt.Sprintf("--force-remove named it AND stated its current status (%s)", v.Status)
@@ -1494,7 +1494,7 @@ func checkUsageMd(wsRoot string) checkResult {
 		// nothing". In a check whose entire subject is silent failure, that green would
 		// be the very defect it exists to report.
 		return checkResult{Name: name, Status: "warning",
-			Message: ".polyforge/usage.md has an unterminated code fence or HTML comment — " +
+			Message: ".polyforge/usage.md has an unterminated code fence or HTML comment; " +
 				"the scan could not read past it, so this is 'did not look', not 'found nothing'"}
 	}
 	if len(found) == 0 {
@@ -1503,10 +1503,10 @@ func checkUsageMd(wsRoot string) checkResult {
 	}
 	return checkResult{Name: name, Status: "warning",
 		Message: fmt.Sprintf(".polyforge/usage.md still carries %d rule section(s) that using-polyforge "+
-			"owns (%s) — that file is never regenerated, so this copy cannot be corrected and a "+
+			"owns (%s); that file is never regenerated, so this copy cannot be corrected and a "+
 			"session sees both",
 			len(found), strings.Join(found, ", ")),
-		FixCmd: "edit .polyforge/usage.md and delete those sections by hand — the maintained " +
+		FixCmd: "edit .polyforge/usage.md and delete those sections by hand; the maintained " +
 			"copy ships with the using-polyforge skill (not automated: see checkUsageMd)"}
 }
 
@@ -1629,7 +1629,7 @@ func checkClaudeMd(wsRoot string) checkResult {
 	}
 	if blockIsLegacyFormat(block) {
 		return checkResult{Name: name, Status: "warning",
-			Message: fmt.Sprintf("managed block is the legacy inline format (%d B, re-read on every request) — "+
+			Message: fmt.Sprintf("managed block is the legacy inline format (%d B, re-read on every request); "+
 				"re-running init moves per-repo detail to .polyforge/repo-map/", len(block)),
 			FixCmd: fix}
 	}
@@ -1644,7 +1644,7 @@ func checkClaudeMd(wsRoot string) checkResult {
 	}
 	if len(present) == 0 {
 		return checkResult{Name: name, Status: "warning",
-			Message: fmt.Sprintf("repo map missing: no %s/*.md — the block carries only one-line positioning, "+
+			Message: fmt.Sprintf("repo map missing: no %s/*.md; the block carries only one-line positioning, "+
 				"so routing has no main_modules / change_scenarios / tech_stack to read",
 				filepath.Join(".polyforge", repoMapDirName)),
 			FixCmd: fix}

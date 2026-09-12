@@ -227,7 +227,7 @@ polyforge doctor
 The `config` line names the endpoint **and the layer that chose it**:
 
 ```
-[ok] config: http://<host>:8080 (built-in default) — aihub reachable
+[ok] config: http://<host>:8080 (built-in default): aihub reachable
 ```
 
 `built-in default` is the normal answer. The other three sources, in descending

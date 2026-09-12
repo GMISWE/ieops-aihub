@@ -276,13 +276,13 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 		typ, _ := item["type"].(string)
 		if !declaredResourceTypes[typ] {
 			return NewErrDetails(ErrBadRequest,
-				fmt.Sprintf("declared_resources[%d]: unrecognized type %q — it would acquire no lock at all", i, typ),
+				fmt.Sprintf("declared_resources[%d]: unrecognized type %q; it would acquire no lock at all", i, typ),
 				map[string]any{
 					"index":       i,
 					"got_type":    typ,
 					"valid_types": DeclaredResourceTypeList(),
 					"entry_shape": `{"type":"path","uri":"file:<repo-relative-path>","intent":"write"}`,
-					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values; declared_resources.type is the input vocabulary above. Since aihub#416 the server DERIVES exactly one of them — `file_scope`, from path/document/section entries; the other four are legal only in an explicit requested_locks. A file path is type=\"path\".",
+					"hint":        "`file_scope`, `git_branch`, `worktree`, `tcp_port` and `deploy_env` are resource_locks.resource_type values; declared_resources.type is the input vocabulary above. Since aihub#416 the server DERIVES exactly one of them: `file_scope`, from path/document/section entries; the other four are legal only in an explicit requested_locks. A file path is type=\"path\".",
 				})
 		}
 		uri, _ := item["uri"].(string)
@@ -293,7 +293,7 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 					"index":       i,
 					"got_type":    typ,
 					"entry_shape": `{"type":"path","uri":"file:<repo-relative-path>","intent":"write"}`,
-					"hint":        "the field is `uri` — `value`, `path`, `scope` and `resource_key` are silently ignored; expected schemes are " + DeclaredResourceURISchemeDoc(),
+					"hint":        "the field is `uri`; `value`, `path`, `scope` and `resource_key` are silently ignored; expected schemes are " + DeclaredResourceURISchemeDoc(),
 				})
 		}
 		// aihub#395 part 4. The scheme has been published per type since
@@ -310,7 +310,7 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 		// ever sees says it worked.
 		if problem, expected := uriSchemeProblem(typ, uri); problem != "" {
 			return NewErrDetails(ErrBadRequest,
-				fmt.Sprintf("declared_resources[%d]: uri %q is not valid for type %q — %s",
+				fmt.Sprintf("declared_resources[%d]: uri %q is not valid for type %q: %s",
 					i, uri, typ, problem),
 				map[string]any{
 					"index":           i,
@@ -318,7 +318,7 @@ func ValidateDeclaredResources(raw json.RawMessage) *AihubError {
 					"got_uri":         uri,
 					"expected_scheme": expected,
 					"schemes_by_type": DeclaredResourceURISchemeDoc(),
-					"hint":            "the lock key is derived by stripping the scheme, and stripping a prefix that is not there silently succeeds — so a wrong scheme does not fail, it produces a lock on a key nobody will collide with",
+					"hint":            "the lock key is derived by stripping the scheme, and stripping a prefix that is not there silently succeeds, so a wrong scheme does not fail, it produces a lock on a key nobody will collide with",
 				})
 		}
 	}
@@ -341,7 +341,7 @@ func UnrecognizedDeclaredResources(raw json.RawMessage) []string {
 	}
 	var items []map[string]any
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return []string{"declared_resources is not a JSON array of objects — no locks could be derived from it"}
+		return []string{"declared_resources is not a JSON array of objects; no locks could be derived from it"}
 	}
 
 	var out []string
@@ -420,7 +420,7 @@ func ValidateRequestedLocks(locks []ResourceLockReq) *AihubError {
 					"got_resource_type": l.ResourceType,
 					"valid_types":       ResourceLockTypeList(),
 					"entry_shape":       `{"resource_type":"file_scope","resource_key":"<project>:<path>"}`,
-					"hint":              "requested_locks uses resource_type/resource_key — NOT declared_resources' type/uri. Normally leave requested_locks unset and let the server derive locks from the work item's declared_resources.",
+					"hint":              "requested_locks uses resource_type/resource_key, NOT declared_resources' type/uri. Normally leave requested_locks unset and let the server derive locks from the work item's declared_resources.",
 				})
 		}
 		if strings.TrimSpace(l.ResourceKey) == "" {

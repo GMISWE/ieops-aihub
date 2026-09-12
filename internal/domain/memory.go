@@ -342,7 +342,7 @@ func queueRenderJob(job renderJob) {
 		renderDrainShedCount.Add(1)
 		fmt.Fprintf(os.Stderr,
 			"memory render: shutting down; dropping render for %s (type=%s). "+
-				"The artifact still serves — the viewer re-renders from content on read.\n",
+				"The artifact still serves: the viewer re-renders from content on read.\n",
 			job.memID, job.memType)
 		return
 	}
@@ -354,7 +354,7 @@ func queueRenderJob(job renderJob) {
 		renderShedCount.Add(1)
 		fmt.Fprintf(os.Stderr,
 			"memory render: deferred-render queue full (depth=%d jobs); dropping render for %s (type=%s). "+
-				"The artifact still serves — the viewer re-renders from content on read.\n",
+				"The artifact still serves: the viewer re-renders from content on read.\n",
 			asyncRenderQueueDepth, job.memID, job.memType)
 	}
 }
@@ -389,7 +389,7 @@ func runRenderJob(job renderJob) {
 	if err != nil {
 		renderFailCount.Add(1)
 		fmt.Fprintf(os.Stderr,
-			"memory render: markdown→HTML failed for %s (type=%s): %v; leaving rendered_html NULL "+
+			"memory render: markdown->HTML failed for %s (type=%s): %v; leaving rendered_html NULL "+
 				"(the viewer re-renders from content on read)\n", job.memID, job.memType, err)
 		return
 	}
@@ -404,7 +404,7 @@ func runRenderJob(job renderJob) {
 		if job.content != "" {
 			renderFailCount.Add(1)
 			fmt.Fprintf(os.Stderr,
-				"memory render: markdown→HTML produced empty output for %s (type=%s) from %d bytes of content; "+
+				"memory render: markdown->HTML produced empty output for %s (type=%s) from %d bytes of content; "+
 					"leaving rendered_html NULL (the viewer re-renders from content on read)\n",
 				job.memID, job.memType, len(job.content))
 		}
@@ -1128,7 +1128,7 @@ func ValidateIntegralStrength(field string, v float64) *AihubError {
 	return NewErr(ErrBadRequest, fmt.Sprintf(
 		"%s %g is not a whole number: it must be an integer. The "+
 			"memories.base_strength column is SMALLINT, so a fractional value never "+
-			"reaches it as stated — the driver truncates toward zero without an error "+
+			"reaches it as stated: the driver truncates toward zero without an error "+
 			"(3.5 stores 3, 0.9 stores 0), which is why this is refused here rather "+
 			"than rounded for you: rounding would answer 200 while storing a strength "+
 			"you did not name. Send the integer you mean.",

@@ -429,7 +429,7 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 	}
 	first := conflicts[0]
 	return NewErrDetails(ErrConflictLockTaken,
-		fmt.Sprintf("this commit changes %d file(s) locked by another attempt: %v — "+
+		fmt.Sprintf("this commit changes %d file(s) locked by another attempt: %v, "+
 			"held by %s on %s (attempt %s)", len(conflicts), paths,
 			displayOrUnknown(first.ActorDisplay), slugOrUnknown(first.WorkItemSlug), first.AttemptID),
 		map[string]any{
@@ -495,7 +495,7 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 // incomplete. The REAL limit is 489 bytes: past that the cut lands inside this
 // string and ships half a remedy, which is worse than a short one.
 // TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit is that gate.
-const CommitLockRefusalAdvice = "Those files belong to another live attempt. Do NOT force a takeover — " +
+const CommitLockRefusalAdvice = "Those files belong to another live attempt. Do NOT force a takeover: " +
 	"the holder is editing them. Either wait for it to finish, or take them out of this commit, " +
 	"which takes TWO steps: a plain retry re-runs `git add -A` and re-stages exactly what step 1 " +
 	"removed, earning the same refusal. " +

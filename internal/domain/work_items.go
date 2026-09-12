@@ -511,18 +511,18 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		switch {
 		case errors.Is(ctxDeadBeforeDB, context.DeadlineExceeded):
 			return nil, NewErr(ErrInternalError,
-				"request deadline exhausted before reaching the database — an upstream dependency (most likely the embedding provider) consumed the request budget")
+				"request deadline exhausted before reaching the database; an upstream dependency (most likely the embedding provider) consumed the request budget")
 		case ctxDeadBeforeDB != nil:
 			// Canceled: the caller hung up. Saying "deadline exhausted" here
 			// would send the next reader hunting a slow dependency that was
 			// never slow.
 			return nil, NewErr(ErrInternalError,
-				"request was cancelled before reaching the database — the caller disconnected upstream of any database work")
+				"request was cancelled before reaching the database; the caller disconnected upstream of any database work")
 		case ctx.Err() != nil:
 			// Alive on entry, dead now: the time went INSIDE Begin, i.e.
 			// waiting for a pool connection. Name the pool, not the upstream.
 			return nil, NewErr(ErrInternalError,
-				"request deadline expired while waiting for a database connection — the connection pool is saturated, not an upstream dependency")
+				"request deadline expired while waiting for a database connection; the connection pool is saturated, not an upstream dependency")
 		default:
 			return nil, NewErr(ErrInternalError, "failed to begin transaction")
 		}
@@ -2203,7 +2203,7 @@ func validateAttrsPatch(req *UpdateWorkItemRequest) *AihubError {
 	}
 	if req.Attrs != nil && (req.AttrsPatch != nil || req.AttrsUnset != nil) {
 		return NewErr(ErrBadRequest,
-			"attrs cannot be combined with attrs_patch/attrs_unset: attrs REPLACES the whole object, attrs_patch/attrs_unset amend it — send one or the other")
+			"attrs cannot be combined with attrs_patch/attrs_unset: attrs REPLACES the whole object, attrs_patch/attrs_unset amend it; send one or the other")
 	}
 	return nil
 }
@@ -2409,7 +2409,7 @@ func jsonObjectParamErr(field string, raw json.RawMessage) *AihubError {
 				details["string_decode_error"] = perr.Error()
 				if bytes.HasPrefix(bytes.TrimSpace([]byte(inner)), []byte("{")) {
 					msg += fmt.Sprintf(", and that string opens like a JSON object but does not parse (%v)"+
-						" — do not hand-write the escaped JSON; send the object itself and let your client escape it", perr)
+						"; do not hand-write the escaped JSON, send the object itself and let your client escape it", perr)
 				}
 			default:
 				// The #420 case: the bytes ARE the object the caller meant,
@@ -2418,10 +2418,10 @@ func jsonObjectParamErr(field string, raw json.RawMessage) *AihubError {
 				innerKind := jsonValueKind(json.RawMessage(inner))
 				details["string_decodes_to"] = innerKind
 				if innerKind == "a JSON object" {
-					msg += ", and that string decodes to a JSON object — send the object itself, not a JSON-encoded string of it"
+					msg += ", and that string decodes to a JSON object; send the object itself, not a JSON-encoded string of it"
 				} else {
 					msg += fmt.Sprintf(", and that string decodes to %s, not an object"+
-						" — send the object itself, not a JSON-encoded string of it", innerKind)
+						"; send the object itself, not a JSON-encoded string of it", innerKind)
 				}
 			}
 		}
@@ -2465,7 +2465,7 @@ func casConflictErr(expected, current int) *AihubError {
 		currentText = "unknown"
 	}
 	return NewErrDetails(ErrConflictCASFailed,
-		fmt.Sprintf("declared_resources CAS failed: resources_version is %s, not the expected %d — reread the work item and retry with its current resources_version", currentText, expected),
+		fmt.Sprintf("declared_resources CAS failed: resources_version is %s, not the expected %d; reread the work item and retry with its current resources_version", currentText, expected),
 		map[string]any{
 			"expected_resources_version": expected,
 			"current_resources_version":  current,

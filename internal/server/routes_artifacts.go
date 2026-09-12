@@ -1672,7 +1672,7 @@ func buildAnnotationHTMLWithExact(memID, renderedHTML string, commitsRaw json.Ra
 		// data-pf-chrome marks this as OUR element, not the artifact's — see the wiring
 		// script below and chromeEl() in annot.js for why the id alone is not trustworthy.
 		b.WriteString("<select id=\"pf-annot-heading\" data-pf-chrome name=\"heading_id\">\n")
-		b.WriteString("<option value=\"\" data-text=\"\">— general —</option>\n")
+		b.WriteString("<option value=\"\" data-text=\"\">-- general --</option>\n")
 		for _, h := range headings {
 			b.WriteString("<option value=\"")
 			b.WriteString(html.EscapeString(h.ID))

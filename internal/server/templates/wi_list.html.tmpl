@@ -94,7 +94,7 @@
              hand-built URL carrying both cannot reach a fourth, unnameable
              scope. Watch/unwatch itself happens on the wi detail page. */}}
         {{if .User}}<button type="button" class="grp-me wch{{if .Watching}} on{{end}}" data-watch-toggle title="只看我关注的 wi(在 wi 详情页点 ☆ Watch 添加)">watching</button>{{end}}
-        <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button>
+        <button type="button" class="grp-sort" data-wi-sort title="按创建时间排序(点击切换最新/最旧在前)" aria-label="toggle sort order">↓</button><!-- aitaste:allow U+2193: sort-direction control glyph -->
         <span class="grp-n">{{index .SegCounts .SelectedSeg}}</span>
       </div>
       {{/* Non-fatal advisory about this Done page (aihub#466): the rows below are
@@ -169,7 +169,7 @@
         <a class="pg-btn" data-done-newest
            href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&watching={{if .Watching}}1{{end}}&limit={{.Limit}}"
            hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}"
-           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">↑ 最新</a>
+           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">↑ 最新</a><!-- aitaste:allow U+2191: pager control glyph, jump to newest -->
         {{end}}
         {{if .DoneNextCursor}}
         {{/* urlquery on BOTH attributes, deliberately. href is a URL context so
@@ -183,7 +183,7 @@
         <a class="pg-btn" data-done-older
            href="/ui/wi?seg=done&project={{$dproj}}&owner={{.Owner}}&watching={{if .Watching}}1{{end}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
            hx-get="/ui/wi?seg=done&project={{$dproj}}&limit={{.Limit}}&done_cursor={{urlquery .DoneNextCursor}}"
-           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">更早 →</a>
+           hx-target="#wi-list-body" hx-swap="innerHTML" hx-push-url="true">更早 →</a><!-- aitaste:allow U+2192: pager control glyph, older page -->
         {{end}}
       </div>
       {{else}}

@@ -29,7 +29,7 @@
 {{/* needs-you bar — this item is awaiting the current user (they own the
      active attempt and it is paused/blocked). Subtle grey treatment mirrors the
      list's Needs you section. */}}
-<div class="needs"><span class="dot"></span> Needs you — you own this item and it is {{.WI.Status}}. Resume it to keep going.</div>
+<div class="needs"><span class="dot"></span> Needs you: you own this item and it is {{.WI.Status}}. Resume it to keep going.</div>
 {{end}}
 
 {{if and .Err (not .NeedsYou)}}<div class="empty" style="max-width:none;margin-bottom:var(--s5)">{{.Err}}</div>{{end}}

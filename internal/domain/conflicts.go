@@ -711,7 +711,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					p.WIID = ""
 					p.WISlug = ""
 					p.AttemptID = ""
-					p.Description = "[conflict in project " + wiProject + " — no visibility]"
+					p.Description = "[conflict in project " + wiProject + ", no visibility]"
 				}
 			}
 		}

@@ -281,7 +281,7 @@ func uiFuncMap() template.FuncMap {
 		"wiref": func(slugOrID string) string { return wiHref(slugOrID) },
 		"fmtTs": func(s string) string {
 			if s == "" {
-				return "—"
+				return "—" // aitaste:allow U+2014: empty-value placeholder glyph, not prose
 			}
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
 				return t.UTC().Format("2006-01-02 15:04 MST")
@@ -318,7 +318,7 @@ func uiFuncMap() template.FuncMap {
 		// artifact version-timeline rows. Empty / unparseable input yields "—".
 		"shortDate": func(s string) string {
 			if s == "" {
-				return "—"
+				return "—" // aitaste:allow U+2014: empty-value placeholder glyph, not prose
 			}
 			if ts, err := time.Parse(time.RFC3339, s); err == nil {
 				return ts.UTC().Format("2006-01-02")
@@ -337,7 +337,7 @@ func uiFuncMap() template.FuncMap {
 // date so old events stay unambiguous.
 func relTime(t time.Time) string {
 	if t.IsZero() {
-		return "—"
+		return "—" // aitaste:allow U+2014: empty-value placeholder glyph, not prose
 	}
 	d := time.Since(t)
 	switch {

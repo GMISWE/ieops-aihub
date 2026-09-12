@@ -269,8 +269,8 @@ type wiListPageData struct {
 // The detail after each one is the domain's own message, reused verbatim (see
 // the notes at their call sites in handleUIWIList).
 const (
-	doneCursorNoticePrefix = "这个分页链接无法识别,已回到最新一页 — "
-	doneFetchErrPrefix     = "归档列表没能加载(这不是一个空归档,上方的总数来自另一条查询) — "
+	doneCursorNoticePrefix = "这个分页链接无法识别,已回到最新一页:"
+	doneFetchErrPrefix     = "归档列表没能加载(这不是一个空归档,上方的总数来自另一条查询):"
 )
 
 // segNav is one entry in the LCRS sidebar (aihub#185): a segment's display label,
@@ -797,7 +797,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 		// dropdown still renders so the user can pick one.
 		if project == "" {
 			if u.Role != "admin" && len(projects) == 0 {
-				data.Err = "no projects accessible — ask an admin to add you to a project."
+				data.Err = "no projects accessible; ask an admin to add you to a project."
 			} else {
 				data.Err = "select a project to view work items."
 			}
@@ -864,7 +864,7 @@ func handleUIWIList(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerFun
 				// Refused here rather than papered over downstream: there is no page
 				// of work items that is correct to render for this caller.
 				if len(projects) == 0 {
-					data.Err = "no projects accessible — ask an admin to add you to a project."
+					data.Err = "no projects accessible; ask an admin to add you to a project."
 					return renderTemplate(c, tmpl, renderName, data)
 				}
 				filter.AccessibleProjects = projects

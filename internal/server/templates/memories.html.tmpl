@@ -1,7 +1,7 @@
 {{define "content"}}
 <section class="ph">
   <h1>Memories</h1>
-  <span class="sub">team knowledge — experiences, facts, rules, specs</span>
+  <span class="sub">team knowledge: experiences, facts, rules, specs</span>
   {{if and .Items (gt (len .Items) 0)}}
     <span class="sub">· {{len .Items}} shown{{if gt .HiddenCount 0}}; {{.HiddenCount}} hidden by visibility{{end}}</span>
   {{end}}
@@ -29,7 +29,7 @@
 <div class="empty">
   <div class="ei">!</div>
   <div class="et">No projects accessible</div>
-  no projects accessible — ask an admin to add you to a project.
+  no projects accessible; ask an admin to add you to a project.
 </div>
 {{else}}
 
@@ -213,7 +213,7 @@
         {{end}}
         <span class="nm">{{default "unknown" .AuthorDisplay}}</span>
       </span>
-      {{with .WorkItemID}}<a class="wi" href="{{wiref .}}">{{.}}</a>{{else}}<span class="wi" style="color:var(--text-subtle)">—</span>{{end}}
+      {{with .WorkItemID}}<a class="wi" href="{{wiref .}}">{{.}}</a>{{else}}<span class="wi" style="color:var(--text-subtle)">—</span>{{end}}<!-- aitaste:allow U+2014: empty-value placeholder glyph when a memory has no work item -->
       <span style="margin-left:auto">{{reltime .CreatedAt}}</span>
     </div>
   </div>

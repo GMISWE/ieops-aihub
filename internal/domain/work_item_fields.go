@@ -292,7 +292,7 @@ func validateWorkItemContent(content *string) *AihubError {
 				"field": "content",
 				"got":   n,
 				"max":   maxWorkItemContentRunes,
-				"note":  "the limit is CHARACTERS, not bytes — the same unit the database CHECK uses",
+				"note":  "the limit is CHARACTERS, not bytes, the same unit the database CHECK uses",
 			})
 	}
 	return nil

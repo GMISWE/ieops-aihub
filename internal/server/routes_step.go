@@ -486,7 +486,7 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				RETURNING current_step`, wiID).Scan(&bumpedStep)
 			if bumpErr != nil && !errors.Is(bumpErr, pgx.ErrNoRows) {
 				return writeError(c, domain.NewErr(domain.ErrInternalError, fmt.Sprintf(
-					"heartbeat could not refresh step_started_at: %v — nothing was recorded", bumpErr)))
+					"heartbeat could not refresh step_started_at: %v; nothing was recorded", bumpErr)))
 			}
 			// ErrNoRows is NOT that error: it means the wi has no wi_step_state row,
 			// so the statement ran fine and bumped nothing. It stays a 200 for two
@@ -577,7 +577,7 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		if (req.Status == "completed" || req.Status == "failed") && req.ArtifactSummary != nil {
 			if n := utf8.RuneCountInString(*req.ArtifactSummary); n > maxArtifactSummaryChars {
 				return writeError(c, domain.NewErr(domain.ErrPayloadTooLarge, fmt.Sprintf(
-					"artifact_summary is %d characters; the step history stores at most %d — shorten it and resend, nothing was recorded",
+					"artifact_summary is %d characters; the step history stores at most %d; shorten it and resend, nothing was recorded",
 					n, maxArtifactSummaryChars)))
 			}
 		}
@@ -738,7 +738,7 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 				}
 				if !started {
 					return writeError(c, domain.NewErr(domain.ErrConflictCASFailed,
-						"completed, but next_step could not be started (another actor holds the step) — nothing was committed; retry"))
+						"completed, but next_step could not be started (another actor holds the step); nothing was committed, retry"))
 				}
 				events = append(events, stepEvent{eventType: "step_started", step: *req.NextStep})
 			}
@@ -936,7 +936,7 @@ func validateTerminalStepArgs(status string, stepAttemptID *string, heartbeat bo
 		return nil
 	}
 	const why = ": the step-history row that pf_get_step's completed_steps is read from is keyed on it, so the " +
-		"transition could only be recorded in the timeline and never in the history — which is the silent " +
+		"transition could only be recorded in the timeline and never in the history, which is the silent " +
 		"disagreement that made a resuming agent redo a finished step. Nothing was committed; resend with the " +
 		"step_attempt_id used to start the step"
 	if stepAttemptID == nil {
@@ -1039,7 +1039,7 @@ func validateStepIdentity(status string, heartbeat bool, reqStep, storedStep *st
 	// a request that sent nothing (see TestValidateStepIdentity); refusing an
 	// empty step_id outright is a different predicate and not smuggled in here.
 	named := `status="` + status + `" names step ` + fmt.Sprintf("%q", want)
-	howToRecover := "start " + fmt.Sprintf("%q", want) + ` with status="in_progress" first — note that a start ` +
+	howToRecover := "start " + fmt.Sprintf("%q", want) + ` with status="in_progress" first; note that a start ` +
 		"is refused while another step is in_progress, so the open step has to reach a terminal status either way"
 	if want == "" {
 		named = `status="` + status + `" identifies no step (step_id absent or empty)`
@@ -1082,7 +1082,7 @@ func validateStepIdentity(status string, heartbeat bool, reqStep, storedStep *st
 		", but this work item's current_step is "+fmt.Sprintf("%q", *storedStep)+
 		". Ending a step other than the open one would record "+fmt.Sprintf("%q", want)+
 		" as finished while "+fmt.Sprintf("%q", *storedStep)+" is what actually ran, and would overwrite "+
-		"current_step — so "+fmt.Sprintf("%q", *storedStep)+"'s own outcome would never be recorded and "+
+		"current_step, so "+fmt.Sprintf("%q", *storedStep)+"'s own outcome would never be recorded and "+
 		"pf_get_step's completed_steps would disagree with what ran, which is what makes a resuming agent skip "+
 		"real work. Nothing was committed. Either finish "+fmt.Sprintf("%q", *storedStep)+
 		" (the step that is actually open), or "+howToRecover)
@@ -1164,12 +1164,12 @@ func insertStepEvent(ctx context.Context, tx pgx.Tx, wiID, runAttemptID string, 
 		case "23503":
 			return domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
 				"attempt_id %q does not name an existing run attempt, so the %s event cannot be filed against it; "+
-					"the step timeline is part of what a 200 promises — nothing was committed",
+					"the step timeline is part of what a 200 promises; nothing was committed",
 				runAttemptID, ev.eventType))
 		case "22P05", "22021":
 			return domain.NewErr(domain.ErrBadRequest, fmt.Sprintf(
 				"the %s event could not be recorded: step %q carries a character the event payload cannot store "+
-					"(SQLSTATE %s) — nothing was committed",
+					"(SQLSTATE %s); nothing was committed",
 				ev.eventType, ev.step, pgErr.Code))
 		}
 	}
@@ -1220,11 +1220,11 @@ func insertStepCompletion(ctx context.Context, tx pgx.Tx, wiID, runAttemptID, st
 		switch pgErr.Code {
 		case "23505":
 			return domain.NewErr(domain.ErrConflictDuplicate,
-				"step_attempt_id "+stepAttemptID+" already has a step-history row; this step attempt was recorded before — nothing was committed, do not resend")
+				"step_attempt_id "+stepAttemptID+" already has a step-history row; this step attempt was recorded before; nothing was committed, do not resend")
 		case "23503":
 			return domain.NewErr(domain.ErrBadRequest,
 				"attempt_id "+fmt.Sprintf("%q", runAttemptID)+" does not name an existing run attempt; the step history records which attempt "+
-					"finished the step, so a completed/failed transition with a step_attempt_id needs the real attempt_id — nothing was committed")
+					"finished the step, so a completed/failed transition with a step_attempt_id needs the real attempt_id; nothing was committed")
 		}
 	}
 	return domain.NewErr(domain.ErrInternalError, "record step history")

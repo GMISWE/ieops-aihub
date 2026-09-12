@@ -3173,6 +3173,28 @@ jobs:
           ! grep -q -- '--- SKIP' recall_router.log \
             || { echo "::error::an aihub#270 router test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#360: the lexical second section, both retrieval surfaces, against
+      # the same migrated Postgres. Each test is the acceptance anchor for its
+      # side — a deterministic fake provider reproduces aihub#367's measured
+      # miss geometry (an excerpt cannot retrieve its parent through the
+      # single-vector index), and the test requires the lexical section to
+      # retrieve the parent the vector page missed, in the same response. Needs
+      # a DB because the predicate is hand-threaded $N SQL spliced onto two
+      # different WHERE builders; a placeholder drift is a runtime bind error.
+      - name: aihub#360 lexical section DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot$|^TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot$' -count=1 -v 2>&1 | tee lexical_section.log
+          for want in TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot \
+                      TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot; do
+            grep -q -- "--- PASS: $want" lexical_section.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#360 lexical-section coverage is not actually executing"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' lexical_section.log \
+            || { echo "::error::an aihub#360 lexical test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
       # aihub#268: exercise the agent_events partition creator against the same
       # Postgres service. This is the step that makes the fix trustworthy: the
       # bug it closes was a partition-exhaustion outage, and the pure-unit tests

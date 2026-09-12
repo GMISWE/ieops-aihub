@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_recall",
-  "description_sha256": "8c439b8f3e30f28d6f1f95151076e8f2910f21441daefd873c2e40ea76d14ca9",
+  "description_sha256": "6b2d9c495ef9d6eb408fda58df6c60e6c3e84854b0bc51d8bb109bd8589f28fb",
   "input_schema_sha256": "e649e667644e71892c74bc35c230396c6a75033e6308fbd12177832aa9c6b11e",
   "params": {
     "cursor": {
@@ -420,6 +420,35 @@ embedded prefix, not about the tail. Do not
 confuse it with `content_truncated`, which reports a response-side snippet cut;
 `embedded_len` is a write-side fact about the vector.
 <!-- prose-only: because=judgement -->
+
+Since `aihub#360` (2026-09-12) a recall that carries a `query` returns a SECOND
+top-level section, `lexical`: verbatim-substring retrieval — every whitespace
+token of the query must appear, case-insensitively, in a row's content — over
+the same scoped corpus, parallel to the semantic ranking and never merged into
+it (`internal/domain/recall_lexical_db_test.go`), because a cosine and a
+substring match are incomparable and a fused score is the shape `aihub#311`
+removed as a defect. Its hits carry no `similarity`,
+its `total` is explicit even at 0, its empty `items` is `[]` rather than an
+absent key, and the section is present exactly when the request carried a
+non-empty query, whichever path served `items` — all driven against a live
+pgvector database by `internal/domain/recall_lexical_db_test.go`
+(`TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot`), whose anchor
+reproduces `aihub#367`'s measured failure shape (an excerpt of a stored
+document cannot retrieve its parent through the single-vector unchunked index;
+recall@1 0/42, measured 2026-09-06) and requires the lexical section to
+retrieve the parent the vector page missed, in the same response. The scoped
+arm of `TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot` covers the
+one shape where the query text used to do nothing at all — `work_item_id` plus
+`query`, where the router skips the vector path and the text path ignores the
+query. The tokenizer (case-insensitive dedup,
+longest-first, capped at 16 with the drop disclosed as `tokens_dropped`), the
+ILIKE metacharacter escaping and the snippet rules are pinned by
+`internal/domain/lexical_test.go` (`TestLexicalTokens`, `TestLexicalPattern`,
+`TestLexicalSnippet`). The section reaches the model through the delete-list
+untouched (`TestRecallResultPassesThroughAFieldTheStructDoesNotHaveYet`), and
+its K10 declaration lives in `live-response-keys.json` rather than on this
+card's `response_keys_observed`, because the generated corpus predates the key
+(`internal/mcp/card_response_keys_live_e2e_db_test.go`).
 
 `fields="brief"` selects `internal/mcp/recall_slim.go` (`briefRecallItem`), which
 replaces each body with its first line (≤120 runes) and drops `related`/`tags`;

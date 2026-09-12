@@ -16,6 +16,12 @@
       "project": "Same aihub#422 rewrite.",
       "slug": "Same aihub#422 rewrite."
     },
+    "pf_list_work_items": {
+      "lexical": "Added by aihub#360 (2026-09-12): the verbatim-substring second section, present whenever query= is sent. The corpus was extracted before the section existed, so no record can hold it."
+    },
+    "pf_recall": {
+      "lexical": "Added by aihub#360 (2026-09-12): the verbatim-substring second section, present whenever query is sent. The corpus was extracted before the section existed, so no record can hold it."
+    },
     "pf_resolve_commit": {
       "ok": "Published and never called in the corpus window (annotations are answered through the /ui viewer), so no corpus record and a null card list."
     },

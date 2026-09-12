@@ -174,7 +174,13 @@ const floorLiveKeyChecks = 218
 // handed since 2026-08-14 that no card names. That is the debt this ceiling
 // counts, and the point of the arm is that it is now counted rather than
 // invisible; the entry in the golden file carries the derivation.
-const maxUndeclaredLiveKeys = 14
+//
+// 14 -> 16 on 2026-09-12: aihub#360 added the `lexical` section to pf_recall
+// and pf_list_work_items. The two keys are declared in the golden file because
+// K7 CORPUS_INVENTED forbids a card from naming a key the generated corpus has
+// no record of, and the corpus predates the section; they move onto the cards
+// whenever the corpus is next re-extracted, which lowers this back for free.
+const maxUndeclaredLiveKeys = 16
 
 // liveWalkOutOfReach names the published tools this walk cannot drive, with the
 // reason. It is asserted to be EXACTLY the set of undriven tools, so a tool that
@@ -650,6 +656,12 @@ func runLiveKeyWalk(t *testing.T, w *liveKeyWalk) {
 	w.drive(t, "pf_get_work_item", map[string]any{"work_item_id": wiID})
 	w.drive(t, "pf_update_work_item", map[string]any{"work_item_id": wiID, "priority": "high"})
 	w.drive(t, "pf_list_work_items", map[string]any{"project": s.project})
+	// aihub#360: the same tool again WITH a query — the `lexical` section is
+	// present exactly when query= is sent, so without this drive the key would
+	// be live on real callers and invisible to this walk. The walk unions keys
+	// across drives of one tool, so this widens the observed surface rather
+	// than replacing it.
+	w.drive(t, "pf_list_work_items", map[string]any{"project": s.project, "query": "attempt lifecycle"})
 	w.drive(t, "pf_batch_create_work_items", map[string]any{
 		"project": s.project,
 		"items": []any{

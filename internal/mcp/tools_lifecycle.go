@@ -618,8 +618,24 @@ func (s *Server) registerLifecycleTools() {
 		//
 		// The field list lives in docs/mcp-tools.md and the reasoning in
 		// list_wi_slim.go, neither of which is charged to anybody.
+		//
+		// The aihub#360 tail is the caller-facing half of that work item's
+		// deliverable ①: the single-vector blind spot and the second section
+		// exist nowhere a tool caller can read except this string. It carries
+		// the aihub#367 numbers with their date because "search is unreliable"
+		// invites recalibration while "0/6 at every N, measured 2026-09-06"
+		// states which conclusions a miss cannot support.
 		Description: "List work items with optional filters. " +
-			"Item keys whose value is null are omitted: an absent key means null.",
+			"Item keys whose value is null are omitted: an absent key means null. " +
+			"query= returns TWO sections (aihub#360): items[] (semantic when the server has an " +
+			"embedding provider — the `semantic` block says so; ILIKE text match otherwise) plus " +
+			"`lexical`, a parallel verbatim-substring section (every whitespace token of the query, " +
+			"case-insensitive, must appear in goal+content; its hits carry NO similarity). The index " +
+			"is ONE unchunked vector per work item over goal+content only — attrs, labels and events " +
+			"are never embedded — so an EXCERPT of a stored work item routinely fails to retrieve it " +
+			"semantically (measured 2026-09-06, aihub#367: query= recall was 0/6 at EVERY N). A " +
+			"semantic miss is NOT evidence of absence: judge existence by the lexical section, whose " +
+			"`total: 0` is explicit, or by ids=/filters.",
 		InputSchema: listWorkItemsSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)

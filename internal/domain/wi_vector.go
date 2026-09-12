@@ -105,6 +105,21 @@ package domain
 // through would text-search for the literal string "aihub#276", which is a
 // different question with a plausible-looking answer. A source that cannot be
 // used is an explicit error instead (ErrNotFound / ErrPreconditionFailed).
+//
+// ─── aihub#360: a query= miss here is NOT evidence of absence ────────────────
+//
+// The single-vector, unchunked index shape gives the query= path a structural
+// blind spot: an excerpt of a stored work item embeds as a different point
+// than its parent, so verbatim text FROM a document routinely fails to
+// retrieve that document. Measured against production 2026-09-06 (aihub#367,
+// answers frozen before the first query ran): pf_list_work_items(query=)
+// scored 0/6 at EVERY N — the worst of the three measured families — while
+// returning structurally plausible full pages. That is a property of the
+// index, not a data gap, and RankedCandidates already warns that a full page
+// is a ranking rather than a match set. The repair is the parallel lexical
+// section ListWorkItems attaches around this path (wi_lexical.go): judge
+// existence by that section's explicit total, or by ids=/filters, never by a
+// page from here.
 
 import (
 	"context"

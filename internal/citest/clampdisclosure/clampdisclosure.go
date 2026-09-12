@@ -235,6 +235,13 @@ var clampsOutsideTheConvention = map[string]ScopeNote{
 			"different clocks. It is REPORTED to a caller (last_active_age_seconds) and was never " +
 			"SENT by one, which is the distinction the convention turns on",
 	},
+	"internal/domain/lexical.go:lexicalSnippet:matchAt": {
+		Origin: "a byte offset of a case-insensitive token match inside one line of a stored " +
+			"document, recomputed against the trimmed line while building a lexical hit's " +
+			"snippet (aihub#360); floored at 0 because ToLower can shift byte offsets on a " +
+			"handful of code points. Derived from stored content, never a request field — the " +
+			"caller's query reaches this function only as the token being searched for",
+	},
 	"internal/domain/memory.go:MemoryStrength:stabilityDays": {
 		Origin: "a decay constant derived from the memory's own type by ComputeStabilityDays, " +
 			"never a request field; the guard is against dividing by zero",

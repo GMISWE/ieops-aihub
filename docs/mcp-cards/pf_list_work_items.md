@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_list_work_items",
-  "description_sha256": "907e2546b613d754fe8d31d24223eded70811856dec589b33f42fd29d65d64f4",
+  "description_sha256": "8a209fd6625db5a4e9e90c40141657caefca941ddd17232ff3ac3dbdb7baf794",
   "input_schema_sha256": "5ea984a67dd4a0af8d723b6859fdc45f6335557b8124c2412f38ceb7e8666d7d",
   "params": {
     "cursor": {
@@ -269,6 +269,32 @@ droppable fields would rot exactly as quietly as the response shape it describes
 held together in `internal/mcp/list_wi_slim_test.go`
 (`TestSlimListWorkItems_KeepsValueGatedCandidates`) so that keeping one and dropping
 the other — the revision this card is the record of — is red.
+
+Since `aihub#360` (2026-09-12) a list that carries a `query` returns a SECOND
+top-level section, `lexical`: verbatim-substring retrieval — every whitespace
+token of the query must appear, case-insensitively, in goal+content — over the
+same filtered scope, parallel to `items` and never merged into it
+(`internal/domain/wi_lexical_db_test.go`). Its hits
+carry no `similarity`, its `total` is explicit even at 0, and it is present
+exactly when the request carried a non-empty `query=` (`similar_to` has no
+query text and never gets one), whichever path served `items` — driven against
+a live pgvector database by `internal/domain/wi_lexical_db_test.go`
+(`TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot`), whose
+anchor reproduces the failure family `aihub#367` measured WORST on this tool
+(query= recall 0/6 at every N, 2026-09-06): the vector page fills with decoys,
+the parent work item is outside it, and the lexical section retrieves it — and
+whose garbage-query arm holds the published advice, a full semantic page next
+to an explicit `lexical.total: 0`. The last arm of
+`TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot` holds that
+the caller's filters still scope the section (a `status` filter that excludes
+the target empties it). A hit's `snippet` is an evidence line of at most 160 runes;
+`wi.content` is read server-side to compute it and never travels, so the
+"absent key means null" contract on `items` and the no-bodies property above
+are both untouched — the hop-5 projection keeps forwarding unknown top-level
+keys (`internal/mcp/list_wi_slim_test.go`,
+`TestSlimListWorkItems_KeepsUnknownTopLevelKeys`), and the section's K10
+declaration lives in `live-response-keys.json` because the generated corpus
+predates the key (`internal/mcp/card_response_keys_live_e2e_db_test.go`).
 
 That projection is why `content` is always null here:
 `internal/domain/list_work_items_select_columns_test.go`

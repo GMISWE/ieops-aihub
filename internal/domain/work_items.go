@@ -1374,6 +1374,16 @@ type ListWorkItemsResult struct {
 	// therefore meaningful: it says the ILIKE text fallback answered, and that
 	// no item carries a similarity.
 	Semantic *SemanticInfo `json:"semantic,omitempty"`
+	// Lexical is the second retrieval section (aihub#360): verbatim-substring
+	// matches over goal+content, parallel to — never merged into — Items.
+	// Present exactly when the request carried a non-empty query= (similar_to
+	// has no query text, so it never gets one), whichever path served Items,
+	// and an empty match set is an explicit total of 0 rather than an absent
+	// field. Attached by ListWorkItems around the routing, same one-exit
+	// reasoning as RequestAdjusted. See lexical.go for the aihub#367
+	// measurement (query= scored 0/6 at every N) and wi_lexical.go for the
+	// predicate.
+	Lexical *WorkItemLexicalSection `json:"lexical,omitempty"`
 }
 
 // ListWorkItems returns a paginated list of work items.
@@ -1688,6 +1698,22 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 		return res, err
 	}
 	res.RequestAdjusted = appendIntAdjustment(res.RequestAdjusted, "limit", requestedLimit, f.Limit)
+	// aihub#360: the lexical section, attached HERE around the routing for the
+	// same one-exit reason as the disclosure above — listWorkItemsPage returns
+	// from the similar_to path, the vector path, and the ILIKE text path, and
+	// annotating each is three chances to forget one. Keyed on the REQUEST (a
+	// non-empty query=), never on which path answered: aihub#367 measured the
+	// vector path missing at 0/6 for every N precisely while returning
+	// plausible full pages, and on the ILIKE fallback the section is a cheap
+	// restatement rather than a wrong one. f.Limit is already normalized above,
+	// so the section's page cap is the same one Items obeys.
+	if f.Query != nil && strings.TrimSpace(*f.Query) != "" {
+		lex, lerr := listWorkItemsLexical(ctx, pool, project, f)
+		if lerr != nil {
+			return nil, lerr
+		}
+		res.Lexical = lex
+	}
 	return res, nil
 }
 

@@ -33,14 +33,37 @@ func seg(s string) string { return url.PathEscape(s) }
 // that has to know where the cut falls. Go marshals map keys alphabetically, so
 // what a given key's budget is depends on where its name sorts — a producer
 // cannot work that out from the total alone, but it can from this number.
-const DetailsRenderLimit = 500
+// internal/domain.memoryConflictErr is the second (aihub#375), pinned by
+// memory_conflict_details_test.go the same way.
+//
+// 2048, was 500 (aihub#375). The old number was in practice a patch for ONE
+// producer — the CONFLICT_SIMILAR_MEMORY refusal used to carry the colliding
+// memory's ENTIRE body in details.existing.content — and every other error paid
+// for it: keys past the cut were lost from envelopes that held nothing
+// unbounded at all. With that producer bounded at the source, the cap's job
+// shrinks to backstopping COUNT-scaled lists, and its size follows from the
+// measured envelopes (internal/domain, 2026-09-12, compacted bytes):
+//
+//	memory conflict, 120-rune excerpt      491 CJK / 634 worst-case 4-byte runes
+//	commit-lock refusal                    767 @ 1 conflict, 1219 @ 3
+//	duplicate wi, goal at its 500-rune cap 1582  ← largest count-bounded envelope
+//	dedup candidates at their LIMIT 50     16166 — still truncated, by design
+//
+// So 2048 passes every count-bounded envelope whole (largest measured 1582) and
+// a commit-lock refusal up to ~6 conflicting files (beyond that the cut only
+// reaches keys whose content the untruncated Message already states verbatim),
+// while candidates/conflicts lists at scale still hit the backstop. The census
+// in internal/domain/err_details_census_test.go is what keeps "count-bounded"
+// true: a new details writer must classify itself there before it ships.
+const DetailsRenderLimit = 2048
 
 // formatDetails renders the server error `details` object as a compact
 // " details=<json>" suffix for the error string, so the conflict metadata the
 // server already computes (lock holder, dedup candidates, superseded_by, …)
 // reaches the caller instead of being silently dropped. Empty/null details
-// yield "". The rendered JSON is capped at ~500 bytes; the server contract keeps
-// secrets out of `details`, so passing it through verbatim is safe (aihub#209).
+// yield "". The rendered JSON is capped at DetailsRenderLimit bytes; the server
+// contract keeps secrets out of `details`, so passing it through verbatim is
+// safe (aihub#209).
 func formatDetails(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""

@@ -36,9 +36,10 @@ var unmatchedTypesFn = domain.UnmatchedTypes
 var loadMemoryFn memLoaderFn = domain.GetMemoryByID
 
 // resolveLatestFn is the production-wired GetLatestByID — swappable in tests.
-// Used ONLY on /ui responses (handleArtifactHTML, handleUIMemoryDetail) to
-// resolve a possibly-superseded memory id to the current head of its
-// supersede lineage (aihub#248). Kept as a seam separate from loadMemoryFn so
+// Used on /ui responses (handleArtifactHTML, handleUIMemoryDetail) to resolve
+// a possibly-superseded memory id to the current head of its supersede lineage
+// (aihub#248), and — since aihub#627 — by handleUpdateMemory to load the head
+// its access gates run against. Kept as a seam separate from loadMemoryFn so
 // tests can inject a head that differs from the originally-requested record
 // and assert on each seam's call count independently.
 var resolveLatestFn memLoaderFn = domain.GetLatestByID
@@ -607,13 +608,65 @@ func parseMemRelatedRefs(attrs json.RawMessage) []MemRelatedRef {
 	return refs
 }
 
-// commitMemoryProjectFn fetches (project, status) for a memory without filtering
-// out redacted rows — allowing the caller to do a project access-check before
+// memWriteMeta is the projection every single-memory WRITE entry loads before
+// touching the row: project for the writer gate, status kept for the domain
+// layer's redacted refusals, and — aihub#627 — visibility + author so the
+// per-memory visibility rule runs at the entry too. Before aihub#627 the write
+// entries loaded (project, status) only, so a project writer could annotate,
+// reply to, resolve, activate or redact a private memory they could not READ:
+// the request's acceptance confirmed the row's existence, which is exactly the
+// oracle aihub#379 closed on the read side.
+type memWriteMeta struct {
+	Project      string
+	Status       string
+	Visibility   string
+	AuthorUserID string
+}
+
+// commitMemoryProjectFn fetches memWriteMeta for a memory without filtering
+// out redacted rows — allowing the caller to do its access checks before
 // CommitMemory's own redacted guard fires. Swappable in tests.
-var commitMemoryProjectFn = func(ctx context.Context, pool *pgxpool.Pool, memID string) (project, status string, err error) {
-	err = pool.QueryRow(ctx, `SELECT project, status FROM memories WHERE id=$1`, memID).
-		Scan(&project, &status)
-	return
+var commitMemoryProjectFn = func(ctx context.Context, pool *pgxpool.Pool, memID string) (memWriteMeta, error) {
+	var m memWriteMeta
+	err := pool.QueryRow(ctx, `SELECT project, status, visibility, author_user_id FROM memories WHERE id=$1`, memID).
+		Scan(&m.Project, &m.Status, &m.Visibility, &m.AuthorUserID)
+	return m, err
+}
+
+// checkMemoryWriteAccess is the ONE gate every single-memory write entry
+// (annotate / reply / resolve / edit / delete / activate / redact) runs before
+// mutating the row (aihub#627). The order of its three checks is the contract:
+//
+//  1. load failure → errNotVisible(): the shared bytes a nonexistent id earns.
+//  2. per-memory visibility → checkMemoryVisibility: a row the caller cannot
+//     READ (private and not the author; admin tier and not an admin) answers
+//     those same bytes — a write request must not confirm what a read hides.
+//     This runs BEFORE the role check so a member merely short of writer gets
+//     the 404 for an invisible row, never a 403 that confirms it exists.
+//  3. project writer role → checkProjectAccess: a non-member gets the shared
+//     404; a member short of writer keeps the explanatory 403 (aihub#377's
+//     positive control), which is therefore only ever said about rows the
+//     caller can see.
+//
+// The verdict in step 2 comes from memoryVisibleTo via checkMemoryVisibility —
+// the single Go copy of the rule — never from a re-implementation here.
+func checkMemoryWriteAccess(ctx context.Context, c echo.Context, pool *pgxpool.Pool, u *UserContext, memID string) error {
+	meta, loadErr := commitMemoryProjectFn(ctx, pool, memID)
+	if loadErr != nil {
+		ae := errNotVisible()
+		writeError(c, ae) //nolint:errcheck // response committed; return ae below
+		return ae
+	}
+	// memoryVisibleTo reads only Visibility and AuthorUserID, so this partial
+	// *domain.Memory is sufficient — the same sharp edge fetchArtifactLinks
+	// documents at its own call site (routes_artifacts.go).
+	if err := checkMemoryVisibility(c, u, &domain.Memory{
+		Visibility:   meta.Visibility,
+		AuthorUserID: meta.AuthorUserID,
+	}); err != nil {
+		return err
+	}
+	return checkProjectAccess(c, u, meta.Project, "writer")
 }
 
 // doCommitMemoryFn wraps domain.CommitMemory; swappable in tests.
@@ -675,15 +728,10 @@ func handleUICommitMemory(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		// Load (project, status) without filtering redacted so we can do the
-		// access check before CommitMemory's own redacted guard fires.
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-
-		// C1: require writer access before mutating.
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		// C1 + aihub#627: writer access AND per-memory visibility before
+		// mutating (redacted rows still load, so CommitMemory's own redacted
+		// guard keeps its explanatory refusal for callers who may see the row).
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 
@@ -718,11 +766,7 @@ func handleUIEditCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		if err := doEditCommitFn(ctx, pool, memID, commitID, body, u.UserID, u.DisplayName, u.Role); err != nil {
@@ -751,11 +795,7 @@ func handleUIDeleteCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		if err := doDeleteCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, u.Role); err != nil {
@@ -788,11 +828,7 @@ func handleUIReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
@@ -821,11 +857,7 @@ func handleUIResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		reply := c.FormValue("reply")

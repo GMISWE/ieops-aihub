@@ -1289,6 +1289,17 @@ func handleUnshareArtifact(pool *pgxpool.Pool) echo.HandlerFunc {
 		if aihubErr != nil {
 			return writeError(c, hideNotFound(aihubErr))
 		}
+		// aihub#627: an invisible memory (private and not the author, or admin
+		// tier and not an admin) must answer the shared 404 here too — the
+		// early-return below would otherwise echo its visibility tier back to
+		// any project writer, confirming both existence and classification.
+		// A public memory is visible to every member, so revoking a share is
+		// never blocked by this check. handleShareArtifact's 403 for private/
+		// admin tiers is a deliberate action refusal (aihub#379) and is NOT
+		// mirrored here: share's caller can see the row, unshare's may not.
+		if err := checkMemoryVisibility(c, u, mem); err != nil {
+			return err
+		}
 		if err := checkProjectAccess(c, u, mem.Project, "writer"); err != nil {
 			return err
 		}
@@ -1923,11 +1934,7 @@ func handleUIArtifactReplyCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		if err := doReplyCommitFn(ctx, pool, memID, commitID, u.UserID, u.DisplayName, body); err != nil {
@@ -1956,11 +1963,7 @@ func handleUIArtifactResolveCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 		reply := c.FormValue("reply")
@@ -2004,12 +2007,10 @@ func handleUIArtifactCommit(pool *pgxpool.Pool) echo.HandlerFunc {
 		ctx, cancel := contextWithTimeout(c)
 		defer cancel()
 
-		// Load (project, status) to check access before CommitMemory's own guard.
-		project, _, loadErr := commitMemoryProjectFn(ctx, pool, memID)
-		if loadErr != nil {
-			return writeError(c, errNotVisible())
-		}
-		if err := checkProjectAccess(c, u, project, "writer"); err != nil {
+		// aihub#627: writer access AND per-memory visibility before
+		// CommitMemory's own guard — a writer who cannot READ the artifact
+		// (private, another author) must get the same bytes as "no such id".
+		if err := checkMemoryWriteAccess(ctx, c, pool, u, memID); err != nil {
 			return err
 		}
 

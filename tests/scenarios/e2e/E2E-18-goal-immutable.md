@@ -23,7 +23,11 @@ Save WI_ID, ORIGINAL_GOAL
 ### Try to update goal — must be rejected
 AS ADMIN: pf_update_work_item(work_item_id=WI_ID,
   goal="[test] E2E-18 CHANGED goal — must not be saved")
-ASSERT_ERROR: HTTP 400 or HTTP 422 containing "goal" and "immutable" or "not allowed"
+ASSERT_ERROR: HTTP 400 containing "goal_change_reason is required"
+NOTE: full current message is "goal_change_reason is required (min 10 chars) when
+updating goal" (`internal/domain/work_items.go`, `UpdateWorkItem`); the assertion
+pins only the stable prefix because the "(min 10 chars)" half is the part most
+likely to drift.
 NOTE: If server returns 200, check that goal was NOT actually changed (silently ignored)
 
 ### Verify goal unchanged

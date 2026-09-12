@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -496,20 +495,17 @@ func recallSchema() json.RawMessage {
 		// description below, which says where the value must come from.
 		//
 		// The paging caveat is IN the description because leaving it out builds
-		// the trap this repo keeps re-learning: recall's vector path, the hybrid
-		// merge and the lexical algorithm each set Cursor="" and return a nil
-		// next_cursor (internal/domain/memory.go, recallHybrid and the RecallAlgo
-		// branch), so a caller paging a semantic recall gets page one forever with
-		// nothing saying why.
+		// the trap this repo keeps re-learning: recall's vector path and the
+		// hybrid merge each set Cursor="" and return a nil next_cursor
+		// (internal/domain/memory.go, recallHybrid), so a caller paging a
+		// semantic recall gets page one forever with nothing saying why.
 		//
-		// recall_algo is deliberately NOT published alongside it. Its exemption
-		// reason is about contract surface rather than a dead end — "a
-		// plugin-build opt-in (POLYFORGE_RECALL_ALGO) ... deliberately kept out of
-		// the model-visible contract" — and, unlike cursor, NOTHING in any
-		// response advertises it, so no caller is shown a value it cannot use.
-		// That decision stands; it is recorded in the G4 allowlist
-		// (serverNamesNoToolCanReach) instead of being reversed on the authority
-		// of a scanner.
+		// recall_algo was deliberately NOT published alongside it, and aihub#632
+		// then retired the parameter outright: "lexical" was its only non-default
+		// value, the server branch it selected is deleted, and the aihub#360
+		// lexical section serves that semantics on every recall with a query.
+		// Do not re-add it here without also reversing
+		// TestRecallAlgoStaysUnpublished and TestRecallAlgoIsRetired.
 		"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor. "+
 			"TEXT-path paging only: the semantic (vector) path and the hybrid merge "+
 			"return no next_cursor and ignore this."),
@@ -653,14 +649,13 @@ func buildRecallParams(args map[string]any) (url.Values, error) {
 			params.Set(k, "true")
 		}
 	}
-	// recall_algo: explicit arg wins, else env (POLYFORGE_RECALL_ALGO) lets a plugin
-	// build opt into the opt③ L1 lexical-relevance recall path server-side without
-	// changing the tool contract. Empty -> server default (recency).
-	if algo := strArg(args, "recall_algo"); algo != "" {
-		params.Set("recall_algo", algo)
-	} else if algo := os.Getenv("POLYFORGE_RECALL_ALGO"); algo != "" {
-		params.Set("recall_algo", algo)
-	}
+	// No recall_algo forwarding. The explicit-arg and POLYFORGE_RECALL_ALGO env
+	// hops sat here until aihub#632 retired the parameter: "lexical" was its only
+	// non-default value, the server branch it selected is deleted, and the
+	// aihub#360 lexical section serves that semantics on every recall with a
+	// query. An explicit recall_algo argument is now an unknown parameter and is
+	// disclosed as such (aihub#389); TestRecallAlgoIsRetired pins that neither
+	// source reaches the wire again.
 	return params, nil
 }
 

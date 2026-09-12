@@ -3,14 +3,15 @@ package domain
 // The memory half of the aihub#360 lexical section — see lexical.go for the
 // measurement (aihub#367, 2026-09-06) and the design rulings this implements.
 //
-// Note what this deliberately is NOT: the recall_algo="lexical" branch in
-// recallText. That branch RANKS the text path's page by ts_rank over
-// content_tsv, still inside the single items[] list, and (as read from the
-// control flow in recallRouted) is unreachable while an embedding provider is
-// live and no work_item_id filter is set — the vector path answers first. This
-// file retrieves a SECOND, parallel result set by exact substring, on every
-// recall that carries a query, whichever path served items[]. The two share
-// nothing but the request.
+// Note what this deliberately is NOT: a re-ranking of items[]. A separate
+// "lexical" once existed there — the recall_algo="lexical" branch in
+// recallText, which RANKED the text path's page by ts_rank over content_tsv,
+// still inside the single items[] list, and (as read from the control flow in
+// recallRouted) was unreachable while an embedding provider was live and no
+// work_item_id filter was set — the vector path answered first. aihub#632
+// retired that branch with the recall_algo parameter, so this file is the one
+// "lexical" in pf_recall: a SECOND, parallel result set by exact substring, on
+// every recall that carries a query, whichever path served items[].
 
 import (
 	"context"

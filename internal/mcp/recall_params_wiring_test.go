@@ -64,25 +64,16 @@ var recallLocalOnlyParams = map[string]string{
 		"would ignore the query param), i.e. a fresh instance of aihub#148.",
 }
 
-// recallUnpublishedForwardedParams are forwarded but deliberately not published.
-// The reverse direction of the same drift, and harmless only when it is
-// intentional — so it is written down rather than tolerated by omission.
-//
-// ⚠️ `cursor` was here until aihub#425, with the reason "paging is driven by
-// next_cursor from a previous response, not composed by the model; publishing it
-// would invite an invented cursor." It was moved into recallWireProbes below,
-// per the instruction TestRecallUnpublishedForwardedParamsAreDocumented gives
-// when a name becomes published. What overrode the reason was a measurement:
-// next_cursor is returned TO THE MODEL in a pf_recall result, so the model was
-// already holding cursors it had no published way to spend — the note assumed
-// the model would have to invent one.
-var recallUnpublishedForwardedParams = map[string]string{
-	"recall_algo": "a plugin-build opt-in (POLYFORGE_RECALL_ALGO) into the opt3 L1 " +
-		"lexical-relevance path, deliberately kept out of the model-visible contract. " +
-		"aihub#425 kept this decision and recorded it in the G4 allowlist " +
-		"(serverNamesNoToolCanReach) rather than reversing it: unlike cursor, no response " +
-		"field advertises it, so nobody is handed a value they cannot use.",
-}
+// The forwarded-but-unpublished class is EMPTY, and that is two exits, not a
+// gap. `cursor` left in aihub#425 by becoming published (it moved into
+// recallWireProbes below): next_cursor was measured reaching the model, so the
+// model was already holding cursors it had no published way to spend.
+// `recall_algo` left in aihub#632 by being retired: "lexical" was its only
+// non-default value, the recallText branch it selected is deleted, and the
+// aihub#360 lexical section serves that semantics on every recall with a
+// query. TestRecallAlgoIsRetired below holds the second exit shut; a NEW
+// forwarded-but-unpublished name needs its own written reason and assertions,
+// the way the old recallUnpublishedForwardedParams map carried them.
 
 // recallWireProbes is hop 2 stated as VALUES: for each published param, the JSON
 // shapes a caller may actually put on the wire, and the query value each must
@@ -358,7 +349,10 @@ func TestRecallThresholdHasNoDefault(t *testing.T) {
 // TestRecallForwardsNothingTheCallerDidNotSend: a param the caller omitted must
 // not appear, or the server filters on a value nobody asked for.
 func TestRecallForwardsNothingTheCallerDidNotSend(t *testing.T) {
-	t.Setenv("POLYFORGE_RECALL_ALGO", "")
+	// Set, not cleared: before aihub#632 this env var fed a recall_algo query
+	// param and the test had to blank it. Now it must be inert even when set,
+	// which makes this arm a second pin on the retirement.
+	t.Setenv("POLYFORGE_RECALL_ALGO", "lexical")
 	got := mustBuildRecallParams(t, map[string]any{"project": "aihub", "query": "token cost"})
 	want := map[string]string{"project": "aihub", "query": "token cost"}
 	if len(got) != len(want) {
@@ -371,32 +365,31 @@ func TestRecallForwardsNothingTheCallerDidNotSend(t *testing.T) {
 	}
 }
 
-// TestRecallUnpublishedForwardedParamsAreDocumented closes the reverse
-// direction: something forwarded but not published is discoverable by nobody, so
-// it must at least be deliberate. Both entries are also asserted to still work,
-// because an undocumented param is the easiest thing to break unnoticed.
-func TestRecallUnpublishedForwardedParamsAreDocumented(t *testing.T) {
-	t.Setenv("POLYFORGE_RECALL_ALGO", "")
-	published := schemaPropTypes(t, recallSchema())
-	for name := range recallUnpublishedForwardedParams {
-		if _, ok := published[name]; ok {
-			t.Errorf("%q is now published; move it into recallWireProbes and drop the exemption", name)
-			continue
-		}
-		got := mustBuildRecallParams(t, map[string]any{"project": "aihub", name: "probe-value"})
-		if got.Get(name) != "probe-value" {
-			t.Errorf("%q is documented as forwarded-but-unpublished, yet it was not forwarded: query %v", name, got)
-		}
+// TestRecallAlgoIsRetired pins aihub#632: recall_algo must not reach the wire
+// from EITHER of the two sources that used to feed it, and must not be
+// published. This is the arm that goes red if the forwarding block is quietly
+// restored to buildRecallParams — the exact resurrection path, since the
+// parameter was never in the schema and no published-param gate can see it.
+func TestRecallAlgoIsRetired(t *testing.T) {
+	if _, ok := schemaPropTypes(t, recallSchema())["recall_algo"]; ok {
+		t.Errorf("pf_recall publishes recall_algo again; aihub#632 retired the parameter " +
+			"(the server no longer reads it), so publishing the name advertises a switch " +
+			"that selects nothing, which is aihub#394's signature")
 	}
-	// The env fallback is the only way recall_algo reaches the server for a
-	// plugin build that never passes it explicitly.
-	t.Setenv("POLYFORGE_RECALL_ALGO", "l1_lexical")
-	if got := mustBuildRecallParams(t, map[string]any{"project": "aihub"}); got.Get("recall_algo") != "l1_lexical" {
-		t.Errorf("POLYFORGE_RECALL_ALGO did not reach the wire: query %v", got)
+	// The explicit argument. The retired value itself is the probe: a caller
+	// still sending recall_algo="lexical" must get the aihub#389 unknown-param
+	// disclosure and an unchanged query string, never a forwarded knob.
+	got := mustBuildRecallParams(t, map[string]any{"project": "aihub", "recall_algo": "lexical"})
+	if got.Has("recall_algo") {
+		t.Errorf("an explicit recall_algo argument reached the wire as %q; aihub#632 deleted "+
+			"the forwarding with the server branch, so forwarding it again sends a name "+
+			"nothing reads", got.Get("recall_algo"))
 	}
-	// An explicit argument must win over the environment.
-	if got := mustBuildRecallParams(t, map[string]any{"project": "aihub", "recall_algo": "recency"}); got.Get("recall_algo") != "recency" {
-		t.Errorf("explicit recall_algo must win over POLYFORGE_RECALL_ALGO: query %v", got)
+	// The env fallback, which was the plugin-build opt-in route.
+	t.Setenv("POLYFORGE_RECALL_ALGO", "lexical")
+	if got := mustBuildRecallParams(t, map[string]any{"project": "aihub"}); got.Has("recall_algo") {
+		t.Errorf("POLYFORGE_RECALL_ALGO reached the wire as %q after retirement: query %v",
+			got.Get("recall_algo"), got)
 	}
 }
 

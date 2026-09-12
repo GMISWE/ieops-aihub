@@ -38,6 +38,10 @@ package mcp_test
 //     a value it cannot use, and the reason — a deployment-level opt-in through
 //     POLYFORGE_RECALL_ALGO — still stands. NOT published; recorded in the G4
 //     allowlist instead, per the precedent aihub#424 set on the same gate.
+//     (2026-09-12: aihub#632 then retired the parameter outright — the server
+//     branch it selected is deleted and neither source is forwarded any more, so
+//     the wire arm below now asserts its ABSENCE. The publication half of the
+//     decision is unchanged: the name stays out of the schema.)
 //
 // That distinction is worth stating because it changes what the fix has to be
 // and what may be claimed about it. Had the premise been taken on trust, three
@@ -124,7 +128,7 @@ func TestBoundMemoryAndEventParamsArePublished(t *testing.T) {
 // the opposite sign, and it is not hypothetical for these four: pf_read_events'
 // cursor was exactly that until this change, bound by the server and never sent.
 func TestBoundMemoryAndEventParamsReachTheWire(t *testing.T) {
-	t.Run("pf_recall cursor and the still-unpublished recall_algo", func(t *testing.T) {
+	t.Run("pf_recall cursor, and the retired recall_algo stays off the wire", func(t *testing.T) {
 		q := newQueryRecorder(t)
 		callToolAgainstRecorder(t, q, "pf_recall", map[string]any{
 			"project": "aihub", "query": "anything",
@@ -134,9 +138,14 @@ func TestBoundMemoryAndEventParamsReachTheWire(t *testing.T) {
 		if got.Get("cursor") != "CURSOR_TOKEN_425" {
 			t.Errorf("cursor on the wire = %q, want %q", got.Get("cursor"), "CURSOR_TOKEN_425")
 		}
-		if got.Get("recall_algo") != "lexical" {
-			t.Errorf("recall_algo on the wire = %q, want %q — it stays UNPUBLISHED but must "+
-				"keep working for the plugin builds that pass it", got.Get("recall_algo"), "lexical")
+		// Until aihub#632 this arm asserted the opposite: recall_algo reached the
+		// wire unpublished, for the plugin builds that passed it. The parameter is
+		// retired — the server reads no such name — so forwarding it again would
+		// send a knob nothing selects. Measured through the REAL session, so a
+		// restored forwarding line fails here as well as in the unit arm
+		// (TestRecallAlgoIsRetired, recall_params_wiring_test.go).
+		if _, present := got["recall_algo"]; present {
+			t.Errorf("recall_algo on the wire = %q after aihub#632 retired it", got.Get("recall_algo"))
 		}
 	})
 
@@ -196,20 +205,19 @@ func TestUnsuppliedCursorIsNotSentAsEmpty(t *testing.T) {
 	}
 }
 
-// TestRecallAlgoStaysUnpublishedOnPurpose pins the half of this work item that
-// is a decision NOT to change something.
-//
-// The aihub#419 gate flagged recall_algo exactly as it flagged the other three,
-// and the difference is not visible from the gate's output — it is visible only
-// in what each name does for a caller. Without this arm, the next person to read
-// the baseline diff sees three names published and one silently dropped, which
-// is indistinguishable from an oversight.
-func TestRecallAlgoStaysUnpublishedOnPurpose(t *testing.T) {
+// TestRecallAlgoStaysUnpublished pins what is left of the aihub#425 decision
+// after aihub#632 retired the parameter: the name stays out of the published
+// schema. Under aihub#425 that was "unpublished on purpose, forwarded anyway";
+// under aihub#632 nothing reads the name at any hop, so publishing it would
+// advertise a switch that selects nothing — aihub#394's signature. This arm
+// reads the schema the server actually publishes over tools/list, so it also
+// covers a name re-added to the wrong builder.
+func TestRecallAlgoStaysUnpublished(t *testing.T) {
 	tool := publishedTool(t, "pf_recall")
 	if _, published := schemaProps(t, tool)["recall_algo"]; published {
-		t.Errorf("pf_recall now publishes recall_algo. That may well be right, but it reverses a " +
-			"written decision (recall_params_wiring_test.go's recallUnpublishedForwardedParams, " +
-			"and the G4 allowlist entry handleRecall.recall_algo) — change those together with " +
-			"it, or the tree carries a reason that contradicts the code.")
+		t.Errorf("pf_recall publishes recall_algo, which aihub#632 retired end to end (schema, " +
+			"forwarding, server read and the recallText branch). Re-publishing the name alone " +
+			"hands callers a knob nothing reads; if the capability is wanted back, restore the " +
+			"reader first and update TestRecallAlgoIsRetired with it.")
 	}
 }

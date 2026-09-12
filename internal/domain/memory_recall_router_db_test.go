@@ -365,7 +365,6 @@ func TestRecallRouterComplementPlaceholdersBindAcrossOptions(t *testing.T) {
 		{"admin caller drops the visibility params", func(r *RecallRequest) { r.CallerRole = "admin" }},
 		{"include archived", func(r *RecallRequest) { r.IncludeArchived = true }},
 		{"min strength set", func(r *RecallRequest) { r.MinStrength = 0.9 }},
-		{"lexical algo takes the other SELECT branch", func(r *RecallRequest) { r.RecallAlgo = "lexical" }},
 		{"similarity threshold set", func(r *RecallRequest) { r.SimilarityThreshold = 0.01 }},
 		{"no type filter", func(r *RecallRequest) { r.Types = nil }},
 		{"single non-embeddable type", func(r *RecallRequest) { r.Types = []string{"methodology.spec"} }},

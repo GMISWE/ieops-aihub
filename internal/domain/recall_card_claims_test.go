@@ -10,9 +10,10 @@ package domain
 //	    -> TestRecallVisibilityScopingIsCallerDerivedOnBothPaths
 //	"Recency is the only ranking SIGNAL — `id DESC` is the deterministic
 //	 tiebreaker for rows sharing a reference time … not a second signal."
-//	"text, `recall_algo=lexical` — `ts_rank` first, then `tanh` of effective
-//	 strength, which carries `exp(-days/stability)`."
 //	    -> TestRecallOrderingSignalsAreTheOnesTheCardNames
+//	    (the arm's second subject, the `recall_algo=lexical` ordering, was
+//	     retired with the parameter by aihub#632; the arm now pins the ABSENCE
+//	     of a ts_rank ordering in the text path instead)
 //	"`cursor` works on the TEXT path only. The vector path and the hybrid merge
 //	 both set an empty cursor and return a nil `next_cursor` …"
 //	    -> TestRecallCursorIsPromisedOnTheTextPathOnly
@@ -449,8 +450,8 @@ func recallOrderByClauses(t *testing.T, file string) []string {
 	return out
 }
 
-// TestRecallOrderingSignalsAreTheOnesTheCardNames holds the two ranking
-// sentences the card writes as SQL.
+// TestRecallOrderingSignalsAreTheOnesTheCardNames holds the ranking sentence
+// the card writes as SQL, plus the retirement aihub#632 made of the other one.
 //
 // 🔴 The discriminating half is the COUNT of ordering terms, not their content.
 // "Recency is the only ranking SIGNAL" is false the moment a third term appears,
@@ -465,15 +466,20 @@ func recallOrderByClauses(t *testing.T, file string) []string {
 // day that constant moves the card's own quoted SQL is what goes red — never the
 // test's literal, which is the base-strength precedent §3.4 states.
 //
-// Mutants, all applied to the tree and run (2026-09-10):
+// The lexical half of this arm (ts_rank first, tanh second, exp decay inside)
+// was DELETED with its subject: aihub#632 retired recall_algo and the alternate
+// SELECT it picked in recallText. What remains of it is the negative pin below —
+// no ORDER BY in the text path may rank by ts_rank — which is the domain-level
+// gate that goes red if the dead branch is quietly restored.
+//
+// Mutants, all applied to the tree and run (2026-09-10); M2/M3/M6 retired with
+// their subject by aihub#632, M8 added and run on the post-retirement tree:
 //
 //	M1  the default ORDER BY grows `, base_strength DESC`             RED (term count)
-//	M2  the lexical ORDER BY swaps ts_rank and the tanh term          RED (order)
-//	M3  the lexical ORDER BY drops the exp() decay factor             RED (decay)
 //	M4  memRefTimeSQL becomes COALESCE(last_activated_at, created_at) RED (card mismatch)
 //	M5  the card's quoted default ORDER BY says `created_at DESC`     RED (publication)
-//	M6  the card's lexical bullet stops naming `tanh`                 RED (publication)
 //	M7  green control: reword the bullet's trailing prose             GREEN
+//	M8  restore the recall_algo="lexical" SELECT branch to recallText RED (retirement)
 func TestRecallOrderingSignalsAreTheOnesTheCardNames(t *testing.T) {
 	card := readRecallCard(t)
 
@@ -486,19 +492,14 @@ func TestRecallOrderingSignalsAreTheOnesTheCardNames(t *testing.T) {
 			"instead would go green on the one day it was needed.", recallCardPath, wantDefault)
 	}
 	clauses := recallOrderByClauses(t, recallTextPathFile)
-	if len(clauses) < 2 {
-		t.Fatalf("%s yielded %d ORDER BY clause(s), want at least the default and the lexical "+
-			"one this card describes (%v). A walk that finds one of the two cannot tell which "+
-			"it found, and the assertions below would report the other as missing.",
-			recallTextPathFile, len(clauses), clauses)
+	if len(clauses) == 0 {
+		t.Fatalf("%s yielded no ORDER BY clause at all — the walk read nothing and every "+
+			"assertion below would be vacuous", recallTextPathFile)
 	}
-	var gotDefault, gotLexical string
+	var gotDefault string
 	for _, c := range clauses {
-		switch {
-		case strings.Contains(c, memRefTimeSQL+" DESC, id DESC"):
+		if strings.Contains(c, memRefTimeSQL+" DESC, id DESC") {
 			gotDefault = c
-		case strings.Contains(strings.ToLower(c), "ts_rank"):
-			gotLexical = c
 		}
 	}
 	if gotDefault == "" {
@@ -514,42 +515,19 @@ func TestRecallOrderingSignalsAreTheOnesTheCardNames(t *testing.T) {
 			"score had.", len(terms), terms)
 	}
 
-	// ── the lexical path ─────────────────────────────────────────────────────
-	for _, token := range []string{"ts_rank", "tanh", "exp(-days/stability)"} {
-		if !strings.Contains(card, "`"+token+"`") {
-			t.Errorf("%s no longer names `%s` in its lexical-ordering bullet. The three tokens "+
-				"ARE the published claim about that path; dropping one from the card is how the "+
-				"SQL half below stops being checked without any test changing.",
-				recallCardPath, token)
+	// ── the retired lexical-algo path stays retired ──────────────────────────
+	// aihub#632: recall_algo's "lexical" branch ranked this page by ts_rank over
+	// content_tsv. The card now says the items ordering carries no lexical
+	// relevance term (the aihub#360 lexical section is the lexical semantics),
+	// so a ts_rank ORDER BY reappearing in the text path is the card's claim
+	// going false with every presence check green — the same silent shape as M1.
+	for _, c := range clauses {
+		if strings.Contains(strings.ToLower(c), "ts_rank") {
+			t.Errorf("%s ranks a recall page by ts_rank again (%q). aihub#632 retired the "+
+				"recall_algo=\"lexical\" branch with the parameter: no published knob selects "+
+				"this ordering, so restoring it changes ranking behind a contract that says "+
+				"recency is the only signal.", recallTextPathFile, c)
 		}
-	}
-	if gotLexical == "" {
-		t.Fatalf("no ORDER BY in %s mentions ts_rank, so the lexical path the card describes "+
-			"either moved or lost its relevance term, and the assertions below have nothing to "+
-			"read.", recallTextPathFile)
-	}
-	lexTerms := splitSQLTerms(strings.TrimPrefix(gotLexical, "ORDER BY "))
-	if len(lexTerms) != 2 {
-		t.Fatalf("the lexical ordering has %d term(s) (%v), want the 2 the card names: ts_rank "+
-			"and the decayed strength term. A third term is a ranking signal no hop publishes.",
-			len(lexTerms), lexTerms)
-	}
-	if !strings.Contains(strings.ToLower(lexTerms[0]), "ts_rank") {
-		t.Errorf("the lexical ordering's FIRST term is %q, which is not the ts_rank relevance "+
-			"score. The card says ts_rank first and the strength term second: reversing them "+
-			"makes strength the primary signal on a path whose whole purpose is textual "+
-			"relevance, and no response field says which order produced a page.", lexTerms[0])
-	}
-	second := strings.ToLower(lexTerms[1])
-	if !strings.Contains(second, "tanh(") {
-		t.Errorf("the lexical ordering's SECOND term is %q and is not a tanh of effective "+
-			"strength, which is what the card publishes", lexTerms[1])
-	}
-	if !strings.Contains(second, "exp(") {
-		t.Errorf("the lexical ordering's second term is %q and carries no exp() factor, so the "+
-			"strength term no longer decays. The card promises `exp(-days/stability)` inside "+
-			"it, and without the decay an old, heavily activated memory outranks a fresh one "+
-			"forever.", lexTerms[1])
 	}
 }
 

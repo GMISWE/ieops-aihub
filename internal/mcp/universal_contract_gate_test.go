@@ -1833,22 +1833,12 @@ var serverNamesNoToolCanReach = map[string]string{
 	// really does send the field on the route it calls. G4 asks whether a
 	// server-side name is reachable from some tool, not whether a human could
 	// type it — and the claim tool reaching it is the whole design.
-	// aihub#425. Recorded here rather than published, because the decision to keep
-	// it out of the model-visible contract is deliberate and still sound. The
-	// authority is recall_params_wiring_test.go's recallUnpublishedForwardedParams,
-	// which states the reason and asserts the env fallback still works; this entry
-	// points at it rather than restating it so the two cannot drift.
-	//
-	// Why this one and not `cursor`, which sat in the same map: nothing in any
-	// response mentions recall_algo, so no caller is handed a value it cannot
-	// spend. next_cursor IS returned to the model, which is why cursor was
-	// published instead of allowlisted — measured, not assumed.
-	"handleRecall.recall_algo": "a plugin-build opt-in reached through the " +
-		"POLYFORGE_RECALL_ALGO environment variable, not through the tool contract: " +
-		"buildRecallParams forwards the env value when no argument is given. It selects the " +
-		"opt3 L1 lexical-relevance ranking server-side, which a DEPLOYMENT chooses, not a " +
-		"model per call. The reason and the env fallback's own assertion live in " +
-		"recall_params_wiring_test.go's recallUnpublishedForwardedParams.",
+	// ⚠️ `handleRecall.recall_algo` sat here from aihub#425 until aihub#632, which
+	// retired the parameter: handleRecall no longer reads the name, so the entry
+	// went with the read (this map's own staleness arm is what forces that
+	// coupling). It was a plugin-build opt-in via POLYFORGE_RECALL_ALGO into the
+	// opt3 L1 lexical ranking; the aihub#360 lexical section serves the lexical
+	// semantics now.
 	"handleRecall.limit": "an accepted ALIAS for the published top_k: routes_memory.go reads " +
 		"queryInt(c, \"top_k\") and falls back to queryInt(c, \"limit\"). The capability is " +
 		"reachable under the name pf_recall does publish, so this is compatibility surface " +

@@ -2503,6 +2503,24 @@ func TestWiringPinSkeletonIsCalibrated(t *testing.T) {
 // word "integer" — three independent reds on the reverted description, measured
 // on this tree alongside K3 INPUT_SCHEMA_DRIFT.
 //
+// 🟢 The CARD-CARRIED half of that gap closed on 2026-09-12 (aihub#611), in two
+// coupled moves measured on this tree: rows are split-proof (the punctuation
+// splitter no longer cuts inside a row, so the quote above is one unit instead
+// of two invisible halves), and a leading-quote promise row is a candidate BY
+// FORM — cardclaims form (d) — classified quote-pinned when its every leading
+// quote is contained in the live publication, the same haystack K9 reads and
+// the same regex, single-sourced as cardclaims.LeadingQuoteCell. Replaying the
+// aihub#604 mutation on the fixed tree: this arm RED with
+// `K12 DEBT_GROWTH: pf_remember measured … quote-pinned=0 unclassified=1` while
+// K9 stays red on the same cell — against the pre-fix negative control where
+// this arm was green with candidates unchanged. The re-pin that entered the
+// class: candidates 830 -> 849, 20 quote-pinned, sentences 1938 -> 1933 (five
+// half-row fragments merged back into their rows), unclassified still 0. What
+// REMAINS outside is published hop-1 text no card quotes: a quote-pinned row
+// holds custody (card copy = publication), not truth — truth is still the
+// execution-side probes', which is why a citation on a quoted row outranks the
+// pin and why the drain path for the 20 is citing those probes in the row gloss.
+//
 // The widening moved the population and every ledger row with it — 39 of 45
 // rows re-pinned from this arm's own failure output, the POPULATION_MOVED /
 // RECLASSIFIED discipline working as designed.

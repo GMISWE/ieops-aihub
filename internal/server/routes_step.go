@@ -607,18 +607,22 @@ func handleUpdateStep(pool *pgxpool.Pool) echo.HandlerFunc {
 		tx.QueryRow(c.Request().Context(), `SELECT current_step FROM wi_step_state WHERE work_item_id=$1`, wiID).Scan(&currentStep) //nolint:errcheck
 
 		// aihub#398, step 1 of two: a terminal transition must name the step the
-		// server currently has open. The row filed below is keyed on
-		// derefStr(currentStep) — the value just read — so before this check a
-		// completed/failed request naming any other step recorded the WRONG step
-		// as finished and then overwrote current_step with the caller's value.
+		// server currently has open. Before aihub#398 the row filed below was
+		// keyed on derefStr(currentStep), so a completed/failed request naming
+		// any other step recorded the WRONG step as finished and then overwrote
+		// current_step with the caller's value. The same change re-keyed the row
+		// on req.Step (see the completed branch below), so the history row now
+		// names the caller's step by construction; what this predicate owns is
+		// refusing a request whose named step contradicts the open one, before
+		// anything is written.
 		//
 		// It must sit here, and not one line either side:
 		//
-		//   - AFTER the currentStep read, because the read is the value it
-		//     compares AND the value insertStepCompletion files the row under.
-		//     Sharing one read is what makes the guarantee hold without locking
-		//     the row: whatever the predicate accepted is, by construction, what
-		//     gets written. A second read could disagree with the first.
+		//   - AFTER the currentStep read, because that read is the stored value
+		//     the predicate compares the request against — there is nothing to
+		//     check before it exists. It is the comparison operand ONLY:
+		//     insertStepCompletion files the row under req.Step, not under this
+		//     read (see the completed branch below).
 		//   - BEFORE the switch, so completed and failed cannot drift, and so it
 		//     precedes the completed branch's mandatory-record gate — a request
 		//     about the wrong step should be told that, not told which artifact

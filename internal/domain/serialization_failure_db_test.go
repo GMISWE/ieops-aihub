@@ -492,11 +492,18 @@ func TestSerializationFailureSurfacesAsRetryable409(t *testing.T) {
 				"reaches for a row lock and this arm measures nothing")
 
 		// This arm ends with the takeover REFUSED, so the contended row is left
-		// owned by A's wrapped attempt — i.e. an orphan lock. RunOrphanLockSweep is
-		// global, while TestLockEventsDB_EveryMutationSiteEmits/orphan_sweep_release
-		// counts the orphans of ONE work item and pins the sweep's Affected to that
-		// number, so any row left behind here fails that assertion depending on the
-		// order the two run in. Clean up rather than leaving global state around.
+		// owned by A's wrapped attempt — i.e. an orphan lock, in a resource_locks
+		// table every test on this database shares. The assertion this cleanup was
+		// written against is gone:
+		// TestLockEventsDB_EveryMutationSiteEmits/orphan_sweep_release used to pin
+		// the GLOBAL sweep's Affected to one work item's orphan count, which a row
+		// left behind here broke depending on run order, but aihub#538 demoted
+		// that pin to a lower bound — a foreign orphan
+		// only raises Affected — and moved the exact per-row accounting onto that
+		// subtest's own project event stream, which this row cannot reach. The
+		// cleanup stays anyway: RunOrphanLockSweep is global, and an orphan row
+		// deliberately left behind is exactly the shared state a future
+		// globally-scoped assertion would trip over. Clean up rather than leave it.
 		t.Cleanup(func() {
 			_, cerr := pool.Exec(context.Background(), `
 				DELETE FROM resource_locks WHERE resource_type = 'file_scope' AND resource_key = $1`, key)

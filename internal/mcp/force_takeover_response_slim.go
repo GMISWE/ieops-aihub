@@ -151,7 +151,7 @@ var forceTakeoverWithheldKeys = map[string]string{
 	// secret in a tool result would paste a live credential into a transcript.
 	"session_secret": "a live credential minted in this process and written to the state file at " +
 		"mode 0600; it must never reach the model. domain.ForceTakeoverResponse tags " +
-		"NewSessionSecret `json:\"-\"`, so the server does not echo it today — this is defence in " +
+		"NewSessionSecret `json:\"-\"`, so the server does not echo it today; this is defence in " +
 		"depth against one that starts to.",
 }
 

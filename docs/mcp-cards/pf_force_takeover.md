@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_force_takeover",
-  "description_sha256": "c5d5bbc866691e6bbb516b506b96195d99e657f9a512eb552da070cce0e1d3cc",
+  "description_sha256": "6e840b2c093627d2a1bc33422c1409121611c0a0392f620ff8d2c9f6107b5afd",
   "input_schema_sha256": "a86fd1afda060007271b6cbc1fe3481e26d2c714bcdc91b567b3eac2622c510a",
   "params": {
     "reason": {

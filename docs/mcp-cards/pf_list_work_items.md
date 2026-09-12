@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_list_work_items",
-  "description_sha256": "8a209fd6625db5a4e9e90c40141657caefca941ddd17232ff3ac3dbdb7baf794",
-  "input_schema_sha256": "5ea984a67dd4a0af8d723b6859fdc45f6335557b8124c2412f38ceb7e8666d7d",
+  "description_sha256": "4a2154c164801a0713044ec1702711b6535fd0a136fd4e0fd978d7b13809c183",
+  "input_schema_sha256": "7d2ec8c0fba24eeb26e07d1706d57c6ff0e6ce940c50fd419460ef8a0a68dd70",
   "params": {
     "cursor": {
       "type": "string",

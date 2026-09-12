@@ -160,7 +160,7 @@ func (s *Server) registerUserTools() {
 	// pf_create_api_key
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_create_api_key",
-		Description: "Create an API key for a user (admin only). Returns the plain key once — store it securely.",
+		Description: "Create an API key for a user (admin only). Returns the plain key once; store it securely.",
 		InputSchema: objectSchema(map[string]any{
 			"user_id":       prop("string", "User ID to create the key for"),
 			"name":          prop("string", "Descriptive name for the API key"),

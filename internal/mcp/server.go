@@ -79,7 +79,7 @@ func (s *Server) startupScan() {
 	}
 	for _, sf := range states {
 		if sf.AttemptID != "" && sf.Claimed {
-			fmt.Fprintf(os.Stderr, "⚠️  polyforge: wi %s has an active attempt %s from a prior session — use /pf3-resume to continue\n",
+			fmt.Fprintf(os.Stderr, "WARNING: polyforge: wi %s has an active attempt %s from a prior session; use /pf3-resume to continue\n",
 				sf.WIID, sf.AttemptID)
 		}
 	}

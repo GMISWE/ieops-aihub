@@ -79,13 +79,13 @@ func (s *Server) registerStepTools() {
 			"current_step / current_step_status / version, plus completed_steps: the step history, oldest " +
 			"first, retries included, each entry carrying step_id, status, error_type and that step's " +
 			"artifact_summary. A resuming agent should call this FIRST and count only entries whose status " +
-			"is \"completed\" as done — a \"failed\" entry did NOT finish (pausing an attempt files its " +
+			"is \"completed\" as done: a \"failed\" entry did NOT finish (pausing an attempt files its " +
 			"in-progress step that way too), so redo that step_id unless a later entry completes it. " +
 			"Never take step progress from a file in the worktree; nothing writes one. completed_steps is [] " +
-			"when nothing has completed, and absent only on a server older than aihub#265 — not the same " +
+			"when nothing has completed, and absent only on a server older than aihub#265, which is not the same " +
 			"answer. Takes a slug or a canonical id and echoes the canonical one in work_item_id; " +
 			"pf_recall / pf_read_events resolve either form too, so the echo is informational, not a " +
-			"required hop. No step graph here — that is the scenario template.",
+			"required hop. No step graph here; that is the scenario template.",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
 		}, []string{"work_item_id"}),
@@ -159,16 +159,16 @@ func (s *Server) registerStepTools() {
 		Description: "Update the current step status. Credentials injected from state file. " +
 			"Server auto-emits step_started/step_completed/step_failed events. " +
 			"When completing a step that has a successor, pass next_step to complete-and-start in ONE call " +
-			"instead of following up with a separate status=\"in_progress\" call — the two transitions then " +
+			"instead of following up with a separate status=\"in_progress\" call: the two transitions then " +
 			"share a transaction and emit both events. There is no version/CAS argument and no pf_get_step is " +
 			"needed first: in_progress is guarded by the idle predicate, and completed/failed must name the step " +
 			"the server has open (a mismatch is 409 naming both). Neither checks step STATE: an idle step with a " +
 			"matching name can still be completed twice. " +
 			"A 200 on completed/failed means BOTH records landed: the step-history row pf_get_step's " +
 			"completed_steps is read from AND the step_completed/step_failed event. A transition that cannot " +
-			"deliver both is REFUSED with nothing committed — 400 for a missing or blank step_attempt_id, " +
+			"deliver both is REFUSED with nothing committed: 400 for a missing or blank step_attempt_id, " +
 			"409 for a step_attempt_id that already has a history row (do not resend), 413 for an " +
-			"artifact_summary over 4096 characters — never a 200 that silently records only one of the two " +
+			"artifact_summary over 4096 characters; never a 200 that silently records only one of the two " +
 			"(aihub#390, aihub#399).",
 		InputSchema: objectSchema(map[string]any{
 			"work_item_id": prop("string", "Work item ID"),
@@ -181,13 +181,13 @@ func (s *Server) registerStepTools() {
 				"is refused 400 with nothing committed rather than answered 200 with the step missing from the "+
 				"history. A blank string is refused too. Reusing an id that already has a history row is 409. "+
 				"Optional on in_progress, which files no history row."),
-			"artifact_summary": prop("string", "Brief summary of artifacts produced — at most 4096 characters. Longer values are rejected (413) rather than recorded, because the step history row that pf_get_step's completed_steps reads has that cap (aihub#390)."),
+			"artifact_summary": prop("string", "Brief summary of artifacts produced, at most 4096 characters. Longer values are rejected (413) rather than recorded, because the step history row that pf_get_step's completed_steps reads has that cap (aihub#390)."),
 			"error_type":       prop("string", "Error type, for status=\"failed\"; ignored (not refused) on completed."),
 			"escalated":        prop("boolean", "Escalate a failure for human triage; like error_type, read only on failed."),
 			"next_step": prop("string", "Step ID to START in the same call, after the one named by step_id completes. "+
 				"Only valid with status=\"completed\"; sending it with any other status is an error, not a no-op."),
 			"next_step_attempt_id": prop("string", "Step attempt ID for the step being STARTED via next_step (distinct from step_attempt_id, which belongs to the step being completed)"),
-			"heartbeat": prop("boolean", "Liveness ping: resets step_started_at, nothing else — there is no lease. "+
+			"heartbeat": prop("boolean", "Liveness ping: resets step_started_at, nothing else; there is no lease. "+
 				"Returns early and DISCARDS step_id/status, so it completes no step even with status=\"completed\"."),
 		}, []string{"work_item_id", "step_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
@@ -311,9 +311,9 @@ func checkNextStepHonoured(nextStep, nextStepAttemptID string, result map[string
 	retry += ")"
 	return fmt.Errorf(
 		"SERVER_TOO_OLD_FOR_NEXT_STEP: the step WAS completed, but the aihub server ignored next_step=%q, "+
-			"so %q was NOT started — this server predates aihub#290 and silently discards the parameter. "+
-			"Do NOT re-send the completion; it already landed. Start the next step with a separate call: %s — "+
-			"and drop next_step/next_step_attempt_id for the rest of this session, bracketing each step with its own "+
+			"so %q was NOT started; this server predates aihub#290 and silently discards the parameter. "+
+			"Do NOT re-send the completion; it already landed. Start the next step with a separate call: %s. "+
+			"Then drop next_step/next_step_attempt_id for the rest of this session, bracketing each step with its own "+
 			"in_progress call, or every later completion will be recorded against the wrong step",
 		nextStep, nextStep, retry)
 }
@@ -365,7 +365,7 @@ func validateTerminalStepArgs(status, stepAttemptID string) error {
 	return fmt.Errorf(
 		"step_attempt_id is required with status=%q: the step-history row that pf_get_step's completed_steps is "+
 			"read from is keyed on it, so the server refuses this transition (400) rather than recording it in the "+
-			"timeline and nowhere else. Pass the same step_attempt_id you generated when starting the step — if that "+
+			"timeline and nowhere else. Pass the same step_attempt_id you generated when starting the step; if that "+
 			"step was started by a fused pf_update_step(next_step=...), it is the next_step_attempt_id from that call",
 		status)
 }
@@ -499,9 +499,9 @@ func deleteStaleCredential(sf *config.StateFile, passedID string) {
 func classifyStepUpdateErr(err error) (out error, deleteState bool) {
 	switch {
 	case client.IsCode(err, "ATTEMPT_PAUSED"):
-		return fmt.Errorf("attempt is paused — resume it first with `/pf-work <slug> --resume` before continuing (local state file kept)"), false
+		return fmt.Errorf("attempt is paused; resume it first with `/pf-work <slug> --resume` before continuing (local state file kept)"), false
 	case client.IsCode(err, "CONFLICT_EPOCH_MISMATCH"), client.IsCode(err, "ATTEMPT_MISMATCH"):
-		return fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted — please re-claim this work item"), true
+		return fmt.Errorf("STALE_LOCAL_CREDENTIAL: state file deleted; please re-claim this work item"), true
 	default:
 		return err, false
 	}

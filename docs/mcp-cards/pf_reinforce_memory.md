@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_reinforce_memory",
-  "description_sha256": "9954803dee8b3d7e57f17d935200e67175ab432db2335542cb4cbd19c0deb5b5",
+  "description_sha256": "ec0826e2a96f9273e52606b894a65dd754e5946bac88b0e1c98aafb0a4761f4f",
   "input_schema_sha256": "9d1569dc2ba4152358e48e3f61b56e44a86d2179208ba3d0387fc13e08a0d11d",
   "params": {
     "additional_context": {

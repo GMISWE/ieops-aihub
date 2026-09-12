@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_ship",
-  "description_sha256": "4872cf049830e50729a25ac0cb0da301eaf7116985cd2f7e3dfed62192061004",
+  "description_sha256": "6f2452c87edc1c5ec58e82a2b0b2e71c8fcca537e10d603eb418ea2e8c10633a",
   "input_schema_sha256": "5133a04b1c0c49344a0ecc3bf3872bd72aaed84170905bb081ae4a8021bc698e",
   "params": {
     "message": {

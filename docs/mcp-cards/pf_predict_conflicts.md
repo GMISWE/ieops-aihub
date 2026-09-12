@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_predict_conflicts",
-  "description_sha256": "21efef2052245dd6164941753069ea379387987353eaa9f0e94e4f2054ba4552",
-  "input_schema_sha256": "29efdb34fe3e10d154b80b891f9799666320719ef59ee735eb86b6a69c0b02b1",
+  "description_sha256": "2059fac5e349d0f53495c365092b475b9428bd5afafd5a4f4ef0919afa039caf",
+  "input_schema_sha256": "d297f35ccc472ccebad60dbbd21a6599bf358f6e4f8726a31d71654b7ac97f31",
   "params": {
     "declared_resources": {
       "type": "array",

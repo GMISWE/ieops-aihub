@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_complete_attempt",
-  "description_sha256": "ad8beae00b7025703d73a76489eefde89175938e61fe1dcb6be3ffa815cdb32a",
-  "input_schema_sha256": "d274f3f98e87afe21a88e4a3caf98d3e3fcba62cbced454a654b1b6cf2db3c18",
+  "description_sha256": "3071ac903f2a848c7ce3531253ea0c9b665d68260c8dede7cb7eb66adada0ba1",
+  "input_schema_sha256": "ed855b04f59b06b43b339c55136f01c13dd45b784008bfdb4f3e317a00b8c89e",
   "params": {
     "force_terminate_step": {
       "type": "boolean",

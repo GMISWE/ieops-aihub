@@ -91,13 +91,13 @@ func (s *Server) registerProjectTools() {
 			// reads it either sends expected_removals it says nothing about, or
 			// concludes the API cannot protect them and stops looking. The
 			// replacement is not a reassurance, it is the parameter below.
-			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version — reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200."),
+			"members_version": prop("integer", "Compare-and-set guard for members: ALWAYS send the members_version you read alongside the list (pf_list_projects returns it). The update is applied only if it still matches, otherwise it fails with 409 CONFLICT_CAS_FAILED and reports the current version in details.current_members_version; reread and retry. Every write of members increments this counter. Leaving it out overwrites unconditionally: a concurrent writer's edit is then silently discarded and you still get a 200."),
 			// aihub#333. The redundancy with `members` is the whole point, the
 			// same way `git push --force-with-lease` restates what you think the
 			// remote is: a truncated list and a deliberate removal are the same
 			// bytes, so intent has to be stated somewhere the accident cannot
 			// reach.
-			"expected_removals": prop("array", "user_ids this members write is allowed to REMOVE. Send it whenever the list you send drops somebody — a same-size swap counts, changing only a role does not — because any removal you do not name here is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL. Leave it out when you are only adding members or changing their roles. This is what tells the server \"I mean to remove these two\" apart from \"my list was short by two\"; members_version cannot, because a caller who truncates their own list holds a version that matches."),
+			"expected_removals": prop("array", "user_ids this members write is allowed to REMOVE. Send it whenever the list you send drops somebody (a same-size swap counts, changing only a role does not), because any removal you do not name here is refused with 412 PROJECT_MEMBERS_UNDECLARED_REMOVAL. Leave it out when you are only adding members or changing their roles. This is what tells the server \"I mean to remove these two\" apart from \"my list was short by two\"; members_version cannot, because a caller who truncates their own list holds a version that matches."),
 		}, []string{"name"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -142,7 +142,7 @@ func (s *Server) registerProjectTools() {
 	// pf_rotate_identifier
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_rotate_identifier",
-		Description: "Rotate the project identifier (bcrypt token). Returns plain once — store it securely. Owner/admin only.",
+		Description: "Rotate the project identifier (bcrypt token). Returns plain once; store it securely. Owner/admin only.",
 		InputSchema: objectSchema(map[string]any{
 			"name": prop("string", "Project name"),
 		}, []string{"name"}),

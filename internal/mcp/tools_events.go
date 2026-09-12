@@ -93,7 +93,7 @@ func noteOutcomeSuffix(requested bool, err error) string {
 const emitEventPayloadPropDescription = "Event payload (arbitrary JSON object). " +
 	"Must be a JSON object: a string (including a JSON-encoded string of the object you meant), " +
 	"an array, a number or a boolean is rejected with 400 naming the type received, and no event is recorded. " +
-	"Do not hand-write the escaped JSON — send the object and let your client serialise it. " +
+	"Do not hand-write the escaped JSON; send the object and let your client serialise it. " +
 	"Unlike the other jsonb object parameters, size CAN be the reason here: payload is capped at 64 KB " +
 	"and that cap is checked BEFORE the shape check."
 
@@ -168,10 +168,10 @@ func emitEventTypePropDescription() string {
 		"endpoint stores whatever it is sent, so an off-list value is accepted and a typo becomes an " +
 		"event nobody thinks to look for. The vocabulary below is therefore PUBLISHED, not enforced. " +
 		"THREE rules ARE enforced: (1) " + strings.Join(domain.AdminOnlyEventTypes, " / ") +
-		" always require role=admin whatever `admin` says — 403; (2) with admin:true the type must be " +
-		"one of those four or " + strings.Join(extras, " / ") + " — 403; (3) with no work_item_id the " +
-		"type must be one the agent_events.chk_evt_work_item_id CHECK permits — 400, and the message " +
-		"lists them. KNOWN TYPES, published so pf_read_events(types=[...]) can name them instead of " +
+		" always require role=admin whatever `admin` says (403); (2) with admin:true the type must be " +
+		"one of those four or " + strings.Join(extras, " / ") + " (403); (3) with no work_item_id the " +
+		"type must be one the agent_events.chk_evt_work_item_id CHECK permits (400, and the message " +
+		"lists them). KNOWN TYPES, published so pf_read_events(types=[...]) can name them instead of " +
 		"guessing: " + strings.Join(vocab, ", ") + ". Callers of this tool normally send `note`; " +
 		"commit / push / pr_opened are emitted here by pf_commit / pf_push / pf_pr; the rest are " +
 		"written by the server."
@@ -200,7 +200,7 @@ func emitEventTypePropDescription() string {
 // here, because one copy on the wire is the whole budget these two tools share.
 const readEventsTypesPropDescription = "Filter by event type. A FILTER, not a whitelist and not a " +
 	"validator: an unrecognised value is NOT rejected, it matches nothing, so a typo, a type that has " +
-	"never existed and a real event that did not happen all return the same empty list — measured, " +
+	"never existed and a real event that did not happen all return the same empty list. Measured: " +
 	"about half of the distinct values callers have passed here name nothing any code path emits. " +
 	"The vocabulary is published on pf_emit_event.event_type. Lock churn is lock_acquired/" +
 	"lock_released, declaration changes wi_resources_updated. A claim emits one lock_acquired PER " +
@@ -229,8 +229,8 @@ const readEventsTypesPropDescription = "Filter by event type. A FILTER, not a wh
 // unreasonable thing for a caller to have to discover.
 const readEventsUserIDPropDescription = "Filter by ACTOR: matches agent_events.actor_user_id, i.e. " +
 	"who EMITTED the event. NOT the work item's reporter (that is pf_list_work_items.user_id), NOT " +
-	"the attempt owner, NOT a watcher. Server-written events carry no actor — GC sweeps, " +
-	"wi_unblocked, attempt_completed — so any value of this filter excludes them."
+	"the attempt owner, NOT a watcher. Server-written events (GC sweeps, " +
+	"wi_unblocked, attempt_completed) carry no actor, so any value of this filter excludes them."
 
 // emitEventSchema is pf_emit_event's published InputSchema.
 //
@@ -258,7 +258,7 @@ func readEventsSchema() json.RawMessage {
 		// schema was the last place still implying the slug is not accepted.
 		// Pinned by slug_publication_test.go
 		// (TestSlugAcceptanceIsPublishedByReadEvents).
-		"work_item_id": prop("string", "Work item — canonical id or slug; either resolves to the "+
+		"work_item_id": prop("string", "Work item, as canonical id or slug; either resolves to the "+
 			"same stream (aihub#343). Or use project."),
 		"project": prop("string", "Project name (or use work_item_id)"),
 		"user_id": prop("string", readEventsUserIDPropDescription),
@@ -272,7 +272,7 @@ func readEventsSchema() json.RawMessage {
 		// aihub#259 shape (a parameter that never leaves this process), and
 		// the reason it is worse than a missing feature is the same: the
 		// answer looks complete.
-		"cursor": prop("string", "Opaque page token — pass a previous response's next_cursor "+
+		"cursor": prop("string", "Opaque page token: pass a previous response's next_cursor "+
 			"to continue after the last event it returned."),
 		"since":        prop("string", "Since timestamp (RFC3339)"),
 		"limit":        prop("string", "Max events to return"),
@@ -284,7 +284,7 @@ func (s *Server) registerEventTools() {
 	// pf_emit_event
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_emit_event",
-		Description: "Emit an event on a work item. Mutating — credentials injected from state file.",
+		Description: "Emit an event on a work item. Mutating; credentials injected from state file.",
 		InputSchema: emitEventSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -353,7 +353,7 @@ func (s *Server) registerEventTools() {
 		// prose was cut, not the two facts.)
 		Description: "Read events for a work item or project. work_item_id or project must be provided. " +
 			"NOTE: lock_acquired / lock_released / wi_resources_updated exist only from the deploy that " +
-			"shipped aihub#343 (2026-09-03 at the earliest; no backfill) — their absence before then is " +
+			"shipped aihub#343 (2026-09-03 at the earliest; no backfill), so their absence before then is " +
 			"not evidence that no lock or declaration changed.",
 		InputSchema: readEventsSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {

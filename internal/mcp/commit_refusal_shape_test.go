@@ -106,13 +106,13 @@ func conflict409(map[string]any) (int, any) {
 // out of its own description, so the census below is over the published promise
 // rather than over a list written into this test.
 //
-// The clause is "the error names every blocked path plus its holder — actor,
+// The clause is "the error names every blocked path plus its holder: actor,
 // work item and attempt." Each noun maps to the field whose value must survive
 // the trip; a noun with no mapping fails loudly, because a description that
 // grew a fourth promise is exactly the case a fixed list skips in silence.
 func holderNounsFromDescription(t *testing.T, desc string) map[string]string {
 	t.Helper()
-	const head = "names every blocked path plus its holder — "
+	const head = "names every blocked path plus its holder: "
 	i := strings.Index(desc, head)
 	if i < 0 {
 		t.Fatalf("pf_commit's description no longer promises to name the holder after %q, so "+
@@ -148,7 +148,7 @@ func holderNounsFromDescription(t *testing.T, desc string) map[string]string {
 		}
 		out[noun] = want
 	}
-	// The path is promised ahead of the dash and belongs to the same census.
+	// The path is promised ahead of the colon and belongs to the same census.
 	out["blocked path"] = contestedPath
 	if len(out) < 3 {
 		t.Fatalf("parsed only %d promised holder field(s) out of %q; a one-field census is a "+
@@ -180,7 +180,7 @@ func holderNounsFromDescription(t *testing.T, desc string) map[string]string {
 //	    clause                                                    GREEN
 //
 // ⚠️ The census parser is anchored on the description's literal "names every
-// blocked path plus its holder — ", so rewording THAT clause fails the arm
+// blocked path plus its holder: ", so rewording THAT clause fails the arm
 // loudly rather than silently. Measured: replacing "names" with "identifies"
 // goes red. That is the direction chosen on purpose — a parser that shrugged
 // would leave the promise unchecked — but it means a reword of the clause has
@@ -221,7 +221,7 @@ func TestRefusedCommitLeavesTheIndexPopulatedAndNamesEveryHolder(t *testing.T) {
 			staged, contestedPath)
 	}
 
-	// "the error names every blocked path plus its holder — actor, work item and
+	// "the error names every blocked path plus its holder: actor, work item and
 	// attempt", read off the live description rather than listed here.
 	text, _ := out["_raw"].(string)
 	if text == "" {

@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_create_api_key",
-  "description_sha256": "ebca46117cb99f0b6e4b50bb047e56fe9d1fda2bd1bd7c65a090ccb95388277a",
+  "description_sha256": "93ad4d41268da6aea080752c352ea3ff7822c786676729f9be750c27fb77e4a4",
   "input_schema_sha256": "270eff7ee7f875b6a47bd696dd8a2b59512cccb0ce6e9d78f09a71eb62bb0b00",
   "params": {
     "name": {
@@ -37,7 +37,7 @@ Three parameters, two required, and a handling instruction.
 | `name` | string | yes | descriptive name for the key |
 | `project_scope` | string | no | optional project name restricting the key |
 
-"Create an API key for a user (**admin only**). **Returns the plain key once — store
+"Create an API key for a user (**admin only**). **Returns the plain key once; store
 it securely.**"
 
 `user_id` here names the key's **owner**, which is one of the three identities

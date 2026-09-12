@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_batch_create_work_items",
-  "description_sha256": "7ffd5d5890da0ab75a79538d59e05366153977d30a99188993ec9fe8cde224e0",
-  "input_schema_sha256": "84d1c28a23eefa51ba63e05b08eb1fe7e9e5b4bcc9ec8b95ca1492345cd61360",
+  "description_sha256": "e62ef0dd8993dbea19c03158c179a47ff18945f65d56b3d77e728e171d645c9b",
+  "input_schema_sha256": "9626ee1b7589f421493b4b0504c5f643c9cbbafec676f205a63dae99f31418f7",
   "params": {
     "items": {
       "type": "array",

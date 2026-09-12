@@ -3,8 +3,8 @@
 ```json
 {
   "tool": "pf_save_artifact",
-  "description_sha256": "cd615eceedc57b064f28a94572a572edc8a4c2ff9af71b760c1ac9ee1d966418",
-  "input_schema_sha256": "d6574f66687976273e8a59f6d4946362a61e99c38e081dde7967e8a48770bec9",
+  "description_sha256": "f8518bd63ffe3ef310bcbfd0bf129e972a4ff5e007922e6ffc5b849bad1b8cd0",
+  "input_schema_sha256": "7f9b52bfdc7e57b2ac01095007f2979a612e9ec5454c69b72f2b0f9a47ca04b6",
   "params": {
     "content": {
       "type": "string",

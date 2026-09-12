@@ -770,7 +770,7 @@ func buildProjectUpdate(req *UpdateProjectRequest, name string) (projectUpdate, 
 // retry with.
 func membersCASConflictErr(expected, current int) *AihubError {
 	return NewErrDetails(ErrConflictCASFailed,
-		fmt.Sprintf("project members CAS failed: members_version is %d, not the expected %d — "+
+		fmt.Sprintf("project members CAS failed: members_version is %d, not the expected %d; "+
 			"reread the project (pf_list_projects) and retry with its current members_version",
 			current, expected),
 		map[string]any{

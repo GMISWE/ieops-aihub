@@ -265,7 +265,7 @@ func TestDoctorConfigLineNamesTheEndpointAndItsSource(t *testing.T) {
 		defer srv.Close()
 
 		got := checkConfig(context.Background(), client.New(srv.URL, "k"), srv.URL, source)
-		want := srv.URL + " (" + source + ") — aihub reachable"
+		want := srv.URL + " (" + source + "): aihub reachable"
 		if got.Status != "ok" || got.Message != want {
 			t.Errorf("checkConfig() = {%s, %q}, want {ok, %q}\n"+
 				"docs/onboarding.md quotes this line verbatim under "+

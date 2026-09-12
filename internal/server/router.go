@@ -575,7 +575,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 		if q != "" && similarTo != "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest,
 				"query and similar_to are mutually exclusive: query embeds the text you pass, "+
-					"similar_to reuses another work item's stored vector — pass exactly one"))
+					"similar_to reuses another work item's stored vector; pass exactly one"))
 		}
 		// aihub#477: each clause asks the parameter's OWN reader whether it was
 		// supplied — cursorPresent from queryCursor, and the two trimmed locals
@@ -1532,7 +1532,7 @@ func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
 			return internalError(c, "failed to check users table")
 		}
 		if count > 0 {
-			return writeError(c, domain.NewErr(domain.ErrForbidden, "bootstrap already done — users table is non-empty"))
+			return writeError(c, domain.NewErr(domain.ErrForbidden, "bootstrap already done: users table is non-empty"))
 		}
 
 		var req struct {
@@ -1574,7 +1574,7 @@ func handleBootstrap(pool *pgxpool.Pool) echo.HandlerFunc {
 			"role":         "admin",
 			"api_key":      rawKey,
 			"api_key_id":   keyID,
-			"note":         "save api_key — it will not be shown again",
+			"note":         "save api_key: it will not be shown again",
 		})
 	}
 }

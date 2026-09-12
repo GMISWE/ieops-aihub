@@ -1075,7 +1075,7 @@ func RunUnclassifiedWIAlert(ctx context.Context, pool *pgxpool.Pool) GCResult {
 			"wi_id":       w.ID,
 			"wi_slug":     w.Slug,
 			"reporter_id": w.ReporterID,
-			"reason":      "requires_human_session is NULL — please set wi_type to classify",
+			"reason":      "requires_human_session is NULL; please set wi_type to classify",
 		})
 		// See RunNeedsHumanSessionAging for why this counts RowsAffected and
 		// accumulates errors instead of counting successful Execs.

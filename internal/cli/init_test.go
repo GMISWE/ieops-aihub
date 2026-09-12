@@ -1177,14 +1177,14 @@ func TestRenderRepoMap(t *testing.T) {
 	got := renderRepoMap(blk)
 
 	for _, want := range []string{
-		"# Repo map — aihub\n",
+		"# Repo map: aihub\n",
 		"polyforge backend platform",
 		"## aihub\n",
 		"polyforge core API",
 		"- stack: Go, PostgreSQL\n",
 		"- modules:\n",
-		"  - internal/api — HTTP handlers\n",
-		"  - internal/store — PG store\n",
+		"  - internal/api: HTTP handlers\n",
+		"  - internal/store: PG store\n",
 		"- changes:\n",
 		"  - add MCP tool\n",
 		"  - schema migration\n",
@@ -1222,7 +1222,7 @@ func TestRenderRepoMapEmbeddedNewline(t *testing.T) {
 		ChangeScenarios: []string{"c\nd"},
 	}}}
 	got := renderRepoMap(blk)
-	for _, want := range []string{"line one line two", "  - p q — r\n", "  - c d\n"} {
+	for _, want := range []string{"line one line two", "  - p q: r\n", "  - c d\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("renderRepoMap missing %q in:\n%s", want, got)
 		}
@@ -1998,7 +1998,7 @@ func TestRunOwnerInit_PublishesLocalEdit(t *testing.T) {
 			"baseline must advance, or the next init reads the same edit as a server-side change",
 			got, "edited by hand")
 	}
-	if !strings.Contains(res.Output, "local → server") {
+	if !strings.Contains(res.Output, "local -> server") {
 		t.Errorf("output did not name the direction:\n%s", res.Output)
 	}
 }
@@ -2025,7 +2025,7 @@ func TestRunOwnerInit_AdoptsServerEdit(t *testing.T) {
 	if got := mergedDescription(t, res.Merged, "repo-a"); got != "english, written via MCP" {
 		t.Errorf("merged description = %q, want the server value left alone", got)
 	}
-	if !strings.Contains(res.Output, "server → local") {
+	if !strings.Contains(res.Output, "server -> local") {
 		t.Errorf("output did not name the direction:\n%s", res.Output)
 	}
 }
@@ -2076,7 +2076,7 @@ func TestRunOwnerInit_NoOpMakesNoRequestAndReportsInSync(t *testing.T) {
 	if !strings.Contains(res.Output, "1 in sync") {
 		t.Errorf("output does not state that the description was in sync:\n%s", res.Output)
 	}
-	for _, absent := range []string{"local → server", "server → local", "CONFLICT"} {
+	for _, absent := range []string{"local -> server", "server -> local", "CONFLICT"} {
 		if strings.Contains(res.Output, absent) {
 			t.Errorf("output claims %q on a no-op run:\n%s", absent, res.Output)
 		}
@@ -2122,8 +2122,8 @@ func TestRunOwnerInit_BothDirectionsInOneRun(t *testing.T) {
 	if got := res.Local["push-me"].Description; got != "locally edited" {
 		t.Errorf("local push-me = %q, want the local value", got)
 	}
-	if !strings.Contains(res.Output, "local → server (push-me)") ||
-		!strings.Contains(res.Output, "server → local (pull-me)") {
+	if !strings.Contains(res.Output, "local -> server (push-me)") ||
+		!strings.Contains(res.Output, "server -> local (pull-me)") {
 		t.Errorf("output does not name both directions with their repos:\n%s", res.Output)
 	}
 }
@@ -2165,7 +2165,7 @@ func TestDescribeDescriptionSync_NamesEveryDirection(t *testing.T) {
 		{Repo: "d", Direction: descConflict},
 	}
 	got := describeDescriptionSync("proj", ds)
-	for _, want := range []string{"1 in sync", "1 local → server (b)", "1 server → local (c)", "1 conflict (d)"} {
+	for _, want := range []string{"1 in sync", "1 local -> server (b)", "1 server -> local (c)", "1 conflict (d)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("line %q does not contain %q", got, want)
 		}
@@ -2462,7 +2462,7 @@ projects:
 			"until a human resolves it", got, descConflict)
 	}
 
-	if !strings.Contains(out, "local → server (push-me)") || !strings.Contains(out, "server → local (pull-me)") {
+	if !strings.Contains(out, "local -> server (push-me)") || !strings.Contains(out, "server -> local (pull-me)") {
 		t.Errorf("init did not report both directions:\n%s", out)
 	}
 	if !strings.Contains(out, "CONFLICT") || !strings.Contains(out, "1 conflict (stuck)") {

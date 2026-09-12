@@ -215,7 +215,7 @@ func TestStringifiedObjectParamIsRejected(t *testing.T) {
 			name:           "string that decodes to an object",
 			raw:            encodedObjectString,
 			wantDecodesTo:  "a JSON object",
-			wantClauseHead: ", and that string decodes to a JSON object — send the object itself, not a JSON-encoded string of it",
+			wantClauseHead: ", and that string decodes to a JSON object; send the object itself, not a JSON-encoded string of it",
 		},
 		{
 			name:          "string one closing brace short",

@@ -56,7 +56,7 @@ func retryConflictErr(err error, what string) *AihubError {
 		return nil
 	}
 	return NewErrDetails(ErrConflictSerializationFailure,
-		fmt.Sprintf("%s: %v; the transaction was rolled back after losing a concurrency race — retry the request", what, err),
+		fmt.Sprintf("%s: %v; the transaction was rolled back after losing a concurrency race; retry the request", what, err),
 		map[string]any{"retryable": true, "sqlstate": pgErr.Code})
 }
 

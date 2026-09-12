@@ -65,15 +65,15 @@ func RunArtifactView(ctx context.Context, c artifactFetcher, memID string) error
 		opener = "xdg-open"
 	}
 	if opener == "" {
-		fmt.Printf("HTML written to %s — open it manually (unsupported OS %s)\n", path, runtime.GOOS)
+		fmt.Printf("HTML written to %s; open it manually (unsupported OS %s)\n", path, runtime.GOOS)
 		return nil
 	}
 	if _, perr := lookPathFn(opener); perr != nil {
-		fmt.Printf("HTML written to %s — %s not found, open manually\n", path, opener)
+		fmt.Printf("HTML written to %s; %s not found, open manually\n", path, opener)
 		return nil
 	}
 	if oerr := openerFn(opener, path); oerr != nil {
-		fmt.Printf("HTML written to %s — failed to launch %s: %v\n", path, opener, oerr)
+		fmt.Printf("HTML written to %s; failed to launch %s: %v\n", path, opener, oerr)
 		return nil
 	}
 	fmt.Printf("opened %s in browser\n", path)

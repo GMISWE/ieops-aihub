@@ -333,7 +333,7 @@ func handleUIMemories(pool *pgxpool.Pool, tmpl *template.Template) echo.HandlerF
 				data.TypeNotice = unavailable
 			case len(unmatched) > 0:
 				data.TypeNotice = "No memory of type " + strings.Join(unmatched, ", ") +
-					" exists in this project — the filter matched nothing, rather than the " +
+					" exists in this project; the filter matched nothing, rather than the " +
 					"project being empty."
 			}
 		}

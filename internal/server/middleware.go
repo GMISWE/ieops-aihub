@@ -295,7 +295,7 @@ var roleLevel = domain.RoleLevel
 // the reason this is a constant too: leave no branch and no branch can drift.
 // A second copy of this sentence is a second thing to keep in step, and the
 // endpoints that must agree byte-for-byte are spread over five files.
-const notVisibleMessage = "not found, or you do not have access — " +
+const notVisibleMessage = "not found, or you do not have access; " +
 	"contact the project owner or an administrator to check your invitation"
 
 // errNotVisible builds the one response every "not yours to see" path returns:

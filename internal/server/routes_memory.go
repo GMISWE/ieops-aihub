@@ -323,7 +323,7 @@ func parseRecallTypes(raw string) (types []string, badPipe string, empty bool) {
 func pipedTypeMessage(bad string) string {
 	return fmt.Sprintf("type value %q contains '|', which is not a separator: `|` is not "+
 		"part of the memory type vocabulary, so this arrives as a single type name and "+
-		"matches nothing. Pass multiple types as separate entries instead — "+
+		"matches nothing. Pass multiple types as separate entries instead: "+
 		"pf_recall(type=[\"a.b\",\"c.*\"]), or ?type=a.b,c.* over HTTP.", bad)
 }
 

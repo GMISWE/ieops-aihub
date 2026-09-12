@@ -111,6 +111,13 @@ on:
       # constant and nothing else never runs C5, which is exactly how
       # `wi_cancelled` and `derivation_retired` reached main undocumented.
       - 'docs/**'
+      # tests/scenarios/** is C1/C2/C6's second scan root (aihub#618): scenario
+      # docs carry line-number and file+symbol anchors that rotted unseen while
+      # only docs/ triggered this job — aihub#610's stale anchor is the proof.
+      # Same hole as the paragraph above: a scenarios-only edit matches no other
+      # glob here, so without this line the widened gate is enforced in the
+      # script but untriggered in CI.
+      - 'tests/scenarios/**'
       - 'scripts/pf_docs_contract_check.py'
       # README.md is here for one reason (aihub#439): it holds the "How docs
       # cite code" section that every C1 error message sends the author to, and

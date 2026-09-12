@@ -5,9 +5,9 @@ Six checks. Each one goes RED on a real drift, and each exists because the
 drift it catches is otherwise SILENT — nothing in this repo turns red today when
 a doc's copy of a code fact stops matching the code.
 
-  C1  No line-number citations anywhere in docs/, in any of three shapes:
-      a named file plus a line, a code-formatted filename-less range, and a
-      filename-less anchor written in prose.
+  C1  No line-number citations anywhere in docs/ or tests/scenarios/, in any
+      of three shapes: a named file plus a line, a code-formatted filename-less
+      range, and a filename-less anchor written in prose.
       A line number is an anchor that rots on the next refactor with no
       compiler, test, or linter noticing. Measured on 2026-09-03 against
       e8fbfcb: of the 23 real line-number citations in docs/superpowers/, 18
@@ -24,11 +24,38 @@ a doc's copy of a code fact stops matching the code.
       statements in step — this file's error messages name that section.
 
   C2  Every path-qualified `*.go` path referenced in docs/superpowers/,
-      docs/audits/ and docs/mcp-tools.md exists. docs/audits/ is in scope as of
-      aihub#406: C1 fires across ALL of docs/ and its error message routes
-      authors to the semantic-anchor form, so the audits — where aihub#404
-      converted ~200 anchors under C1's instruction — must not be the one place
-      the prescribed replacement goes unchecked.
+      docs/audits/, docs/mcp-tools.md and tests/scenarios/ exists. docs/audits/
+      is in scope as of aihub#406: C1 fires across ALL of docs/ and its error
+      message routes authors to the semantic-anchor form, so the audits — where
+      aihub#404 converted ~200 anchors under C1's instruction — must not be the
+      one place the prescribed replacement goes unchecked. tests/scenarios/ is
+      in scope as of aihub#618, by the same principle one root over: C1 now
+      fires there too, so the anchors its error message prescribes must be
+      verified there too.
+
+  SCAN ROOTS (aihub#618). C1 walks docs/ and tests/scenarios/ — the two trees
+  of authored, first-party markdown — and deliberately NOT the whole repo.
+  aihub#610's rotten anchor (P1-04, a line range that had drifted onto
+  render-queue code) rotted precisely because tests/scenarios/ was outside the
+  scan root; the root is widened so that class stays closed. The remaining
+  markdown population divides into four classes, each structurally ungateable
+  rather than merely unvisited:
+    - README.md hosts the "How docs cite code" section, which must spell the
+      FORBIDDEN shapes out verbatim — check_citation_form_is_documented()'s
+      docstring states that this is why the section lives outside docs/.
+    - plugins/** is shipped plugin content with its own release lane (a version
+      bump gate, its own review rules); a C1 finding there could not be
+      repaired in an ordinary docs PR, so the gate would block unrelated work.
+    - test/render/fixtures/ and internal/mcp/testdata/ are fixture and
+      recorded data — the aihub#412-corpus class: repairing a fixture to
+      satisfy a gate falsifies the test input.
+    - v0/** is the archived v0 tree, a historical record.
+  Since everything outside the four classes IS docs/ + tests/scenarios/ today,
+  the roots are enumerated explicitly rather than walking the repo with an
+  exclusion list: a future authored-docs tree should be added here
+  deliberately, with this paragraph updated — the wrong default for a new
+  fixture directory is silent inclusion, and a maintained exclusion list is
+  how it would get exactly that.
 
   C6  Every SYMBOL anchor in C2's scope resolves: `file.go` (`Symbol`) is only
       an improvement over `file.go:1444` if `Symbol` is actually declared in
@@ -90,6 +117,7 @@ import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCS = os.path.join(REPO_ROOT, "docs")
+SCENARIOS = os.path.join(REPO_ROOT, "tests", "scenarios")
 MCP_TOOLS_MD = os.path.join(DOCS, "mcp-tools.md")
 SUPERPOWERS = os.path.join(DOCS, "superpowers")
 AUDITS = os.path.join(DOCS, "audits")
@@ -189,7 +217,9 @@ PROSE_LINE_ANCHOR = re.compile(
     r"(?:^|(?<=\s)|(?<=[*(\[])):(\d+)(?:-(\d+))?(?![\w%-])"
 )
 
-# Matches that are NOT citations, keyed (docs-relative path, exact token).
+# Matches that are NOT citations, keyed (REPO-relative path, exact token) —
+# repo-relative as of aihub#618, because the scan spans two roots and a
+# docs-relative key cannot name a tests/scenarios/ file.
 #
 # THIS IS THE ONLY ESCAPE HATCH IN C1, AND IT LIVES IN THE GATE'S OWN FILE ON
 # PURPOSE: widening it is a reviewable edit to this script, not a doc edit that
@@ -206,7 +236,7 @@ PROSE_LINE_ANCHOR = re.compile(
 # unrelated work.
 C1_ALLOWED = {
     (
-        "design/polyforge-v1-design.md",
+        "docs/design/polyforge-v1-design.md",
         "auth.go:42",
     ): "Illustrative sample payload, not a citation: appears inside two fenced "
     "examples of an artifact_summary / previous_context body ('修了 auth.go:42 "
@@ -268,10 +298,13 @@ def check_citation_form_is_documented() -> list[str]:
 
 
 def check_c1_no_line_citations(paths: list[str]) -> list[str]:
-    """No line-number citations in docs/, in any of C1's three shapes."""
+    """No line-number citations in docs/ or tests/scenarios/, in any of C1's
+    three shapes. Paths in errors and in C1_ALLOWED keys are repo-relative
+    (aihub#618): the scan spans two roots, so a single-root relative path can
+    no longer name every file it reports."""
     errors = []
     for path in paths:
-        rel = os.path.relpath(path, DOCS)
+        rel = os.path.relpath(path, REPO_ROOT)
         with open(path, encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
                 for match in FILE_LINE_CITATION.finditer(line):
@@ -279,13 +312,13 @@ def check_c1_no_line_citations(paths: list[str]) -> list[str]:
                     if (rel, token) in C1_ALLOWED:
                         continue
                     errors.append(
-                        f"docs/{rel}:{lineno}: line-number citation `{token}`. "
+                        f"{rel}:{lineno}: line-number citation `{token}`. "
                         "Line numbers rot silently — nothing goes red when the "
                         f"file moves under it. {FORM}"
                     )
                 for match in CODE_SPAN_RANGE_ANCHOR.finditer(line):
                     errors.append(
-                        f"docs/{rel}:{lineno}: filename-less line anchor "
+                        f"{rel}:{lineno}: filename-less line anchor "
                         f"`:{match.group(1)}-{match.group(2)}`. It does not say "
                         f"which file, so it can never be checked or repaired. "
                         f"{FORM}"
@@ -297,7 +330,7 @@ def check_c1_no_line_citations(paths: list[str]) -> list[str]:
                 prose = CODE_SPAN.sub(lambda m: " " * len(m.group(0)), line)
                 for match in PROSE_LINE_ANCHOR.finditer(prose):
                     errors.append(
-                        f"docs/{rel}:{lineno}: filename-less line anchor "
+                        f"{rel}:{lineno}: filename-less line anchor "
                         f"`{match.group(0)}` in prose. It does not say which "
                         "file, so it can never be checked or repaired, and it "
                         "usually sits next to a symbol name that already says "
@@ -317,32 +350,41 @@ def check_c1_no_line_citations(paths: list[str]) -> list[str]:
 GO_PATH_REF = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]+\.go)(?![\w/.-])")
 
 # References that are NOT claims about this repository's tree, keyed
-# (docs-relative path, exact ref). Same design as C1_ALLOWED and for the same
+# (REPO-relative path, exact ref) — repo-relative as of aihub#618, same reason
+# as C1_ALLOWED. Same design as C1_ALLOWED and for the same
 # reason: widening it is a reviewable edit to this script, not a doc edit that
 # slips through under a docs-only diff. Each entry needs a reason, and the
 # reason must say why the reference cannot rot — do not add an entry for a ref
 # that merely moved (update the reference instead).
 C2_ALLOWED = {
     (
-        "audits/aihub-385-mcp-contract-audit-batch1.md",
+        "docs/audits/aihub-385-mcp-contract-audit-batch1.md",
         "mcp/server.go",
     ): "A file of the modelcontextprotocol go-sdk, cited as `go-sdk v1.6.0 "
     "`mcp/server.go``, not of this repo. The citation is version-pinned to "
     "v1.6.0, so it cannot rot under this tree's refactors, and rewording it "
     "would lose the only pointer to where the no-validation behaviour lives.",
+    (
+        "tests/scenarios/e2e/E2E-08-auto-derive-locks.md",
+        "internal/e2e08/contended.go",
+    ): "A synthetic declared_resources URI (`file:internal/e2e08/contended.go`)"
+    " the scenario invents so the claim derives a file_scope lock. The file is "
+    "never supposed to exist in this tree — the lock key is the test subject, "
+    "not the file — so existence is exactly the wrong thing to assert about it.",
 }
 
 
 def check_c2_referenced_go_files_exist(paths: list[str]) -> list[str]:
     """Every path-qualified *.go referenced in C2's scope must exist.
 
-    Scope is docs/superpowers/, docs/audits/ (minus the aihub#412 corpus) and
-    docs/mcp-tools.md — assembled in main(), stated here because this is where
-    a reader lands from the error message.
+    Scope is docs/superpowers/, docs/audits/ (minus the aihub#412 corpus),
+    docs/mcp-tools.md and tests/scenarios/ — assembled in main(), stated here
+    because this is where a reader lands from the error message. Paths in
+    errors and in C2_ALLOWED keys are repo-relative (aihub#618).
     """
     errors = []
     for path in paths:
-        rel = os.path.relpath(path, DOCS)
+        rel = os.path.relpath(path, REPO_ROOT)
         seen: dict[str, int] = {}
         with open(path, encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
@@ -353,7 +395,7 @@ def check_c2_referenced_go_files_exist(paths: list[str]) -> list[str]:
                 continue
             if not os.path.exists(os.path.join(REPO_ROOT, ref)):
                 errors.append(
-                    f"docs/{rel}:{lineno}: references `{ref}`, which does not "
+                    f"{rel}:{lineno}: references `{ref}`, which does not "
                     "exist. Either the file moved (update the reference), or "
                     "the doc describes code that never landed (say so in the "
                     "doc), or the path belongs to another repository entirely "
@@ -1006,7 +1048,7 @@ def check_c6_symbol_anchors_resolve(paths: list[str]) -> tuple[list[str], int]:
     errors: list[str] = []
     checked = 0
     for path in paths:
-        rel = os.path.relpath(path, DOCS)
+        rel = os.path.relpath(path, REPO_ROOT)
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
 
@@ -1039,7 +1081,7 @@ def check_c6_symbol_anchors_resolve(paths: list[str]) -> tuple[list[str], int]:
             if leaf not in names:
                 lineno = text.count("\n", 0, offset) + 1
                 errors.append(
-                    f"docs/{rel}:{lineno}: cites `{ref}` (`{sym}`), and that "
+                    f"{rel}:{lineno}: cites `{ref}` (`{sym}`), and that "
                     "file declares no such symbol. A semantic anchor that "
                     "resolves to nothing rots exactly as quietly as the line "
                     "number it replaced — which is the whole reason line "
@@ -1281,11 +1323,18 @@ def self_test() -> int:
         DOCS = os.path.join(tmp, "docs")
         os.makedirs(os.path.join(DOCS, "design"))
         os.makedirs(os.path.join(tmp, "internal", "domain"))
+        os.makedirs(os.path.join(tmp, "tests", "scenarios", "e2e"))
         with open(os.path.join(tmp, "internal", "domain", "memory.go"), "w") as fh:
             fh.write("package domain\n")
 
         def write(rel, text):
             path = os.path.join(DOCS, rel)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
+
+        def write_repo(rel, text):
+            path = os.path.join(tmp, rel)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
             return path
@@ -1390,6 +1439,51 @@ def self_test() -> int:
             check_c2_referenced_go_files_exist([write(
                 "audits/elsewhere.md",
                 "go-sdk v1.6.0 `mcp/server.go` performs no validation\n",
+            )]),
+            True,
+        )
+
+        # aihub#618: the scan spans tests/scenarios/ too, and reports
+        # repo-relative paths. Driven through the real functions against files
+        # OUTSIDE docs/, which is the point of the widening — aihub#610's
+        # anchor rotted precisely because this root was unscanned.
+        scen_errors = check_c1_no_line_citations(
+            [write_repo("tests/scenarios/e2e/anchored.md",
+                        "see internal/domain/run_attempts.go:142 for it\n")]
+        )
+        expect("C1 fires under tests/scenarios (aihub#618)", scen_errors, True)
+        if scen_errors and not scen_errors[0].startswith(
+            "tests/scenarios/e2e/anchored.md:1:"
+        ):
+            failures.append(
+                "C1's error path for a tests/scenarios file is not "
+                f"repo-relative: {scen_errors[0]!r}. The allowlists key on the "
+                "repo-relative path, so a drifted prefix silently voids them."
+            )
+        expect(
+            "C2 fires under tests/scenarios (aihub#618)",
+            check_c2_referenced_go_files_exist([write_repo(
+                "tests/scenarios/e2e/badref.md",
+                "Reference: internal/domain/gone.go handles it\n",
+            )]),
+            True,
+        )
+        # The e2e08 entry: a synthetic declared_resources URI, excused ONLY in
+        # its own file — the same containment the two allowlist pairs above
+        # are held to.
+        expect(
+            "C2 allowlist (e2e08 synthetic URI) suppresses in its own file",
+            check_c2_referenced_go_files_exist([write_repo(
+                "tests/scenarios/e2e/E2E-08-auto-derive-locks.md",
+                '"uri": "file:internal/e2e08/contended.go"\n',
+            )]),
+            False,
+        )
+        expect(
+            "C2 allowlist (e2e08 synthetic URI) does NOT suppress elsewhere",
+            check_c2_referenced_go_files_exist([write_repo(
+                "tests/scenarios/e2e/other.md",
+                '"uri": "file:internal/e2e08/contended.go"\n',
             )]),
             True,
         )
@@ -1513,6 +1607,23 @@ def self_test() -> int:
         c6("C6 a missing file is C2's finding, not a second report here",
            "c6_missing.md", "`internal/domain/gone.go` (`Whatever`)\n",
            False, 0)
+
+        # aihub#618: C6 covers tests/scenarios/ with the same grammar. One
+        # fabricated and one real anchor, through the real function against a
+        # file under the new root.
+        scen_c6_errors, scen_c6_checked = check_c6_symbol_anchors_resolve(
+            [write_repo(
+                "tests/scenarios/e2e/sym.md",
+                f"`{fixture}` (`NoSuchFuncEver`); `{fixture}` (`UpdateMemory`)\n",
+            )]
+        )
+        expect("C6 fires under tests/scenarios (aihub#618)", scen_c6_errors, True)
+        if scen_c6_checked != 2:
+            failures.append(
+                "C6 under tests/scenarios: expected 2 symbols checked, got "
+                f"{scen_c6_checked} — the widened root is not being scanned "
+                "with the full grammar."
+            )
 
         # The pointer every C1 error hands the author must resolve. Same style
         # as above: through the real function, against a temp REPO_ROOT.
@@ -1719,8 +1830,12 @@ def main() -> int:
     # Guard the globs that can legitimately go empty, and guard EACH glob on
     # its own rather than C2's full input list: c2_files always contains
     # MCP_TOOLS_MD, so a guard on the combined list could never fire and would
-    # only look like protection.
-    c1_files = markdown_files(DOCS)
+    # only look like protection. The tests/scenarios/ glob gets the same guard
+    # for the same reason the audits glob got one in aihub#406: rename the
+    # directory and the widened root silently un-widens, with nothing red.
+    docs_files = markdown_files(DOCS)
+    scenarios_files = markdown_files(SCENARIOS)
+    c1_files = docs_files + scenarios_files
     superpowers_files = markdown_files(SUPERPOWERS)
     audits_files = [
         path
@@ -1728,7 +1843,8 @@ def main() -> int:
         if not path.startswith(AUDITS_CORPUS_EXCLUDE + os.sep)
     ]
     for label, files, root in (
-        ("C1", c1_files, DOCS),
+        ("C1", docs_files, DOCS),
+        ("C1/C2/C6", scenarios_files, SCENARIOS),
         ("C2", superpowers_files, SUPERPOWERS),
         ("C2", audits_files, AUDITS),
     ):
@@ -1801,14 +1917,16 @@ def main() -> int:
         return 2
 
     # C2/C6 scope: superpowers, the audits (minus the aihub#412 corpus — see
-    # AUDITS_CORPUS_EXCLUDE), and docs/mcp-tools.md, where this gate's own
-    # headline fix put path-qualified anchors. An anchor nothing checks rots
+    # AUDITS_CORPUS_EXCLUDE), docs/mcp-tools.md, where this gate's own
+    # headline fix put path-qualified anchors, and tests/scenarios/ (aihub#618:
+    # C1 fires there now, so the anchor form its errors prescribe must be
+    # verified there too). An anchor nothing checks rots
     # exactly as quietly as the line number it replaced. The scope deliberately
     # does NOT cover docs/design/polyforge-v1-design.md, which is a design
     # document and legitimately names files that do not exist yet, nor
     # docs/mcp-cards/, which the Go-side K6 gate already resolves
     # (internal/mcp/contract_cards_gate_test.go).
-    c2_files = superpowers_files + audits_files + [MCP_TOOLS_MD]
+    c2_files = superpowers_files + audits_files + scenarios_files + [MCP_TOOLS_MD]
 
     # C6's anti-vacuity guard is a COUNT, not a file-list check: its grammar
     # could rot while the files stay plentiful, and a recogniser that matched
@@ -1845,7 +1963,8 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: docs/ line-number citations closed; superpowers/audits Go "
+        f"OK: docs/ and tests/scenarios/ line-number citations closed; "
+        f"superpowers/audits/scenarios Go "
         f"references resolve and {c6_checked} symbol anchors resolve to real "
         f"declarations; mcp-tools.md matches all {len(schema_tools)} "
         f"registered tools; the aihub#411 §6 tally matches a recount of its "

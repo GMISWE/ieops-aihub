@@ -5292,6 +5292,30 @@ jobs:
           ! grep -q -- '--- SKIP' paused_emit_grant.log \
             || { echo "::error::an aihub#585 paused-attempt grant test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#362: POST /v1/work_items/:id/unblock resolves id-or-slug — the
+      # FIFTH instance of the aihub#127/#343/#357 slug-resolution class, found
+      # by aihub#357's independent review. The static side is the
+      # internal/citest/slugres census (DB-free, runs in the "Unit tests" step
+      # and fails on the unfixed handler body); these two functions are the
+      # behavioural side, which only a real database can hold: the slug arm
+      # must requeue the row AND key the admin_unblock audit event by the
+      # canonical id (the event insert is best-effort, so a slug there vanishes
+      # without an error), and resolution must not widen the endpoint — a
+      # non-blocked work item answers 409 by slug exactly as it does by id.
+      - name: aihub#362 unblock-by-slug DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestUnblockBySlug_' -count=1 -v 2>&1 | tee unblock_slug.log
+          for want in TestUnblockBySlug_UnblocksAndKeysTheEventCanonically \
+                      TestUnblockBySlug_StatusGateStillApplies; do
+            grep -q -- "--- PASS: $want (" unblock_slug.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#362 unblock slug fix is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' unblock_slug.log \
+            || { echo "::error::an aihub#362 unblock slug test SKIPped — AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

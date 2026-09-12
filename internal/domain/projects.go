@@ -1120,7 +1120,7 @@ func RotateIdentifier(ctx context.Context, conn *pgxpool.Pool, name string, call
 		hashStr, prefix, name,
 	)
 	if execErr != nil {
-		return "", "", NewErr(ErrInternalError, fmt.Sprintf("update identifier: %v", execErr))
+		return "", "", dbErrCause(execErr, "update identifier")
 	}
 
 	return plain, prefix, nil
@@ -1151,7 +1151,7 @@ func TransferOwner(ctx context.Context, conn *pgxpool.Pool, name, newOwnerID str
 		newOwnerID, name,
 	)
 	if execErr != nil {
-		return NewErr(ErrInternalError, fmt.Sprintf("transfer owner: %v", execErr))
+		return dbErrCause(execErr, "transfer owner")
 	}
 	return nil
 }

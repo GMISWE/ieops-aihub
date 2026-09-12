@@ -343,7 +343,7 @@ func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, ca
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 			}
-			return nil, NewErr(ErrInternalError, fmt.Sprintf("get project: %v", err))
+			return nil, dbErrCause(err, "get project")
 		}
 		return p, nil
 	}
@@ -353,7 +353,7 @@ func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, ca
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, NewErr(ErrProjectNotFound, fmt.Sprintf("project %q not found", name))
 		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("get project: %v", err))
+		return nil, dbErrCause(err, "get project")
 	}
 
 	// Level 2: owner has all permissions
@@ -523,7 +523,7 @@ func CreateProject(ctx context.Context, conn *pgxpool.Pool, owner *UserRecord, r
 			return nil, NewErr(ErrProjectAlreadyExists,
 				fmt.Sprintf("project %q already exists", req.Name))
 		}
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("create project: %v", err))
+		return nil, dbErrCause(err, "create project")
 	}
 	return p, nil
 }
@@ -1143,7 +1143,7 @@ func TransferOwner(ctx context.Context, conn *pgxpool.Pool, name, newOwnerID str
 		if errors.Is(err, pgx.ErrNoRows) {
 			return NewErr(ErrNotFound, fmt.Sprintf("user %q not found", newOwnerID))
 		}
-		return NewErr(ErrInternalError, fmt.Sprintf("check new owner: %v", err))
+		return dbErrCause(err, "check new owner")
 	}
 
 	_, execErr := conn.Exec(ctx,

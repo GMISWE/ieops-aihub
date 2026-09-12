@@ -107,11 +107,9 @@ package domain
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -220,12 +218,14 @@ func semanticQuerySource(ctx context.Context, pool *pgxpool.Pool, project string
 		FROM work_items
 		WHERE (id = $1 OR slug = $1)`+scope, args...,
 	).Scan(&id, &storedVec, &storedModel)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", "", nil, NewErr(ErrNotFound, fmt.Sprintf(
-			"similar_to: no work item %q in scope (it may exist in a project this request does not cover)", *f.SimilarTo))
-	}
 	if err != nil {
-		return "", "", "", nil, NewErr(ErrInternalError, fmt.Sprintf("similar_to source lookup: %v", err))
+		// pgxErr folds the two arms this used to spell out (aihub#607): ErrNoRows
+		// keeps the scoped not-found answer byte for byte, everything else keeps
+		// "similar_to source lookup: <err>" — now classified, so a class-40
+		// rollback answers the retryable 409 instead of a 500.
+		return "", "", "", nil, pgxErr(err, fmt.Sprintf(
+			"similar_to: no work item %q in scope (it may exist in a project this request does not cover)", *f.SimilarTo),
+			"similar_to source lookup")
 	}
 	// A source with no vector is a real and temporary server state (embeddings
 	// disabled, or a backfill not yet run) — NOT an empty neighbour set, which
@@ -340,7 +340,7 @@ func listWorkItemsByVector(ctx context.Context, pool *pgxpool.Pool, project stri
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, NewErr(ErrInternalError, fmt.Sprintf("vector list query: %v", err))
+		return nil, dbErrCause(err, "vector list query")
 	}
 	defer rows.Close()
 

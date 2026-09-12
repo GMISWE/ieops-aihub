@@ -128,7 +128,16 @@ func installProbePoison(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	// unqualified `FROM resource_locks` resolves to the raising view, and
 	// every other relation still finds public. Connections outside this pool
 	// never see the schema.
-	cfg, err := pgxpool.ParseConfig(os.Getenv("AIHUB_TEST_DB"))
+	dbURL := os.Getenv("AIHUB_TEST_DB")
+	if dbURL == "" {
+		// Unreachable in practice (the caller's setupLatestTestDB has already
+		// skipped), but dbtestcov's skip-message gate requires every function
+		// that reads AIHUB_TEST_DB to skip naming it, so the inventory can
+		// classify the test from its SKIP line. Same message as
+		// setupLatestTestDB, the package convention.
+		t.Skip("set AIHUB_TEST_DB to run this integration test")
+	}
+	cfg, err := pgxpool.ParseConfig(dbURL)
 	require.NoError(t, err, "parse AIHUB_TEST_DB")
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, `SET search_path = `+schema+`, public`)

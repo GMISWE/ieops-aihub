@@ -78,6 +78,11 @@ func seedStepTestWI(t *testing.T, pool *pgxpool.Pool, project, userID string) *d
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `UPDATE work_items SET current_attempt_id=NULL WHERE project=$1`, project)
 	require.NoError(t, err)
+	// Locks before attempts: resource_locks.owner_attempt_id is ON DELETE
+	// RESTRICT, so a leftover lock would fail the run_attempts delete with
+	// SQLSTATE 23001 (aihub#601, the class aihub#593 measured).
+	_, err = pool.Exec(ctx, `DELETE FROM resource_locks WHERE owner_attempt_id IN (SELECT id FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1))`, project)
+	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `DELETE FROM run_attempts WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`, project)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `DELETE FROM memories WHERE work_item_id IN (SELECT id FROM work_items WHERE project=$1)`, project)

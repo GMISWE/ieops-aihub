@@ -19,12 +19,26 @@ package domain
 // for a plain SELECT is not controllable from outside the transaction (the
 // interleaving that serialization_failure_db_test.go uses works because its
 // subject blocks on SELECT ... FOR UPDATE; the probe takes no row lock, so
-// nothing to block on). So `resource_locks` is swapped for a view over a
-// set-returning function that RAISEs with ERRCODE 40001:
+// nothing to block on). So the probe's unqualified `resource_locks` is made to
+// resolve to a view over a set-returning function that RAISEs with ERRCODE
+// 40001, in a private schema pinned ahead of public on a dedicated pool's
+// search_path (the shape list_work_items_rows_err_db_test.go uses):
 //
-//	ALTER TABLE resource_locks RENAME TO resource_locks_pf410
-//	CREATE FUNCTION pf410_boom() RETURNS SETOF resource_locks_pf410 ... RAISE ... 40001
-//	CREATE VIEW resource_locks AS SELECT * FROM pf410_boom()
+//	CREATE SCHEMA pf410_probe_poison
+//	CREATE FUNCTION pf410_probe_poison.pf410_boom() RETURNS SETOF public.resource_locks ... RAISE ... 40001
+//	CREATE VIEW pf410_probe_poison.resource_locks AS SELECT * FROM pf410_boom()
+//	SET search_path = pf410_probe_poison, public   (pinned on every poisoned-pool connection)
+//
+// Only connections drawn from the returned pool see the poison. An earlier
+// revision instead RENAMED the shared public.resource_locks table and put the
+// raising view in its place, which poisoned every other connection sharing the
+// database for the width of the window, measured at ~0.23s per run in
+// aihub#593: bystander binaries that hit it got 42P01 (between the rename and
+// the CREATE VIEW) or 55000 (writes against the stand-in view). The suite's
+// class-40 and poison-window retries absorb that at the normal ~0.3% duty
+// cycle and visibly break at amplifier duty, so aihub#601 moved the injection
+// off the shared schema entirely: same statement, same SQLSTATE, no DDL on
+// anything another connection can see.
 //
 // The cause is simulated; the ERROR IS NOT. It is raised by the server, carries
 // SQLSTATE 40001, travels through the real pgx driver on the real probe
@@ -65,8 +79,10 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -74,52 +90,69 @@ import (
 )
 
 // installProbePoison makes the lock-conflict probe statement fail with SQLSTATE
-// 40001, and restores the schema afterwards.
+// 40001 on every connection of the pool it RETURNS, and leaves the shared
+// public.resource_locks untouched.
 //
-// The cleanup is registered IMMEDIATELY after the rename, before the two
-// CREATEs that can themselves fail: a t.Fatalf between the rename and the
-// cleanup registration would leave the whole test database without a
-// resource_locks table, and every later step in CI's DB block would fail on a
-// fixture rather than on its own subject.
-func installProbePoison(t *testing.T, pool *pgxpool.Pool) {
+// The poison is a private schema whose `resource_locks` is a view over a
+// set-returning function that RAISEs, pinned ahead of public on the returned
+// pool's search_path. Isolation is the point (aihub#601): the previous shape
+// renamed the shared table and re-created it as the raising view, so every
+// concurrent connection saw the poison for the width of the install/restore
+// window (~0.23s per run, measured in aihub#593, surfacing as 42P01/55000 in
+// bystanders). Cleanup here is a single DROP SCHEMA CASCADE, and a fixture
+// that dies half-installed can no longer strand the database without its
+// lock table.
+func installProbePoison(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
+	const schema = "pf410_probe_poison"
 
-	mustExec(t, pool, `ALTER TABLE resource_locks RENAME TO resource_locks_pf410`)
-	t.Cleanup(func() {
-		// Order matters: the view depends on the function, which depends on the
-		// table's composite type. IF EXISTS on both so a partial install still
-		// gets the table's name back.
-		_, _ = pool.Exec(ctx, `DROP VIEW IF EXISTS resource_locks`)
-		_, _ = pool.Exec(ctx, `DROP FUNCTION IF EXISTS pf410_boom()`)
-		if _, err := pool.Exec(ctx, `ALTER TABLE resource_locks_pf410 RENAME TO resource_locks`); err != nil {
-			t.Errorf("could not restore the resource_locks table: %v — the test database is left "+
-				"with the poison installed, and every later DB test in this run will fail on the fixture "+
-				"instead of on its own subject", err)
-			return
-		}
-		// Prove the restore, rather than assuming the rename returned success
-		// for the right reason.
-		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM resource_locks`).Scan(&n); err != nil {
-			t.Errorf("resource_locks is not queryable after cleanup: %v", err)
-		}
-	})
-
-	mustExec(t, pool, `
-		CREATE FUNCTION pf410_boom() RETURNS SETOF resource_locks_pf410
+	for _, ddl := range []string{
+		`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`,
+		`CREATE SCHEMA ` + schema,
+		// SETOF public.resource_locks keeps the view's row type identical to
+		// the real table's, so Describe succeeds and only Execute raises,
+		// which is the path the probe exercises.
+		`CREATE FUNCTION ` + schema + `.pf410_boom() RETURNS SETOF public.resource_locks
 		LANGUAGE plpgsql AS $$
 		BEGIN
 			RAISE EXCEPTION 'aihub#410 injected probe failure' USING ERRCODE = '40001';
-		END $$`)
-	mustExec(t, pool, `CREATE VIEW resource_locks AS SELECT * FROM pf410_boom()`)
+		END $$`,
+		`CREATE VIEW ` + schema + `.resource_locks AS SELECT * FROM ` + schema + `.pf410_boom()`,
+	} {
+		mustExec(t, pool, ddl)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+
+	// Pin search_path on every connection of a NEW pool: the probe's
+	// unqualified `FROM resource_locks` resolves to the raising view, and
+	// every other relation still finds public. Connections outside this pool
+	// never see the schema.
+	dbURL := os.Getenv("AIHUB_TEST_DB")
+	if dbURL == "" {
+		// Unreachable in practice (the caller's setupLatestTestDB has already
+		// skipped), but dbtestcov's skip-message gate requires every function
+		// that reads AIHUB_TEST_DB to skip naming it, so the inventory can
+		// classify the test from its SKIP line. Same message as
+		// setupLatestTestDB, the package convention.
+		t.Skip("set AIHUB_TEST_DB to run this integration test")
+	}
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	require.NoError(t, err, "parse AIHUB_TEST_DB")
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `SET search_path = `+schema+`, public`)
+		return err
+	}
+	poisoned, err := pgxpool.NewWithConfig(ctx, cfg)
+	require.NoError(t, err, "connect with poisoned search_path")
+	t.Cleanup(poisoned.Close)
 
 	// ── Injection self-check, on the statement actually under test ──────────
 	// foreignLockHolderSQL is the probe's own SQL (this file is in-package), so
 	// this checks the real joins and the real plan shape, not a stand-in
 	// `SELECT count(*)` that might be planned differently.
 	var a, b, c string
-	err := pool.QueryRow(ctx, foreignLockHolderSQL,
+	err = poisoned.QueryRow(ctx, foreignLockHolderSQL,
 		"file_scope", []string{"aihub:aihub:probe-selfcheck"}, "", "wi_not_this_one",
 	).Scan(&a, &b, &c)
 	require.Error(t, err, "the injection did not fire on foreignLockHolderSQL, so this test proves nothing")
@@ -128,6 +161,18 @@ func installProbePoison(t *testing.T, pool *pgxpool.Pool) {
 	require.Equal(t, "40001", pgErr.Code,
 		"the injection fired with SQLSTATE %s rather than 40001, so the arm below would be asserting "+
 			"the wrong classification", pgErr.Code)
+
+	// Isolation self-check, from the other side: the shared table must stay
+	// readable on the PLAIN pool while the poison is installed. This is the
+	// assertion that goes red if the injection ever moves back onto the shared
+	// schema (aihub#601): under the old rename shape this SELECT met the
+	// raising view (40001) or, mid-install, no relation at all (42P01).
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM resource_locks`).Scan(&n),
+		"public.resource_locks must stay readable by connections outside the poisoned pool "+
+			"while the poison is installed (aihub#601)")
+
+	return poisoned
 }
 
 func TestClaimProbeFailureReachesTheCallerAsARetryable409(t *testing.T) {
@@ -173,9 +218,12 @@ func TestClaimProbeFailureReachesTheCallerAsARetryable409(t *testing.T) {
 	require.NotEmpty(t, probes, "no lock probes were derived, so probeForeignLockHolders would iterate zero times")
 	require.NotEmpty(t, probeReq.RequestedLocks, "no locks were derived from declared_resources")
 
-	installProbePoison(t, pool)
+	// The subject's claim runs on the poisoned pool; everything before and
+	// after this line stays on the plain pool, whose connections never see the
+	// injection (aihub#601).
+	poisoned := installProbePoison(t, pool)
 
-	_, aerr = claimWI(t, pool, uid, subject.ID, "aihub410-subject")
+	_, aerr = claimWI(t, poisoned, uid, subject.ID, "aihub410-subject")
 
 	require.NotNil(t, aerr, "the lock-conflict probe failed with SQLSTATE 40001 and the claim reported success")
 	assert.Equal(t, ErrConflictSerializationFailure, aerr.Code,

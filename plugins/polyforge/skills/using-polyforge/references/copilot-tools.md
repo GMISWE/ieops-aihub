@@ -19,7 +19,7 @@ copilot plugin install <path-to>/plugins/polyforge
 ```
 
 The plugin's `.mcp.json` auto-registers the `polyforge` MCP server on install (STDIO, reusing
-`bin/polyforge-mcp.sh`) — no manual `copilot mcp add` needed. Verify with `copilot plugin list`,
+`bin/polyforge-mcp.sh`) - no manual `copilot mcp add` needed. Verify with `copilot plugin list`,
 `copilot mcp list`, and `copilot skill list`.
 
 Manual MCP fallback (when not installing as a plugin):
@@ -33,9 +33,9 @@ copilot mcp add polyforge -- "$CLAUDE_PLUGIN_ROOT/bin/polyforge-mcp.sh"
 
 | Skill text references (Claude Code) | Copilot equivalent |
 |---|---|
-| `Skill` (invoke a `/pf-*` skill) | No `Skill` tool. Skills load natively — use `/skills`, or let Copilot select by description; then follow the skill's instructions. |
+| `Skill` (invoke a `/pf-*` skill) | No `Skill` tool. Skills load natively - use `/skills`, or let Copilot select by description; then follow the skill's instructions. |
 | `Task` (dispatch a subagent) | Copilot's own subagent mechanism; parallel implementation still splits into child work items. |
-| `Read` / `Write` / `Edit` | native file tools — a single `apply_patch` tool handles create / edit / delete |
+| `Read` / `Write` / `Edit` | native file tools - a single `apply_patch` tool handles create / edit / delete |
 | `Bash` | native shell tool (`bash`) |
 | MCP tools `mcp__plugin_polyforge_polyforge__pf_*` | `polyforge(pf_*)` in `--allow-tool` / `--deny-tool` permission syntax; `polyforge-pf_*` as the `toolName` seen by hooks |
 
@@ -58,18 +58,18 @@ hook schema with `polyforge-pf_*` / `apply_patch` matchers:
 
 - `preToolUse` -> `pf-commit-guard` (attribution guard on commit/PR text plus the
   protected-branch / worktree git guards). A block is emitted as a top-level
-  `{"permissionDecision":"deny", "permissionDecisionReason":"..."}` — the only form Copilot
+  `{"permissionDecision":"deny", "permissionDecisionReason":"..."}` - the only form Copilot
   honors (the nested shape and a bare exit code 2 are ignored).
 - `postToolUse` -> `pf-chain-hook.cjs` (lifecycle chain visualization).
 
 ## Caveats
 
-- Copilot iterates fast (facts verified on 1.0.68); tool naming and hook schema may shift —
+- Copilot iterates fast (facts verified on 1.0.68); tool naming and hook schema may shift -
   check `copilot plugin --help`, `copilot mcp --help`, and the hooks reference if behavior
   drifts.
 - `${CLAUDE_PLUGIN_ROOT}` works unchanged under Copilot: it also exports `COPILOT_PLUGIN_ROOT`
   and `PLUGIN_ROOT` with the same value, so manifests and hook commands need no env-var rewrite.
-- Hooks and MCP servers DO fire under `-p` (non-interactive) — verified on 1.0.68.
+- Hooks and MCP servers DO fire under `-p` (non-interactive) - verified on 1.0.68.
 - The `PreToolUse(Skill)` skill-router does not run under Copilot (no `Skill` tool). Under
   Claude Code that router only ever injects for `/pf-execute` (fallback pointer to
   `SKILL.md`'s `engine.native.md`); `/pf-spec` and `/pf-plan` are self-sufficient `SKILL.md`

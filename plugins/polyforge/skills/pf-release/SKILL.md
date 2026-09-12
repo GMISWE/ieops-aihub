@@ -5,22 +5,22 @@ description: >
   channel to stable, or check the current release state.
 ---
 
-# pf-release — Release Management
+# pf-release - Release Management
 
-> 🔴 **INERT UNTIL PHASE 2 — the two tools this skill drives no longer exist.**
+> **INERT UNTIL PHASE 2 - the two tools this skill drives no longer exist.**
 >
 > `pf_cut_alpha` and `pf_promote` were **unpublished** by aihub#448 (aihub#411's
 > T2-10 ruling). Calling either now fails with "unknown tool" rather than the 405
 > `NOT_IMPLEMENTED` they used to answer, so **every `pf_cut_alpha(...)` /
 > `pf_promote(...)` block below is a Phase 2 design sketch, not a runnable step.**
 >
-> Why they went: they were fully wired at hops 1–2 — schema, required params,
-> credential injection, client call — while hop 3 was a 405 stub; zero calls in
+> Why they went: they were fully wired at hops 1–2 - schema, required params,
+> credential injection, client call - while hop 3 was a 405 stub; zero calls in
 > 21 days; and `pf_cut_alpha` advertised an "Admin / release-manager only"
 > permission model built on a role that exists in no vocabulary. Per aihub#387's
 > Plan B, a published surface with nothing behind it costs schema bytes in every
-> request's prefix to advertise a 405. Measured: 50 → 48 tools, schema dump
-> 40,947 → 39,748 bytes (−2.93%).
+> request's prefix to advertise a 405. Measured: 50 -> 48 tools, schema dump
+> 40,947 -> 39,748 bytes (−2.93%).
 >
 > **If you were sent here to cut a release: stop and say so.** There is no
 > alpha/stable channel server-side. Release state does not exist to be read, and
@@ -30,7 +30,7 @@ description: >
 > Phase 2 design. Republishing the tools means restoring `internal/mcp/tools_release.go`
 > and its `registerReleaseTools()` call, the two `credSites()` rows in
 > `internal/mcp/state_resolve_wiring_test.go`, the `docs/mcp-tools.md` rows, and
-> this banner's removal — and ⚠️ **the signatures below already disagree with the
+> this banner's removal - and **the signatures below already disagree with the
 > schemas that were removed** (they show `version` / `included_wi_ids` /
 > `source_release_wi_id`, where the real tools took `repos` / `base_tag` /
 > `source_alpha_tag`), so treat them as intent, not as a contract to restore.
@@ -54,9 +54,9 @@ to a stable channel.
 
 ## Mechanic
 
-### `/pf-release alpha` — Cut alpha release
+### `/pf-release alpha` - Cut alpha release
 
-1. Show current release state — determine scope from last release timestamp:
+1. Show current release state - determine scope from last release timestamp:
    ```
    // Look up the most recent release record to get the last_release_at baseline
    last_release_records = pf_recall(
@@ -91,15 +91,15 @@ to a stable channel.
    >   the MCP layer, so the status filter was not applying at all. Corrected above.
    > - **Fixed:** `since=` reaches the server now instead of being discarded.
    >
-   > 🔴 **Still wrong, and now wrong in the more dangerous direction.** `since`
+   > **Still wrong, and now wrong in the more dangerous direction.** `since`
    > filters `wi.created_at`, not `closed_at`. So `status=wrapped&since=T` means
-   > "created after T and currently wrapped" — **a wi created before the last
+   > "created after T and currently wrapped" - **a wi created before the last
    > release and wrapped since it is silently excluded from the release notes.**
    >
    > Before aihub#280 the discarded `since` made this over-inclusive (the most
    > recent 50 wrapped), and a human confirming the list could see the extras.
    > Now it is under-inclusive, and a short list looks exactly like a correct one.
-   > **Do not treat this call as "wrapped since the last release" — it is not.**
+   > **Do not treat this call as "wrapped since the last release" - it is not.**
    > Expressing that set needs `closed_at` (stamped by `trg_wi_closed_at`, already
    > reachable via `sort=closed_at`) exposed as a `closed_since` filter, which no
    > param provides yet. That belongs to **aihub#176** along with everything else
@@ -108,9 +108,9 @@ to a stable channel.
    > Latent today: the `if last_release_at` branch is unreachable anyway, because
    > step 5 writes via `pf_remember`, which refuses every `methodology.*` type (the
    > prefix gate, aihub#210), so it can never write the record step 1 reads. Since
-   > aihub#499 `pf_save_artifact` would store the type — it enforces only the
+   > aihub#499 `pf_save_artifact` would store the type - it enforces only the
    > `methodology.` prefix; the six names are convention examples, not a published
-   > enum — but step 5 does not use it. This always takes the `else` branch.
+   > enum - but step 5 does not use it. This always takes the `else` branch.
    > Recorded rather than left as another undocumented dead path.
 
 2. Confirm release scope with the user: "These N wi's will be included in <version>."
@@ -164,7 +164,7 @@ to a stable channel.
 
 ---
 
-### `/pf-release promote` — Promote alpha to stable
+### `/pf-release promote` - Promote alpha to stable
 
 1. Show available alpha releases:
    ```
@@ -177,20 +177,20 @@ to a stable channel.
    )
    ```
 
-   > ⚠️ **This returns 0 rows today, and that is the honest answer.** As of
+   > **This returns 0 rows today, and that is the honest answer.** As of
    > aihub#280 the server honours `scenario=` (it used to discard it, which is
    > why this call previously listed *every* wi in the project and looked like it
    > worked). But `work_items.scenario` is constrained to `coding|writing|data`
    > and `CreateWorkItem` rejects everything except `coding`, so no work item can
-   > hold `scenario="release"` — and the only documented producers of release
+   > hold `scenario="release"` - and the only documented producers of release
    > wis, `pf_cut_alpha` and `pf_promote`, are still 405 stubs. Deciding whether
    > "release" becomes a scenario (needs a migration) or a `wi_type` (needs none
-   > — `validWIKinds` already lists it) belongs to **aihub#176**; do not paper
+   > - `validWIKinds` already lists it) belongs to **aihub#176**; do not paper
    > over it by dropping the filter.
 
 2. User selects the alpha to promote.
 
-3. Confirm promotion: "Promote <alpha_version> → <stable_version>?"
+3. Confirm promotion: "Promote <alpha_version> -> <stable_version>?"
 
 4. Promote:
    ```
@@ -212,7 +212,7 @@ to a stable channel.
 
 ---
 
-### `/pf-release status` — Show release state
+### `/pf-release status` - Show release state
 
 ```
 pf_list_work_items(
@@ -222,7 +222,7 @@ pf_list_work_items(
 )
 ```
 
-> ⚠️ Same caveat as `promote` above: `scenario=` is honoured since aihub#280, but
+> Same caveat as `promote` above: `scenario=` is honoured since aihub#280, but
 > no row can hold `scenario="release"`, so this lists nothing until **aihub#176**
 > makes release work items real. Previously it silently listed the project's
 > entire backlog and presented it as the release history.

@@ -650,7 +650,7 @@ var scenarioPathDocs = []struct {
 	rel    string
 	anchor string
 }{
-	{"skills/pf-work/SKILL.md", "### Mode A — New wi"},
+	{"skills/pf-work/SKILL.md", "### Mode A - New wi"},
 	{"skills/pf-execute/engine.native.md", "## Execute (rhs=false, auto mode)"},
 	{"skills/pf-execute/references/engine-native-details.md", "--- step instructions ---"},
 }

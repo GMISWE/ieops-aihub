@@ -33,9 +33,9 @@ func repoRoot(t *testing.T) string {
 // TestUserVisibleCopyBanList is the aihub#378 gate. It scans the product-copy
 // surfaces for the markers aihub#373 measured at ~zero in human-written text
 // of the same genre, and fails on any occurrence no per-occurrence directive
-// covers. See the package comment for the surface list, the remaining
-// TEMPORARY surface exclusion (plugins/** until its release-batched work item
-// is filed and lands), and the exemption grammar.
+// covers. See the package comment for the surface list (which includes the
+// plugins/** markdown surface since aihub#633 cleared the last TEMPORARY
+// exclusion) and the exemption grammar.
 func TestUserVisibleCopyBanList(t *testing.T) {
 	root := repoRoot(t)
 	res, err := ScanRepo(root)
@@ -253,6 +253,74 @@ func TestDirectiveMechanics(t *testing.T) {
 	})
 	// There is no file- or directory-level directive: the grammar has no
 	// syntax for one, so the wrong shape is unwritable rather than reviewable.
+}
+
+// scanMarkdownFixture writes src as a .md file and scans it.
+func scanMarkdownFixture(t *testing.T, src string) Result {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fr, err := ScanMarkdownFile(path, "SKILL.md")
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	return Check([]FileResult{fr})
+}
+
+// TestMarkdownSurface covers the plugins/** markdown surface added when
+// aihub#633 deleted the aihub#378 TEMPORARY exclusion. Same constraints as
+// the Go and template surfaces: an injected marker turns the gate red
+// (negative control), human punctuation stays green (positive control), the
+// scanner demonstrably reads UTF-8 (the aihub#373 F3 channel control), and
+// directives are per occurrence.
+func TestMarkdownSurface(t *testing.T) {
+	t.Run("injected markers turn the gate red", func(t *testing.T) {
+		res := scanMarkdownFixture(t, "# Title\n\nA sentence — with an em dash.\nA flow a → b.\nDone ✅.\n")
+		if len(res.Violations) != 3 {
+			t.Errorf("want 3 violations, got %d: %v", len(res.Violations), res.Violations)
+		}
+	})
+	t.Run("the whole raw file is the surface: fences, inline code and comments included", func(t *testing.T) {
+		// Unlike templates, nothing in a markdown file is masked: an agent
+		// reads the fenced block and the HTML comment the same way it reads
+		// prose, so a marker hiding in either is still product copy.
+		res := scanMarkdownFixture(t, "```\noutput — with a dash\n```\n`inline — code`\n<!-- a comment — too -->\n")
+		if len(res.Violations) != 3 {
+			t.Errorf("want 3 violations (fence, inline code, html comment), got %d: %v", len(res.Violations), res.Violations)
+		}
+	})
+	t.Run("entities are NOT decoded: the agent reads the bytes as written", func(t *testing.T) {
+		res := scanMarkdownFixture(t, "team knowledge &mdash; everything\n")
+		if len(res.Violations) != 0 {
+			t.Errorf("markdown is read raw, `&mdash;` is seven ASCII characters to an agent, got %v", res.Violations)
+		}
+	})
+	t.Run("human punctuation stays green and the scanner saw the CJK it declined to flag", func(t *testing.T) {
+		res := scanMarkdownFixture(t, "An ASCII hyphen - stays; a range 2019–2021 stays.\n"+
+			"An ascii arrow a -> b stays; so does a => b.\n"+
+			"一句普通的中文,带全角标点:(括号)、顿号,不该被误伤。\n")
+		if len(res.Violations) != 0 {
+			t.Errorf("positive control went red: %v", res.Violations)
+		}
+		if res.CJKRunes == 0 {
+			t.Errorf("scanner saw no CJK runes in a fixture that contains them; the read path is mangling UTF-8")
+		}
+	})
+	t.Run("same-line html-comment directive exempts exactly the named runes", func(t *testing.T) {
+		res := scanMarkdownFixture(t, "(🟢 done / 🟡 active) <!-- aitaste:allow U+1F7E2 U+1F7E1: glyphs a shipped script renders -->\n")
+		if len(res.Violations) != 0 || len(res.Exemptions) != 1 {
+			t.Errorf("want clean pass with 1 exemption, got violations=%v exemptions=%v", res.Violations, res.Exemptions)
+		}
+	})
+	t.Run("a stale directive is itself a failure", func(t *testing.T) {
+		res := scanMarkdownFixture(t, "<!-- aitaste:allow U+2014: text was fixed but the directive stayed -->\nclean line\n")
+		if len(res.StaleDirectives) != 1 {
+			t.Errorf("want the leftover directive reported stale, got %v", res.StaleDirectives)
+		}
+	})
 }
 
 // scanTemplateFixture writes src as a .tmpl file and scans it.

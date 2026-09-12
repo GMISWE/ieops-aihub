@@ -1,4 +1,4 @@
-# _common/storage.md — artifact storage
+# _common/storage.md - artifact storage
 
 **Artifact type for this step**: `@@ARTIFACT_TYPE@@`
 

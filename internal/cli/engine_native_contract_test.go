@@ -431,11 +431,14 @@ func TestEngineNativeLevelVocabularyContract(t *testing.T) {
 		// The mapping has to be a real predicate in the resident loop, not a promise in prose.
 		// This is the string the engine dispatches on; if it goes, the tier is aspirational
 		// again and the paragraph above becomes the aihub#358 defect with new wording.
+		// Since aihub#555 the loop selects an AGENT (whose definition file carries the model)
+		// rather than a model name, so the constants are the agent ids.
 		body := readEngineDoc(t, pluginRoot, "skills/pf-execute/engine.native.md")
-		for _, frag := range []string{`endswith("_review")`, "RAISED_TIER", "DEFAULT_TIER"} {
+		for _, frag := range []string{`endswith("_review")`, "REVIEW_AGENT", "STEP_AGENT"} {
 			if !strings.Contains(body, frag) {
 				t.Errorf("skills/pf-execute/engine.native.md no longer contains %q — the step "+
-					"body no longer selects a tier, whatever the surrounding prose claims", frag)
+					"body no longer selects a per-step-kind agent, whatever the surrounding "+
+					"prose claims", frag)
 			}
 		}
 	})

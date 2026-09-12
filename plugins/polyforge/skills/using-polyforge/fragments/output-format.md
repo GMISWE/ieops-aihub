@@ -14,12 +14,12 @@ Every polyforge skill response MUST follow this format exactly. Violations = bug
 | status | running |
 | owner | you (ra_8d2E4F1a) |
 | locks | file_scope ×2 |
-| blocked | — |
+| blocked | - |
 | step | 2/4 review |
 
 ## Next steps
-- `/pf-spec` — write spec, AI guides scope definition
-- `/pf-stop --pause` — pause and release locks
+- `/pf-spec` - write spec, AI guides scope definition
+- `/pf-stop --pause` - pause and release locks
 (max 5 items; write _none_ if no actions available)
 ```
 

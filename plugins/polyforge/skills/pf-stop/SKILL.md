@@ -5,7 +5,7 @@ description: >
   as a terminal success, or mark it a terminal failure.
 ---
 
-# pf-stop — Stop / Complete Work Item
+# pf-stop - Stop / Complete Work Item
 
 ## Usage
 
@@ -16,9 +16,9 @@ description: >
 **Required**: exactly one of the flags below
 
 **Flags**:
-- `--pause` — release lease, keep locks, status → paused (resumable via `/pf-work <slug> --resume`)
-- `--wrap` — terminal success; emits wrap note, calls `pf_wrap`, deletes state file (destructive)
-- `--fail` — terminal failure; emits failure note, calls `pf_complete_attempt(failed)`, deletes state file (destructive)
+- `--pause` - release lease, keep locks, status -> paused (resumable via `/pf-work <slug> --resume`)
+- `--wrap` - terminal success; emits wrap note, calls `pf_wrap`, deletes state file (destructive)
+- `--fail` - terminal failure; emits failure note, calls `pf_complete_attempt(failed)`, deletes state file (destructive)
 
 ## When to use
 
@@ -56,18 +56,18 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 ### Mode: wrap (`/pf-stop --wrap`)
 
-> **Pass the wrap note as `note=` on the terminal call** — one call, not two. The note is
+> **Pass the wrap note as `note=` on the terminal call** - one call, not two. The note is
 > recorded server-side before the attempt completes, which is the only order that works:
 > `pf_wrap` and `pf_complete_attempt(wrapped)` delete the state file, so a `pf_emit_event`
 > after them fails for want of credentials. Fusing them removes both the ordering hazard and
 > the round-trip (aihub#290).
 >
 > **Compatibility**: if `pf_wrap` / `pf_complete_attempt` do not publish a `note` parameter,
-> the server binary predates aihub#290 — fall back to a separate
+> the server binary predates aihub#290 - fall back to a separate
 > `pf_emit_event(event_type="note", payload={text: ...})` issued **before** the terminal call.
 > Do not pass `note` to a tool that does not publish it.
 
-1. Call the terminal wrap with the note — **coding scenario**:
+1. Call the terminal wrap with the note - **coding scenario**:
    ```
    pf_wrap(
      workspace_root=<ws>,
@@ -78,21 +78,21 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    Check `note_emitted` in the response: a note that failed to record does **not** fail the
    wrap, so it is reported rather than raised.
 
-   ⚠️ **Retrying is not free of the note.** The note is emitted *before* the completion, so a
-   `pf_wrap` that fails at `complete_attempt` has already recorded it — and this is the
+   **Retrying is not free of the note.** The note is emitted *before* the completion, so a
+   `pf_wrap` that fails at `complete_attempt` has already recorded it - and this is the
    common failure, because `pf_wrap` never sets `force_terminate_step`, so wrapping with a
    step still `in_progress` always fails there. **On any retry, drop `note=`** (or the note
    lands twice). The error text tells you which case you are in: *"the closing note WAS
-   already recorded"* → retry without `note=`; *"the closing note was NOT recorded either"* →
+   already recorded"* -> retry without `note=`; *"the closing note was NOT recorded either"* ->
    retry with it.
 
    `pf_wrap` = push + PR + `pf_complete_attempt(wrapped)` + delete the state file. It does NOT
-   remove the `pf.<slug>/` worktree dirs — clean those up manually or with
+   remove the `pf.<slug>/` worktree dirs - clean those up manually or with
    `polyforge doctor --fix`.
    It is idempotent only when a PR on the branch already covers local HEAD; commits no PR
    covers are pushed, and a new PR is opened if the only PR is merged/closed (aihub#226).
    Check `pr_action` in the response (`reused_existing_pr` / `pushed_to_existing_pr` /
-   `pushed_and_created_pr`) to see which happened — `ok:true` alone does not mean anything
+   `pushed_and_created_pr`) to see which happened - `ok:true` alone does not mean anything
    was delivered, and by then the credentials are gone.
    Credentials (`attempt_id`, `claim_epoch`, `session_secret`) are injected automatically
    by the MCP server from the state file.
@@ -112,10 +112,10 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 4. Output: "Is this session's workflow worth crystallizing as a wi_type? (enter a name to crystallize, or press Enter to skip)"
 
-   - User enters a name → call pf-crystallize, passing:
+   - User enters a name -> call pf-crystallize, passing:
      - source_wi_id=<wrapped_wi_id>
      - wi_type_name=<user input>
-   - Skip / empty input → end
+   - Skip / empty input -> end
 
 5. Output three-segment format with wrap summary:
    - Goal achieved
@@ -127,11 +127,11 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 ### Mode: fail (`/pf-stop --fail`)
 
 > **Pass the failure reason as `note=` on the same call.** The terminal call deletes the state
-> file, so a separate `pf_emit_event` only works before it — folding the note in removes that
+> file, so a separate `pf_emit_event` only works before it - folding the note in removes that
 > ordering hazard and the extra round-trip (aihub#290).
 >
 > **Compatibility**: if `pf_complete_attempt` does not publish a `note` parameter, the server
-> binary predates aihub#290 — emit
+> binary predates aihub#290 - emit
 > `pf_emit_event(event_type="note", payload={text: "failed reason: ..."})` **first**, then call
 > `pf_complete_attempt(status="failed")` without `note`.
 
@@ -146,7 +146,7 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    `note_emitted` in the response says whether the note landed; a failed note does not fail
    the terminal call.
 
-   ⚠️ The note is emitted *before* the completion, so a call that fails at the completion has
+   The note is emitted *before* the completion, so a call that fails at the completion has
    already recorded it. **On any retry, drop `note=`** unless the error says the note was NOT
    recorded either.
 

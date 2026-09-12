@@ -6,11 +6,11 @@ description: >
   include retro, lessons learned, and what did we learn.
 ---
 
-# pf-retro — Retrospective & Knowledge Distillation
+# pf-retro - Retrospective & Knowledge Distillation
 
 ## Usage
 
-**Purpose**: Run a post-wrap retrospective on a recently-finished wi — extract learnings from the event timeline and batch-save them to team memory.
+**Purpose**: Run a post-wrap retrospective on a recently-finished wi - extract learnings from the event timeline and batch-save them to team memory.
 
 **Pattern**: `/pf-retro`
 
@@ -38,7 +38,7 @@ wi_info = pf_list_work_items(
 
 > Since aihub#280 this call actually works. Before it, `ids` was in no MCP
 > forwarding table and this site sends no `project`, so the outgoing request was
-> a bare `GET /v1/work_items` — a hard **400 `project query parameter is
+> a bare `GET /v1/work_items` - a hard **400 `project query parameter is
 > required`**. This step had essentially never succeeded. Three things changed:
 > `ids` is published and forwarded, `project` is now optional when `ids` is given
 > (an id already names one wi; the query is bounded to the projects you can see),
@@ -69,7 +69,7 @@ pf_recall(
 
 Find prior experience relevant to this wi for comparison.
 
-⚠️ No `fields="brief"` here (aihub#313). Step 4 has to write "This confirms…" /
+No `fields="brief"` here (aihub#313). Step 4 has to write "This confirms…" /
 "This contradicts…" against these entries, and you cannot tell confirmation from
 contradiction by reading a title.
 
@@ -87,10 +87,10 @@ Produce a structured analysis:
 
 ### Step 5: Batch save learnings (recall-before-remember protocol)
 
-⚠️ The dedup recall below must NOT pass `fields="brief"` (aihub#313), for two reasons.
+The dedup recall below must NOT pass `fields="brief"` (aihub#313), for two reasons.
 "if finding has new details" is a comparison against the candidate's TEXT, so briefing it
 would make that branch guess. And `similarity` is what the 0.85 / 0.65 thresholds read:
-brief rounds it to 4 decimals — harmless at that precision, but do not lower the rounding.
+brief rounds it to 4 decimals - harmless at that precision, but do not lower the rounding.
 
 For each finding:
 ```python
@@ -104,7 +104,7 @@ for finding in findings:
     max_similarity = max(c.similarity for c in candidates) or 0
     
     if max_similarity > 0.85:
-        // High similarity — reinforce existing memory, don't duplicate
+        // High similarity - reinforce existing memory, don't duplicate
         pf_activate_memory(candidates[0].id)
         if finding has new details:
             pf_remember(
@@ -116,7 +116,7 @@ for finding in findings:
                 supersedes_memory_id=candidates[0].id
             )
     elif max_similarity > 0.65:
-        // Partial overlap — save with cross-reference
+        // Partial overlap - save with cross-reference
         pf_remember(
             type=finding.type,
             content=finding.content,
@@ -126,7 +126,7 @@ for finding in findings:
             attrs={"similar_to": candidates[0].id}
         )
     else:
-        // New knowledge — save directly
+        // New knowledge - save directly
         pf_remember(
             type=finding.type,
             content=finding.content,
@@ -137,15 +137,15 @@ for finding in findings:
 ```
 
 Memory types to use:
-- `experience.debug` — bug patterns discovered
-- `experience.approach` — successful solutions to problem classes
-- `experience.pitfall` — gotchas to avoid next time
-- `experience.code` — specific code-level findings
+- `experience.debug` - bug patterns discovered
+- `experience.approach` - successful solutions to problem classes
+- `experience.pitfall` - gotchas to avoid next time
+- `experience.code` - specific code-level findings
 
 > **NOTE**: `pf_save_artifact` requires an active wi claim (state file present).
 > When running standalone retro on an already-wrapped wi, either:
 > (a) re-claim the wi first: `pf_claim_work_item(work_item_id=<slug>, idempotency_key=<ULID>)`
->     — a re-claim needs no resume flag, and since aihub#394 there is none to pass; or
+>     - a re-claim needs no resume flag, and since aihub#394 there is none to pass; or
 > (b) skip artifact saves if re-claim is impractical; `pf_remember` (Step 5) still works.
 
 ### Step 6: Save retro artifact
@@ -183,7 +183,7 @@ noted in the retro.
 ## Retro Markdown Format
 
 ```markdown
-## Retro: <wi_slug> — <goal>
+## Retro: <wi_slug> - <goal>
 **Date**: <date>  **Duration**: <elapsed>
 
 ### What Went Well

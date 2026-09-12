@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_recall",
-  "description_sha256": "52355ed415a03b181b816da58b68327c4e4c5ca44cfab692bdbeb2d8bbc00b0a",
+  "description_sha256": "8c439b8f3e30f28d6f1f95151076e8f2910f21441daefd873c2e40ea76d14ca9",
   "input_schema_sha256": "e649e667644e71892c74bc35c230396c6a75033e6308fbd12177832aa9c6b11e",
   "params": {
     "cursor": {
@@ -403,6 +403,23 @@ live by `internal/mcp/recall_slim_test.go`
 (`TestRecallItemNarrowedKeys_IsNotAnInertDeclaration`), which fails on an entry
 this file has no probe for. That residual is asserted by a test rather than merely
 described.
+
+A per-item CONDITIONAL key rides that delete-list since aihub#504 (2026-09-12):
+`embedded_len`, present iff the item's stored vector embeds a strict prefix of its
+content (the embedding input budget cut it), valued at how many leading runes the
+vector covers — its arrival in full mode is pinned by
+`internal/mcp/recall_embedded_len_test.go` (`TestRecallFullModeForwardsEmbeddedLen`)
+and brief mode's refusal of it (brief is a keep-list, see below) by
+(`TestBriefRecallItemDropsEmbeddedLen`). The presence rule is
+`internal/domain/memory.go` (`finalizeEmbeddedLen`), applied on both recall paths —
+`internal/domain/memory.go` (`scanMemoryLite`) and `internal/domain/memory_vector.go`
+(`RecallWithVector`) — and calibrated by `internal/domain/embedded_len_test.go`
+(`TestFinalizeEmbeddedLen_SuppressesFullCoverage`). On this tool the warning is
+doubly worth reading: the similarity such an item was ranked by is a claim about the
+embedded prefix, not about the tail. Do not
+confuse it with `content_truncated`, which reports a response-side snippet cut;
+`embedded_len` is a write-side fact about the vector.
+<!-- prose-only: because=judgement -->
 
 `fields="brief"` selects `internal/mcp/recall_slim.go` (`briefRecallItem`), which
 replaces each body with its first line (≤120 runes) and drops `related`/`tags`;

@@ -519,29 +519,41 @@ func DrainRenderQueue(ctx context.Context) error {
 
 // Memory represents a row from the memories table.
 type Memory struct {
-	ID               string          `json:"id"`
-	Project          string          `json:"project"`
-	Type             string          `json:"type"`
-	Content          string          `json:"content"`
-	AuthorUserID     string          `json:"author_user_id"`
-	AuthorDisplay    string          `json:"author_display"`
-	WorkItemID       *string         `json:"work_item_id,omitempty"`
-	Visibility       string          `json:"visibility"`
-	IsImmortal       bool            `json:"is_immortal"`
-	BaseStrength     float64         `json:"base_strength"`
-	StabilityDays    float64         `json:"stability_days"`
-	LastActivatedAt  *time.Time      `json:"last_activated_at,omitempty"`
-	LastActivatedBy  *string         `json:"last_activated_by,omitempty"`
-	ActivationCount  int             `json:"activation_count"`
-	ExpiresAt        *time.Time      `json:"expires_at,omitempty"`
-	Tags             []string        `json:"tags"`
-	SourceArtifactID *string         `json:"source_artifact_id,omitempty"`
-	EmbModel         *string         `json:"emb_model,omitempty"`
-	EmbDims          *int            `json:"emb_dims,omitempty"`
-	Status           string          `json:"status"`
-	Attrs            json.RawMessage `json:"attrs,omitempty"`
-	RenderedHTML     *string         `json:"rendered_html,omitempty"`
-	Commits          json.RawMessage `json:"commits"`
+	ID               string     `json:"id"`
+	Project          string     `json:"project"`
+	Type             string     `json:"type"`
+	Content          string     `json:"content"`
+	AuthorUserID     string     `json:"author_user_id"`
+	AuthorDisplay    string     `json:"author_display"`
+	WorkItemID       *string    `json:"work_item_id,omitempty"`
+	Visibility       string     `json:"visibility"`
+	IsImmortal       bool       `json:"is_immortal"`
+	BaseStrength     float64    `json:"base_strength"`
+	StabilityDays    float64    `json:"stability_days"`
+	LastActivatedAt  *time.Time `json:"last_activated_at,omitempty"`
+	LastActivatedBy  *string    `json:"last_activated_by,omitempty"`
+	ActivationCount  int        `json:"activation_count"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Tags             []string   `json:"tags"`
+	SourceArtifactID *string    `json:"source_artifact_id,omitempty"`
+	EmbModel         *string    `json:"emb_model,omitempty"`
+	EmbDims          *int       `json:"emb_dims,omitempty"`
+	// EmbeddedLen (aihub#504, migration 0039) is present in a response iff the
+	// stored vector embeds a STRICT PREFIX of this memory's content: its value
+	// is how many leading runes the vector covers — everything past it is
+	// invisible to semantic recall. Absent means "fully embedded", "no vector",
+	// or "embedded before provenance was recorded"; the raw column keeps the
+	// recorded length either way, and finalizeEmbeddedLen applies this contract
+	// at every scan site so all read paths expose one rule. The truncation this
+	// reports comes from the embedding input budget
+	// (embedding.DefaultInputMaxRunes / EMBEDDING_INPUT_MAX_RUNES); it is
+	// unrelated to ContentTruncated below, which reports a RESPONSE-side
+	// snippet cut.
+	EmbeddedLen  *int            `json:"embedded_len,omitempty"`
+	Status       string          `json:"status"`
+	Attrs        json.RawMessage `json:"attrs,omitempty"`
+	RenderedHTML *string         `json:"rendered_html,omitempty"`
+	Commits      json.RawMessage `json:"commits"`
 	// LatestID is the authoritative version-lineage pointer: nil while this
 	// row is the current head of its supersede chain, otherwise the id of the
 	// row that currently is. It is transactionally maintained by UpdateMemory
@@ -558,6 +570,27 @@ type Memory struct {
 	// opt3 P1: recall returns content truncated to a snippet; full via GET /v1/memories/:id.
 	ContentTruncated bool `json:"content_truncated,omitempty"`
 	ContentFullLen   int  `json:"content_full_len,omitempty"`
+}
+
+// finalizeEmbeddedLen applies EmbeddedLen's response contract (see the field
+// comment): keep the value only when it names a strict prefix of the content,
+// nil it otherwise. Called at every scan site that selects the embedded_len
+// column — Remember's INSERT RETURNING, GetMemoryByID, scanMemoryLite and
+// RecallWithVector — so no read path can leak the raw "fully embedded" value
+// that the others suppress.
+//
+// MUST run while m.Content still holds the FULL content: the comparison is
+// against the content's rune count, and a response-side snippet cut (opt3)
+// would shrink that count and make a fully-embedded row read as truncated.
+// Every scan site scans full content, so calling it immediately after Scan is
+// both sufficient and the rule.
+func (m *Memory) finalizeEmbeddedLen() {
+	if m.EmbeddedLen == nil {
+		return
+	}
+	if *m.EmbeddedLen >= utf8.RuneCountInString(m.Content) {
+		m.EmbeddedLen = nil
+	}
 }
 
 // RelatedRef is a lightweight reference to a related memory, used in
@@ -1339,8 +1372,10 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	var embVecLit *string // nil → SQL NULL
 	var embModel *string
 	var embDims *int
+	var embeddedLen *int // aihub#504: runes the stored vector embeds; NULL when no vector
 	if embeddableType(req.Type) {
-		if vec, embErr := embProvider.Embed(ctx, MemoryEmbedInput(req.Content)); embErr != nil {
+		embInput := MemoryEmbedInput(req.Content)
+		if vec, embErr := embProvider.Embed(ctx, embInput); embErr != nil {
 			fmt.Fprintf(os.Stderr, "remember: embed failed for type=%s: %v\n", req.Type, embErr)
 		} else if len(vec) > 0 {
 			lit := vecToPGLiteral(vec)
@@ -1349,6 +1384,11 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			embModel = &m
 			d := embProvider.Dims()
 			embDims = &d
+			// Recorded next to the vector it describes, and only then: a failed
+			// embed leaves both NULL, so embedded_len can never claim coverage a
+			// vector does not have (aihub#504, migration 0039).
+			n := utf8.RuneCountInString(embInput)
+			embeddedLen = &n
 		}
 	}
 
@@ -1539,31 +1579,31 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, last_activated_at, last_activated_by, expires_at, tags, source_artifact_id,
-			emb_model, emb_dims, emb_vector,
+			emb_model, emb_dims, emb_vector, embedded_len,
 			status, attrs, rendered_html, supersedes_id, latest_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			$12, $13, $14, $15, $16, $17,
-			$18, $19, $20::vector,
-			'active', $21, $22, $23, $1, clock_timestamp(), clock_timestamp()
+			$18, $19, $20::vector, $21,
+			'active', $22, $23, $24, $1, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
+			tags, source_artifact_id, emb_model, emb_dims, embedded_len, status, attrs,
 			rendered_html, commits, latest_id, created_at, updated_at`,
 		newID, req.Project, req.Type, req.Content, req.CallerUserID, req.CallerDisplay,
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ActivationCount, req.LastActivatedAt, req.LastActivatedBy, // $12, $13, $14
 		req.ExpiresAt, req.Tags, nil, // $15, $16, $17 — source_artifact_id = nil
-		embModel, embDims, embVecLit, // $18, $19, $20 — emb_model/dims/vector
-		req.Attrs, renderedHTML, req.SupersedesMemID, // $21, $22, $23
+		embModel, embDims, embVecLit, embeddedLen, // $18, $19, $20, $21 — emb_model/dims/vector/embedded_len
+		req.Attrs, renderedHTML, req.SupersedesMemID, // $22, $23, $24
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,
 		&mem.LastActivatedAt, &mem.LastActivatedBy, &mem.ActivationCount, &mem.ExpiresAt,
-		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.Status,
+		&mem.Tags, &mem.SourceArtifactID, &mem.EmbModel, &mem.EmbDims, &mem.EmbeddedLen, &mem.Status,
 		&mem.Attrs, &mem.RenderedHTML, &mem.Commits, &mem.LatestID, &mem.CreatedAt, &mem.UpdatedAt,
 	)
 	if err != nil {
@@ -1574,6 +1614,10 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 		return nil, false, NewErr(ErrInternalError, fmt.Sprintf("failed to insert memory: %v", err))
 	}
+	// aihub#504: the response carries embedded_len only when the vector embeds a
+	// strict prefix — the writer's "part of what you just stored is invisible to
+	// semantic recall" signal.
+	mem.finalizeEmbeddedLen()
 
 	// aihub#201: advance the old lineage's cursor to the new head. Every row
 	// that used to point latest_id at oldHead (the whole prior chain) now
@@ -2751,7 +2795,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
+			tags, source_artifact_id, embedded_len, status, attrs, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY ts_rank(content_tsv, replace(plainto_tsquery('english', $%d)::text, ' & ', ' | ')::tsquery) DESC,
@@ -2765,7 +2809,7 @@ func recallText(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest, non
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
+			tags, source_artifact_id, embedded_len, status, attrs, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE %s
 		ORDER BY `+memRefTimeSQL+` DESC, id DESC
@@ -2841,22 +2885,29 @@ func countMemories(ctx context.Context, pool *pgxpool.Pool, where string, args [
 // scanMemoryLite scans a lightweight memory row for LLM recall (aihub#102).
 // It omits rendered_html, emb_model, and emb_dims — fields the LLM never
 // needs — halving the token cost for methodology.spec/plan recalls.
+// embedded_len IS scanned (aihub#504): unlike emb_model/emb_dims it is the
+// one embedding field a recall caller acts on — it says the semantic match
+// covered only a prefix of this row — and finalizeEmbeddedLen suppresses it
+// on every fully-embedded row, so it costs nothing in the common case.
 //
 // Column order MUST match Recall's SELECT exactly (positional scan):
 //
 //	id, project, type, content, author_user_id, author_display,
 //	work_item_id, visibility, is_immortal, base_strength, stability_days,
 //	last_activated_at, last_activated_by, activation_count, expires_at,
-//	tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at
+//	tags, source_artifact_id, embedded_len, status, attrs, commits, latest_id, created_at, updated_at
 func scanMemoryLite(rows pgx.Rows) (*Memory, error) {
 	m := &Memory{}
 	err := rows.Scan(
 		&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
-		&m.Tags, &m.SourceArtifactID, &m.Status,
+		&m.Tags, &m.SourceArtifactID, &m.EmbeddedLen, &m.Status,
 		&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
+	if err == nil {
+		m.finalizeEmbeddedLen()
+	}
 	return m, err
 }
 
@@ -2915,7 +2966,7 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		SELECT id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, emb_model, emb_dims, status, attrs,
+			tags, source_artifact_id, emb_model, emb_dims, embedded_len, status, attrs,
 			rendered_html, commits, latest_id, created_at, updated_at
 		FROM memories
 		WHERE id = $1 AND status != 'redacted'`, id,
@@ -2923,12 +2974,13 @@ func GetMemoryByID(ctx context.Context, pool *pgxpool.Pool, id string) (*Memory,
 		&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
 		&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 		&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
-		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.Status,
+		&m.Tags, &m.SourceArtifactID, &m.EmbModel, &m.EmbDims, &m.EmbeddedLen, &m.Status,
 		&m.Attrs, &m.RenderedHTML, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
 		return nil, pgxErr(err, "memory not found", "failed to load memory")
 	}
+	m.finalizeEmbeddedLen()
 
 	// aihub#74 Stream A: single-memory related/backlinks enrichment is deferred to the
 	// follow-up that wires it into a handler with caller-scoped visibility — GetMemoryByID

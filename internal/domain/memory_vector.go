@@ -198,7 +198,7 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			last_activated_at, last_activated_by, activation_count, expires_at,
-			tags, source_artifact_id, status, attrs, commits, latest_id, created_at, updated_at,
+			tags, source_artifact_id, embedded_len, status, attrs, commits, latest_id, created_at, updated_at,
 			1 - (emb_vector <=> %s) AS similarity,
 			base_strength * exp(
 				-extract(epoch from (clock_timestamp() - `+memRefTimeSQL+`))/86400.0
@@ -226,13 +226,17 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 			&m.ID, &m.Project, &m.Type, &m.Content, &m.AuthorUserID, &m.AuthorDisplay,
 			&m.WorkItemID, &m.Visibility, &m.IsImmortal, &m.BaseStrength, &m.StabilityDays,
 			&m.LastActivatedAt, &m.LastActivatedBy, &m.ActivationCount, &m.ExpiresAt,
-			&m.Tags, &m.SourceArtifactID, &m.Status,
+			&m.Tags, &m.SourceArtifactID, &m.EmbeddedLen, &m.Status,
 			&m.Attrs, &m.Commits, &m.LatestID, &m.CreatedAt, &m.UpdatedAt,
 			&similarity, &effStrength,
 		); scanErr != nil {
 			fmt.Fprintf(os.Stderr, "recallWithVector: scan error: %v\n", scanErr)
 			continue
 		}
+		// aihub#504: forwarded only when the vector covers a strict prefix — on
+		// this path the value is doubly load-bearing, because the SIMILARITY
+		// this row was ranked by was computed against that prefix alone.
+		m.finalizeEmbeddedLen()
 		items = append(items, MemoryWithStrength{Memory: *m, EffectiveStrength: effStrength, Similarity: &similarity})
 	}
 	rows.Close()

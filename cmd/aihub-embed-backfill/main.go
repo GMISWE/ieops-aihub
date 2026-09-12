@@ -67,11 +67,18 @@ func main() {
 		embArgs = append(embArgs, pfx+"%")
 		embClauses = append(embClauses, fmt.Sprintf("type LIKE $%d", len(embArgs)))
 	}
+	// `embedded_len IS NULL` (aihub#504): a row with a vector but no recorded
+	// embedded_len was embedded before migration 0039 recorded provenance —
+	// under an unknown historical budget, or (pre-aihub#361) as full text. It is
+	// indistinguishable from a prefix vector by its emb_model, which is exactly
+	// the mixed-population defect embed_input.go documents. Re-embedding it here
+	// converges the corpus: after one run every embedded row carries the budget
+	// it was embedded under, and the clause never matches again.
 	rows, err := pool.Query(ctx, fmt.Sprintf(`
 		SELECT id, content FROM memories
 		WHERE status = 'active'
 		  AND (%s)
-		  AND (emb_vector IS NULL OR emb_model IS DISTINCT FROM $1)`,
+		  AND (emb_vector IS NULL OR emb_model IS DISTINCT FROM $1 OR embedded_len IS NULL)`,
 		strings.Join(embClauses, " OR ")), embArgs...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "query:", err)
@@ -108,8 +115,8 @@ func main() {
 			continue
 		}
 		if _, err := pool.Exec(ctx,
-			`UPDATE memories SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, updated_at = clock_timestamp() WHERE id = $4`,
-			vecLiteral(vec), model, dims, it.id,
+			`UPDATE memories SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4, updated_at = clock_timestamp() WHERE id = $5`,
+			vecLiteral(vec), model, dims, len([]rune(embInput)), it.id,
 		); err != nil {
 			fail++
 			fmt.Fprintf(os.Stderr, "  update failed id=%s: %v\n", it.id, err)
@@ -127,9 +134,11 @@ func main() {
 	// work, which is mostly wrapped/cancelled rows.
 	type wiRow struct{ id, goal, content string }
 	var wtodo []wiRow
+	// embedded_len IS NULL: same provenance-convergence clause as the memories
+	// query above.
 	wrows, err := pool.Query(ctx, `
 		SELECT id, goal, COALESCE(content, '') FROM work_items
-		WHERE emb_vector IS NULL OR emb_model IS DISTINCT FROM $1`, model)
+		WHERE emb_vector IS NULL OR emb_model IS DISTINCT FROM $1 OR embedded_len IS NULL`, model)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "query work_items:", err)
 		os.Exit(1)
@@ -165,8 +174,8 @@ func main() {
 		// No updated_at bump: work_items.updated_at keys nothing here and a
 		// backfill must not look like a content edit.
 		if _, err := pool.Exec(ctx,
-			`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3 WHERE id = $4`,
-			vecLiteral(vec), model, dims, r.id,
+			`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4 WHERE id = $5`,
+			vecLiteral(vec), model, dims, len([]rune(embInput)), r.id,
 		); err != nil {
 			wfail++
 			fmt.Fprintf(os.Stderr, "  update failed id=%s: %v\n", r.id, err)

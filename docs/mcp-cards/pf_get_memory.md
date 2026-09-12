@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_get_memory",
-  "description_sha256": "91a1d36ed1f79695bbde2f64b6c9146daaee338f4982b4c0fdcd76d781aa23c8",
+  "description_sha256": "bb955eb200280673948a1479db4020d31dd765bc6426f73ba3a5d9b1c68c1d9b",
   "input_schema_sha256": "d8b070884ea6bfca420b507d729d4aa5a2a7ce9e98be09114524090d3360d1aa",
   "params": {
     "memory_id": {
@@ -126,6 +126,15 @@ already landed everywhere.
 
 No field projection: unlike recall, nothing is dropped here, which is the point of
 the tool.
+
+`embedded_len` (aihub#504, 2026-09-12) is a CONDITIONAL key this tool can carry:
+present iff the stored vector embeds a strict prefix of the content — everything
+past it is invisible to semantic recall — with the presence rule in
+`internal/domain/memory.go` (`finalizeEmbeddedLen`), applied at
+`internal/domain/memory.go` (`GetMemoryByID`) and calibrated by
+`internal/domain/embedded_len_test.go` (`TestFinalizeEmbeddedLen_KeepsAStrictPrefix`)
+/ (`TestFinalizeEmbeddedLen_SuppressesFullCoverage`). It is absent from the corpus
+record above because it postdates the aihub#412 corpus.
 
 The corpus record above is the union of top-level keys real callers have been handed.
 

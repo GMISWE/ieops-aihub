@@ -223,7 +223,7 @@ could go red on. Two consequences worth knowing before you deploy:
 - **Add the variable to the env-file before rolling out a build that contains
   this change**, or the new container will exit at startup. On production that
   is `/root/aihub.env`; the pre-flight check in the
-  [current production procedure](#current-production-cloud-sql--bare-docker-run)
+  [current production procedure](#current-production-cloud-sql--docker-compose)
   covers it.
 - **Setting it for the first time signs everybody out once**, because the
   sessions currently in browsers were signed with the outgoing process's random
@@ -476,14 +476,18 @@ is safe.
   docker logs aihub --since 10m 2>&1 | grep -F '/ui session key'
   ```
 
-  For the third, compare the new container against the rollback anchor by
-  **digest**, which answers "same value?" without printing the value:
+  For the third, compare the new container against the env-file by **digest**,
+  which answers "same value?" without printing the value. (Under Compose the
+  outgoing container is deleted at the swap, so it is no longer available as
+  the comparison target; the env-file is what both containers read anyway.)
 
   ```bash
-  for c in aihub aihub-prev-<sha>; do
-    v=$(docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-        | grep '^POLYFORGE_UI_COOKIE_SECRET=')
-    printf '%s %s\n' "$c" "$([ -n "$v" ] && printf '%s' "$v" | sha256sum || echo 'NO KEY SET')"
+  vfile=$(grep '^POLYFORGE_UI_COOKIE_SECRET=' /root/aihub.env)
+  vctr=$(docker inspect aihub --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      | grep '^POLYFORGE_UI_COOKIE_SECRET=')
+  for pair in "env-file:$vfile" "container:$vctr"; do
+    printf '%s %s\n' "${pair%%:*}" \
+      "$([ -n "${pair#*:}" ] && printf '%s' "${pair#*:}" | sha256sum || echo 'NO KEY SET')"
   done
   ```
 
@@ -498,32 +502,41 @@ is safe.
 ## Team deployment (reference)
 
 Production has moved on from the single-Compose host this section originally
-described: it now runs against a **managed Cloud SQL** database with a
-co-located embedding service, and starts the server as a **bare `docker run`**
-(no Compose file). The current setup and the retired one are both recorded below.
+described: it now runs against a **managed Cloud SQL** database, with the server
+and its co-located embedding service managed by a two-service Docker Compose
+file on the host (aihub#299; between the two eras it was a bare `docker run`
+container). The current setup and the retired one are both recorded below.
 
-### Current production (Cloud SQL + bare `docker run`)
+### Current production (Cloud SQL + Docker Compose)
 
 | | |
 |---|---|
 | Host | `10.146.0.34` (GPU host; its public IP changes across stop/start — use the internal IP over the jump host) |
 | Database | **Cloud SQL** — managed Postgres 18 + pgvector at `10.20.80.3:5432`, `sslmode=require`. This is the "managed Postgres" path from [What you are deploying](#what-you-are-deploying); there is **no `postgres` container** |
-| Embedding | a TEI container named `tei` on the same host and Docker network `aihub-net`, published on `:8085`. A deploy never touches it |
-| Server | one `docker run` container named `aihub` on `aihub-net`, `-p 8080:8080`, `--env-file /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `POLYFORGE_UI_COOKIE_SECRET`, `ADMIN_BOOTSTRAP_KEY`) — **no Compose file**. That file is the only place a generated secret survives a deploy: the container is replaced wholesale, so neither its writable layer nor the image can hold one |
-| Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`). CI tags with the full 40-char commit SHA |
-| Rollback anchor | the container being replaced is **stopped and renamed** to `aihub-prev-<short sha>`, never deleted. Exactly one anchor is kept |
+| Compose file | `/root/docker-compose.yml` (project `aihub`), two services: `aihub` and `tei`. The network `aihub-net` is declared **`external: true`** — it predates the file, and letting Compose create or rename it would break the `aihub↔tei` link (`EMBEDDING_BASE_URL=http://tei:80` resolves on that network) |
+| Server | service `aihub` with `container_name: aihub`, `8080:8080`, `restart: unless-stopped`, `env_file: /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `POLYFORGE_UI_COOKIE_SECRET`). The env-file is the only place a generated secret survives a deploy: the container is replaced wholesale, so neither its writable layer nor the image can hold one |
+| Embedding | service `tei` (`ghcr.io/huggingface/text-embeddings-inference:89-1.7.2`) with `container_name: tei`, `8085:80`, GPU via `gpus: all`, model cache bind `/root/hf_cache:/data`, flags `--model-id Qwen/Qwen3-Embedding-0.6B --pooling last-token --max-batch-tokens 32768` — see [The tei service](#the-tei-service--what-the-flags-fix) |
+| Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`). CI tags with the full 40-char commit SHA. A deploy is: edit the `image:` line to the new SHA, `docker compose up -d aihub` |
+| Rollback | the outgoing **image** stays in the local image store, so rolling back is editing the `image:` line back and `docker compose up -d aihub` — no registry pull needed. See [Rollback under Compose](#rollback-under-compose--what-replaced-the-rename-anchor) for why the older stop+rename anchor flow no longer works |
 
-The steps mirror the Compose flow above (back up → pull → `migrate-up` → swap →
-verify); only the mechanics differ (bare `docker run`, managed DB). Everything
-below runs **on the host**. `make deploy` is not the deploy path — it prints a
-pointer to this section and exits 1, because a one-line target cannot carry the
-four things this procedure exists for: a database backup (step 1), a recorded
-rollback anchor (steps 2 and 6), migrations applied strictly **before** the new
-binary starts (step 4 before step 6), and a check afterwards that the **read
-path** still answers (step 7).
+Compose-managed since the 2026-09-13 deploy (aihub#299; before that, one bare
+`docker run` container). The four load-bearing properties of the procedure are
+unchanged: a database backup (step 1), a recorded rollback path (steps 2 and 8),
+migrations applied strictly **before** the new binary starts (step 4 before
+step 6), and a check afterwards that the **read path** still answers (step 7).
+`make deploy` is still not the deploy path — it prints a pointer to this section
+and exits 1, because a one-line target cannot carry those four things.
 
-Two of the four deserve their reasons spelled out, because both are places where
-the obvious shortcut is the one that hurts:
+**On the downtime window (aihub#300, decided 2026-09-13): the sub-second gap is
+accepted on purpose.** There is no fronting proxy and no blue-green pair —
+`-p 8080:8080` is owned by the one serving container and every client connects
+to `10.146.0.34:8080` directly. Measured at 0.1 s poll resolution across seven
+deploys: 0.450–0.596 s for the six bare-`docker run` swaps, **0.675 s** for the
+first Compose-created swap (2026-09-13). Clients are agent sessions, not interactive
+users: a call that lands in the window fails loudly and is retried. Treat the
+window as an asserted bound, not folklore — **a swap that stays down for more
+than 5 s is a failed deploy**: stop, read the new container's logs, and roll
+back rather than wait.
 
 **Migrations land strictly before the new binary starts.** A migration that adds
 a column the new code reads makes the reverse order fail loudly and immediately:
@@ -534,19 +547,39 @@ project read, so a binary-first rollout answers `GET /v1/projects` with
 migrations stay additive — the server selects an explicit column list, never
 `SELECT *`, so a column an older binary does not know about is invisible to it.
 **Read the release's migrations before deploying.** If one drops or renames
-anything, the older binary will not survive the new schema and the container
-anchor below is not enough on its own; the step-1 dump is.
+anything, the older binary will not survive the new schema and the local-image
+rollback below is not enough on its own; the step-1 dump is.
 
-**The container being replaced is renamed, not deleted.** A stopped container
-keeps its image, env-file contents, network, port bindings and restart policy,
-so rolling back is one `docker start`. After a `docker rm -f` all of that is
-gone and the only way back is to reconstruct the whole `docker run` line — right
-tag, right env-file, right network, right ports — at the moment you least want
-to be reconstructing anything. `docker rm -f` is also the step most likely to be
-refused: during the 2026-09-02 deploy an automated command-safety policy blocked
-`docker rm -f aihub` outright (a judgement about the command itself, not a
-missing permission), while `docker stop` + `docker rename` went through
-unremarked.
+#### Rollback under Compose — what replaced the rename anchor
+
+The bare-`docker run` era kept a rollback anchor by renaming the outgoing
+container (`docker rename aihub aihub-prev-<sha>`) instead of deleting it —
+one `docker start` away from serving again, registry not needed. **That flow
+does not survive Compose, and this was measured, not guessed** (2026-09-13, on
+this host, with a throwaway project): Compose tracks a service's container by
+its *labels*, not its name, so a stopped-and-renamed Compose container is still
+"the" service container — the next `docker compose up -d` **adopted the renamed
+container and started it** under its anchor name (unchanged config), and on a
+changed config it recreates, which *deletes* it. Either way the anchor is gone
+the moment Compose next converges.
+
+The two properties the anchor provided are kept by other means:
+
+- **Rollback without a registry**: the outgoing image remains in the local image
+  store after the swap. Rolling back is editing the `image:` line back to the
+  previous SHA and `docker compose up -d aihub`. Consequently: **never prune the
+  previous SHA's image right after a deploy** (step 9).
+- **Postmortem logs**: a recreate deletes the old container's logs, so step 2
+  captures them to a file *before* the swap.
+
+One legacy exception exists until its cleanup: `aihub-prev-b2c620c`, the
+container replaced by the first Compose deploy, is label-free (bare-run era), so
+for it — and it alone — the old rename rollback still works
+(`docker stop aihub && docker rename aihub aihub-failed-<sha> &&
+docker rename aihub-prev-b2c620c aihub && docker start aihub`). Treat that as
+break-glass: it takes the host *out of* Compose management (the name `aihub` is
+then owned by a container Compose does not track) until the next Compose deploy
+reclaims it.
 
 **A third precondition — not one of the four, and it does not run on this host:
 the `polyforge` binary bump and this deploy are ONE change, not two.** Server
@@ -601,6 +634,13 @@ worth reading, because the difference is what tells you how long the window is:
   `docs/mcp-cards/pf_update_work_item.md`. So this refusal breaks zero measured
   callers, which is a reason to deploy it calmly, not a reason to skip the read.
 
+The third worked example is live at the time of writing: aihub#350 (deployed
+2026-09-13) makes the server refuse a `complete_attempt(status=wrapped)` that
+omits the `derived` disposition list — which every binary shipped before that
+release omits, so on those binaries every wrap fails remotely until the
+machine's binary catches up.
+`status=paused` does not require the list and is the documented fallback.
+
 So, as part of this deploy and not as a follow-up:
 
 - **Before step 1**, read the release's `internal/server/` and `internal/mcp/`
@@ -617,12 +657,11 @@ So, as part of this deploy and not as a follow-up:
 ```bash
 IMG=us-west1-docker.pkg.dev/devv-404803/public/aihub
 SHA=<target git sha on main>   # full 40-char SHA — the tag CI pushes. Wait for
-                               # "Build & Push Docker image (main)" to be green.
+                               # "CI" and "Publish Bins" to be green on it.
 
 # Identity of what is running now, captured BEFORE anything changes.
 CUR=$(docker inspect -f '{{.Config.Image}}' aihub)   # …/aihub:<outgoing sha>
 PREV=${CUR##*:}                                      # outgoing sha
-ANCHOR=aihub-prev-$(printf %.7s "$PREV")             # e.g. aihub-prev-359a435
 
 # DATABASE_URL is read out of the RUNNING container so the dump cannot be
 # pointed at the wrong database by a typo. It contains the database password:
@@ -672,19 +711,24 @@ docker run --rm -v /root/backups:/backups pgvector/pgvector:pg18 \
 
 Signal: `pg_restore -l` lists TOC entries (it reads the archive, so it catches a
 truncated one that a zero exit status would not), and the file is the size of a
-database rather than of an error — **136 MB** on 2026-09-02. A dump of a few KB
-means it wrote nothing useful; do not continue on one.
+database rather than of an error — **163 MB / 349 TOC entries** on 2026-09-13. A
+dump of a few KB means it wrote nothing useful; do not continue on one.
 
-**2. Record the rollback anchor.**
+**2. Record the rollback identity and capture the outgoing logs.** The swap in
+step 6 *deletes* the outgoing container (Compose recreate), so anything you will
+want from it afterwards has to be taken now.
 
 ```bash
 echo "$CUR"                          # image the current container was created from
 curl -s localhost:8080/v1/version    # git_commit must equal $PREV
+docker logs aihub > "/root/backups/aihub-$PREV-final.log" 2>&1   # postmortem copy
+docker images --format '{{.Repository}}:{{.Tag}}' | grep -F "$PREV"   # rollback image is local
 ```
 
-Signal: `git_commit` equals `$PREV`. Note `version` reads `dev` on every
-main-branch image — CI passes `GIT_COMMIT` but not `VERSION` — so `git_commit`,
-not `version`, is the field that identifies a build.
+Signal: `git_commit` equals `$PREV`, and the outgoing image is listed locally
+(that listing is what makes step 8 registry-free). Note `version` reads `dev` on
+every main-branch image — CI passes `GIT_COMMIT` but not `VERSION` — so
+`git_commit`, not `version`, is the field that identifies a build.
 
 **3. Pull the target image by SHA** (a SHA tag never lags the way `:latest` can).
 
@@ -696,20 +740,20 @@ Signal: `Status: Downloaded newer image for …:$SHA` (or `Image is up to date`)
 `manifest unknown` means CI has not pushed that SHA yet — wait for it. Do not
 fall back to `:latest`.
 
-**4. Apply migrations** — same `migrate-up` mechanism as Compose, via
-`docker run`. This runs the *new* image's goose against the live database while
-the *old* container keeps serving; nothing is down yet.
+**4. Apply migrations** — the *new* image's goose against the live database
+while the *old* container keeps serving; nothing is down yet.
 
 ```bash
 docker run --rm --network aihub-net --env-file /root/aihub.env "$IMG:$SHA" migrate-up
 ```
 
-Expected tail (2026-09-02, the `0032` release):
+Expected tail (2026-09-13, the `0039`+`0040` release):
 
 ```
 Running database migrations...
-2026/09/02 ... OK   0032_projects_members_version.sql (7.83ms)
-2026/09/02 ... goose: successfully migrated database to version: 32
+2026/09/13 ... OK   0039_embedded_len.sql (9.72ms)
+2026/09/13 ... OK   0040_run_attempts_derived.sql (5.34ms)
+2026/09/13 ... goose: successfully migrated database to version: 40
 ```
 
 Signal: `successfully migrated database to version: N`, where N is the highest
@@ -717,7 +761,7 @@ migration number in `internal/db/migrations/` at `$SHA`. `no migrations to run`
 is also a pass — it means the release changed no schema. Anything else: stop
 here. The old container is still serving and nothing needs undoing.
 
-**5. Start the downtime poll** (optional; this is how the number below was
+**5. Start the downtime poll** (optional; this is how the numbers above were
 measured). In a second shell, before step 6:
 
 ```bash
@@ -731,26 +775,27 @@ done | tee /root/swap-poll.log
 Downtime is the gap from the last `200` before the swap to the first `200`
 after. The `sleep 0.1` is that number's resolution. Ctrl-C it after step 7.
 
-**6. Swap the container** — stop, rename, run.
+**6. Swap the container** — point the Compose file at the new SHA and let
+Compose converge. It stops the old container, removes it, and starts the new
+one; the downtime window is that stop→start.
 
 ```bash
-docker stop aihub                     # graceful SIGTERM; releases port 8080
-docker rename aihub "$ANCHOR"         # the old container survives as the rollback anchor
-docker run -d --name aihub --network aihub-net -p 8080:8080 --restart unless-stopped \
-  --env-file /root/aihub.env "$IMG:$SHA"
+sed -i "s|image: $IMG:.*|image: $IMG:$SHA|" /root/docker-compose.yml
+docker compose -f /root/docker-compose.yml up -d aihub
 docker ps -a --filter name=aihub --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
 ```
 
 Signals:
 
-- Exactly two rows: `aihub` `Up …` on `$IMG:$SHA`, and `$ANCHOR` `Exited (…)` on
-  the outgoing image.
-- `docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}}' "$ANCHOR"`
-  → `exited unless-stopped`. The anchor stays down on its own: `unless-stopped`,
-  unlike `always`, does not restart a container that was stopped explicitly, so
-  it cannot come back and take `:8080` from the new one.
-- `docker rename` failing with a name conflict is not a nuisance — it means a
-  previous anchor was never cleaned up (step 9). Resolve that before continuing.
+- `aihub` `Up …` on `$IMG:$SHA`, and no second container holding `:8080`.
+- `docker compose -f /root/docker-compose.yml ps` lists `aihub` as `running` —
+  the swap left the container under Compose management, not beside it.
+
+(Transition note: the 2026-09-13 deploy itself ran `docker stop aihub && docker
+rename aihub aihub-prev-b2c620c` before the first `up -d`, because the outgoing
+container was bare-run and label-free — Compose could not replace what it did
+not own, and renaming it kept it as a true anchor. From the second Compose
+deploy on, the `sed` + `up -d` above is the whole step.)
 
 **7. Verify. "The container is up" is not the check.** Three checks, in order;
 each fails differently:
@@ -802,60 +847,131 @@ ephemeral session key: `/v1/version`, `/v1/health` and the authed read path are
 all green while every `/ui` user is being signed out on each deploy
 (aihub#344).
 
-`tei` must not have restarted: the swap replaces one container, and a restarted
-embedding backend would mean the blast radius was wider than intended.
+`tei` must not have restarted on an aihub-only deploy: the swap replaces one
+container, and a restarted embedding backend would mean the blast radius was
+wider than intended. (A deploy that *intends* to change tei — a flag or image
+bump — swaps it separately: `docker compose up -d tei`, expecting exactly that
+timestamp to move and `localhost:8085/info` to reflect the change.)
 
-**8. Roll back** if any check in step 7 fails.
+**8. Roll back** if any check in step 7 fails. Capture the failed container's
+logs first — the recreate deletes them:
 
 ```bash
-docker stop aihub
-docker rename aihub aihub-failed-$(printf %.7s "$SHA")   # keep it: its logs are the postmortem
-docker rename "$ANCHOR" aihub
-docker start aihub
+docker logs aihub > "/root/backups/aihub-$SHA-failed.log" 2>&1
+sed -i "s|image: $IMG:.*|image: $IMG:$PREV|" /root/docker-compose.yml
+docker compose -f /root/docker-compose.yml up -d aihub
 curl -s localhost:8080/v1/version    # git_commit back to $PREV
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" \
   localhost:8080/v1/projects         # 200
 ```
 
-Renaming the failed container aside rather than deleting it keeps its logs, and
-keeps the invariant that the serving container is the one called `aihub`.
-
-Nothing has to be un-migrated for an additive release: on 2026-09-02 the old
-binary (`359a435`) ran against schema 32 and stayed healthy — measured on the
+The `$PREV` image is served from the local store (verified in step 2), so this
+works with the registry unreachable. Nothing has to be un-migrated for an
+additive release: on 2026-09-13 the old binary (`b2c620c`) ran against schema 40
+for six minutes between migrate and swap and stayed healthy — measured on the
 day, not assumed. If the release's migration was **not** additive, roll the
 schema back too (the `goose … down` invocation is in
 [Upgrades & rollback](#10-upgrades--rollback)) or restore the step-1 dump.
 
-**9. Clean up the previous anchor — at the start of the *next* deploy, not the
-end of this one.**
+**9. Image and log hygiene — at the start of the *next* deploy, not the end of
+this one.** Keep the previous SHA's image (it is the rollback path); older ones
+and old `aihub-*-final.log` files can go.
 
 ```bash
-docker ps -a --filter name=aihub-prev- --format '{{.Names}}\t{{.Status}}'
-docker rm aihub-prev-<older sha>
+docker images 'us-west1-docker.pkg.dev/devv-404803/public/aihub' \
+  --format '{{.Tag}}\t{{.CreatedAt}}'
+docker rmi "$IMG:<sha older than PREV>"
 ```
 
-Keeping exactly one anchor is what makes the `docker rename` in step 6 fail
-loudly when someone forgot.
-
-**What the 2026-09-02 run measured** (`359a435` → `b4ed4f5`, one additive
-migration). These are observations from that one run — not targets, not an SLO:
+**What the 2026-09-13 run measured** (`b2c620c` → `a3278d6`, two additive
+migrations, first Compose-managed swap). Observations from that one run — not
+targets, not an SLO:
 
 | | measured |
 |---|---|
-| Cloud SQL dump (step 1) | 136 MB |
-| Migration `0032` (step 4) | 7.83 ms, applied **before** the container swap |
-| Downtime across the swap (step 6) | **0.596 s**, from the 0.1 s poll loop in step 5 — that interval is the number's resolution, so read it as "about 0.6 s" |
-| Old binary on the new schema | healthy — which is why the rollback anchor is known to work rather than assumed to |
-| `tei` container | not restarted |
+| Cloud SQL dump (step 1) | 163 MB, 349 TOC entries |
+| Migrations `0039`+`0040` (step 4) | 9.72 ms + 5.34 ms, applied **before** the container swap |
+| Downtime across the swap (step 6) | **0.675 s** at 0.1 s poll resolution (5 failed polls in the gap) — vs 0.450–0.596 s for the bare-run era; the Compose create path costs a fraction of a second more |
+| Old binary on the new schema | healthy — which is why the local-image rollback is known to work rather than assumed to |
+| `tei` container | not restarted (its rebuild is a separate, pending step — see below) |
 | `error` / `42703` in the new container's log | 0 |
-| Anchor left behind | `aihub-prev-359a435` |
+| `/ui` session key | `from POLYFORGE_UI_COOKIE_SECRET (32 bytes)` |
+| Anchor left behind | `aihub-prev-b2c620c` (label-free; the last rename-era anchor) |
 
-**Embedding backfill** — only when a release adds or changes embeddings. Run
-`aihub-embed-backfill` *on the host* with `DATABASE_URL` and the `EMBEDDING_*`
-vars, but **override `EMBEDDING_BASE_URL=http://localhost:8085`**: the value in
+#### The tei service — what the flags fix
+
+The Compose file gives `tei` two flags the bare-run container never had, both
+evidence-backed:
+
+- **`--pooling last-token`** (aihub#368): production recall was broken while the
+  model was fine — the same Qwen3-Embedding-0.6B checkpoint scored recall@1 =
+  24/42 offline against 0/42 in production, and the production fingerprint
+  (cosine similarities compressed into a ~0.04 band where the correct pooling
+  gives 0.127 separation) matched **mean pooling**. The bare-run container
+  passed no `--pooling` flag, so TEI fell back to the model-repo default
+  (`/info` reported `"pooling": null`); the explicit flag pins the pooling the
+  checkpoint was trained for.
+- **`--max-batch-tokens 32768`** (aihub#504): measured on this host, TEI 1.7.2
+  ran with `max_input_length=32768` but `max_batch_tokens=16384` and
+  `auto_truncate=false` — a single input of (16384, 32768] tokens was accepted
+  but **could never be scheduled into a batch**: no error, the client burns its
+  `EMBEDDING_TIMEOUT`, and the row is left with `emb_vector` NULL. Raising
+  `max_batch_tokens` to equal `max_input_length` removes the dead zone.
+
+**⚠️ Pending as of 2026-09-13: the running `tei` is still the pre-Compose
+bare-run container** (started 2026-08-27, model-default pooling, the dead zone
+above included). Its rebuild — the first `docker compose up -d tei` — is blocked
+by a host-level fault: the NVIDIA userland libraries were upgraded to 580.178.04
+while the loaded kernel module is still 580.173.02, and the container toolkit
+refuses to create **any** GPU-visible container (`Failed to initialize NVML:
+Driver/library version mismatch` during CDI spec generation — measured on the
+day; plain containers are unaffected, which is why the aihub swap went through).
+The fix needs the GPU's two users released first:
+
+```bash
+docker stop tei                                             # embedding degrades to text recall
+systemctl stop google-cloud-ops-agent-opentelemetry-collector   # holds /dev/nvidia*
+rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia
+modprobe nvidia && modprobe nvidia_uvm && modprobe nvidia_drm
+nvidia-smi                                                  # must report 580.178.04
+systemctl start google-cloud-ops-agent-opentelemetry-collector
+docker compose -f /root/docker-compose.yml up -d tei
+curl -s localhost:8085/info   # pooling and max_batch_tokens must reflect the flags
+```
+
+Until that runs, embedding keeps working on the old container with the old
+(wrong) pooling.
+
+**After the pooling flag first takes effect, a full re-embed is mandatory, not
+optional.** Vectors written before and after the pooling change are two
+incompatible populations under the *same* `emb_model` string, and rows embedded
+between the 2026-09-13 server swap and the tei rebuild already carry
+`embedded_len`, so the backfill's own `embedded_len IS NULL` convergence clause
+will not catch them. Converge explicitly:
+
+```sql
+UPDATE memories SET embedded_len = NULL;
+UPDATE work_items SET embedded_len = NULL;
+```
+
+then run the backfill below once. Prove the pooling actually changed rather
+than assuming it: embed the same probe string through `localhost:8085/embed`
+before and after the rebuild — mean→last-token moves the vector far (cosine
+well below 1); an unchanged vector means the flag did not take.
+
+**Embedding backfill** — after a release that adds or changes embeddings, and
+after any embedding-pipeline change (pooling, truncation, prompt). Build
+`cmd/aihub-embed-backfill` for linux/amd64 at the deployed SHA, run it *on the
+host* with the serving container's `DATABASE_URL` and `EMBEDDING_*` vars, but
+**override `EMBEDDING_BASE_URL=http://localhost:8085`**: the value in
 `/root/aihub.env` is the Docker-network name `http://tei:80`, which the host
 cannot resolve, so a host-run backfill otherwise silently embeds nothing. It is
-idempotent (only rows missing a vector for the current model are touched).
+idempotent — its selection is `emb_vector IS NULL OR emb_model mismatch OR
+embedded_len IS NULL`, over `status='active'` memories of embeddable types and
+over work items of **all** statuses. Two limits it does not cross, recorded so
+nobody assumes otherwise: it takes no flags, and it never touches **archived**
+memories — the aihub#625 ruling (archived over-limit rows ride along the next
+full re-embed) still needs either a flag on the CLI or a one-off manual pass.
 
 ### Legacy single-Compose host (`10.146.0.16`, retired)
 
@@ -878,7 +994,7 @@ make deploy, as it was — it pulled :latest, never ran migrations, and did:
 ```
 
 The current release order is the numbered procedure in
-[Current production](#current-production-cloud-sql--bare-docker-run), which is
+[Current production](#current-production-cloud-sql--docker-compose), which is
 the only authoritative copy of it.
 
 ## Health & version endpoints

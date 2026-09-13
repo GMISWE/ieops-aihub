@@ -872,9 +872,17 @@ func handleEmitEvent(pool *pgxpool.Pool) echo.HandlerFunc {
 			}
 		}
 
-		evtID, aihubErr := domain.EmitEvent(ctx, pool, &req, u.UserID, u.DisplayName, u.Role)
+		evtID, deduplicated, aihubErr := domain.EmitEvent(ctx, pool, &req, u.UserID, u.DisplayName, u.Role)
 		if aihubErr != nil {
 			return domainErr(c, aihubErr)
+		}
+		// aihub#636: an identical re-send of the attempt's latest note inserted
+		// nothing — event_id names the row that already carries it. 200, not
+		// 201, because nothing was created, and the flag is set so the caller
+		// can tell a replay from a fresh insert (clients treat any 2xx as
+		// success, measured on pkg/client's >= 400 check).
+		if deduplicated {
+			return c.JSON(http.StatusOK, map[string]any{"event_id": evtID, "deduplicated": true})
 		}
 		return c.JSON(http.StatusCreated, map[string]string{"event_id": evtID})
 	}

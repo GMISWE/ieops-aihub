@@ -17,6 +17,12 @@ import (
 // path reports this through note_emitted; on the error path the message is the
 // only channel there is, so "" would leave the caller unable to tell an
 // already-recorded note from one that never landed.
+//
+// Since aihub#636 the recorded-note clause states the dedup rather than warning
+// of a duplicate: the server keeps one copy of an identical re-send of the
+// attempt's latest note, so a straight retry is safe against a server that new —
+// and the clause still says what an older server does, because this process
+// cannot know which one it is talking to.
 func TestNoteOutcomeSuffix(t *testing.T) {
 	if got := noteOutcomeSuffix(false, nil); got != "" {
 		t.Errorf("no note requested must add nothing, got %q", got)
@@ -26,8 +32,15 @@ func TestNoteOutcomeSuffix(t *testing.T) {
 	}
 
 	emitted := noteOutcomeSuffix(true, nil)
-	if !strings.Contains(emitted, "WAS already recorded") || !strings.Contains(emitted, "second time") {
-		t.Errorf("a recorded note must warn that a retry duplicates it, got %q", emitted)
+	if !strings.Contains(emitted, "WAS already recorded") {
+		t.Errorf("a recorded note must say it already landed, got %q", emitted)
+	}
+	if !strings.Contains(emitted, "aihub#636") || !strings.Contains(emitted, "dedup") {
+		t.Errorf("the recorded-note clause must state the aihub#636 dedup a retry relies on, got %q", emitted)
+	}
+	if !strings.Contains(emitted, "second time") {
+		t.Errorf("the recorded-note clause must still say an older server records the re-send "+
+			"a second time - this process cannot know the server's vintage, got %q", emitted)
 	}
 
 	failed := noteOutcomeSuffix(true, errors.New("event store down"))

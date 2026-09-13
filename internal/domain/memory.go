@@ -3613,23 +3613,27 @@ type EmitEventRequest struct {
 // against the migration text by a test that needs no database.
 
 // EmitEvent inserts a new event into agent_events.
+//
+// The second return is the aihub#636 dedup verdict: true means the request was
+// an identical re-send of the attempt's latest note, so no row was inserted and
+// the returned id names the event that already carries it.
 func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
-	callerUserID, callerDisplay, callerRole string) (string, error) {
+	callerUserID, callerDisplay, callerRole string) (string, bool, error) {
 
 	if len(req.Payload) > 65536 {
-		return "", NewErr(ErrPayloadTooLarge, "event payload exceeds 64KB limit")
+		return "", false, NewErr(ErrPayloadTooLarge, "event payload exceeds 64KB limit")
 	}
 
 	// H6 fix: admin-only event types require admin role regardless of req.Admin flag.
 	// This blocks forgery where a non-admin omits admin=true but uses an admin event_type.
 	if adminOnlyEventTypes[req.EventType] && callerRole != "admin" {
-		return "", NewErr(ErrForbidden,
+		return "", false, NewErr(ErrForbidden,
 			fmt.Sprintf("event type %q requires admin role", req.EventType))
 	}
 
 	if req.Admin {
 		if callerRole != "admin" {
-			return "", NewErr(ErrForbidden, "admin=true requires admin role")
+			return "", false, NewErr(ErrForbidden, "admin=true requires admin role")
 		}
 		// aihub#444: the whitelist is DERIVED from adminOnlyEventTypes
 		// (event_types.go), so this branch can no longer refuse a type the check
@@ -3637,7 +3641,7 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		// NOT whitelisted, which made setting an honest admin=true strictly more
 		// restrictive than omitting it.
 		if !adminEventWhitelist[req.EventType] {
-			return "", NewErr(ErrForbidden,
+			return "", false, NewErr(ErrForbidden,
 				fmt.Sprintf("event_type %q is not in the admin whitelist (%s)",
 					req.EventType, strings.Join(AdminEventWhitelist, ", ")))
 		}
@@ -3647,10 +3651,10 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	if req.WorkItemID != "" && req.AttemptID != "" {
 		wi, aihubErr := GetWorkItem(ctx, pool, req.WorkItemID)
 		if aihubErr != nil {
-			return "", aihubErr
+			return "", false, aihubErr
 		}
 		if err := verifyAttemptCredentialSimple(ctx, pool, wi, req.AttemptID, req.ClaimEpoch, req.SessionSecret); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 
@@ -3661,7 +3665,7 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	// first, and the rejection built here says so explicitly rather than
 	// repeating attrs_patch's "no length cap", which is false for this field.
 	if shapeErr := validateJSONObjectParam("payload", req.Payload); shapeErr != nil {
-		return "", shapeErr
+		return "", false, shapeErr
 	}
 	if len(req.Payload) == 0 {
 		req.Payload = json.RawMessage(`{}`)
@@ -3681,7 +3685,7 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	// also reads better here — the check now sits immediately above the block that
 	// consumes work_item_id, as its precondition.
 	if req.WorkItemID == "" && !nullWorkItemEventSet[req.EventType] {
-		return "", NewErr(ErrBadRequest, fmt.Sprintf(
+		return "", false, NewErr(ErrBadRequest, fmt.Sprintf(
 			"work_item_id is required for event_type %q: only these event types may be filed "+
 				"without a work item (agent_events.chk_evt_work_item_id): %s",
 			req.EventType, strings.Join(NullWorkItemEventTypes, ", ")))
@@ -3700,11 +3704,53 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 	if req.WorkItemID != "" {
 		wi, err := GetWorkItem(ctx, pool, req.WorkItemID)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		canonicalID := wi.ID
 		wiIDArg = &canonicalID
 		project = &wi.Project
+	}
+
+	// aihub#636: an identical re-send of the attempt's LATEST note records once,
+	// not twice. The caller this defends is pf_complete_attempt's fused note
+	// (internal/mcp/tools_lifecycle.go): the note travels as its own request
+	// BEFORE the completion call, because completing deletes the credentials
+	// this endpoint checks — so when the completion is then refused (the
+	// aihub#350 derived gate, a mid-deploy schema skew, a retryable 40001), the
+	// note is already on the timeline and retrying the whole call re-sends it.
+	// Captured live during the 2026-09-13 deploy (aihub#635): the refusal's own
+	// suffix said "retrying this call will record it a second time". The
+	// Idempotency-Key header cannot carry this — the client mints a fresh key
+	// per request (aihub#436), and an MCP-level retry IS a new request.
+	//
+	// Scoped to the latest note of the same attempt, deliberately: a straight
+	// retry has nothing between the two sends, so it always matches, while a
+	// deliberate re-emission of an earlier text after other notes still records
+	// (A, B, A stays three events). Equality is the jsonb payload and the pinned
+	// flag together — a re-send that changes either is a new statement. jsonb
+	// equality is structural, so a byte-level reserialisation still matches.
+	//
+	// Sequential retries cannot race this read-then-insert; two CONCURRENT
+	// identical emits still can, and both would land. Accepted: the defect is a
+	// retry loop, which is sequential by construction, and a unique index over a
+	// jsonb payload costs more than the residue it would close.
+	if req.EventType == "note" && wiIDArg != nil && attemptIDArg != nil {
+		var latestID string
+		var identical bool
+		err := pool.QueryRow(ctx, `
+			SELECT id, (payload = $3::jsonb AND COALESCE(pinned, false) = $4)
+			FROM agent_events
+			WHERE work_item_id = $1 AND run_attempt_id = $2 AND event_type = 'note'
+			ORDER BY created_at DESC
+			LIMIT 1`,
+			*wiIDArg, *attemptIDArg, string(req.Payload), req.Pinned,
+		).Scan(&latestID, &identical)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", false, dbErrCause(err, "failed to read the latest note for dedup")
+		}
+		if err == nil && identical {
+			return latestID, true, nil
+		}
 	}
 
 	evtID := NewID("evt")
@@ -3717,9 +3763,9 @@ func EmitEvent(ctx context.Context, pool *pgxpool.Pool, req *EmitEventRequest,
 		req.EventType, req.Payload, req.Pinned, project,
 	)
 	if err != nil {
-		return "", dbErrCause(err, "failed to insert event")
+		return "", false, dbErrCause(err, "failed to insert event")
 	}
-	return evtID, nil
+	return evtID, false, nil
 }
 
 // verifyAttemptCredentialSimple is a lightweight credential check for event emission.

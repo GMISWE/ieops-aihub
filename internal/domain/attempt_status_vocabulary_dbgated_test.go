@@ -348,7 +348,7 @@ func TestAttemptStatusVocabulary_OneCodeForOneInvalidSecret(t *testing.T) {
 	attemptID := seedRunAttempt(t, pool, wi.ID, u, secret)
 
 	emit := func(sessionSecret string) *AihubError {
-		_, err := EmitEvent(ctx, pool, &EmitEventRequest{
+		_, _, err := EmitEvent(ctx, pool, &EmitEventRequest{
 			WorkItemID: wi.ID, AttemptID: attemptID, ClaimEpoch: 1,
 			SessionSecret: sessionSecret, EventType: "note",
 			Payload: json.RawMessage(`{"aihub441":"credential uniformity probe"}`),

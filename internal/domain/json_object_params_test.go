@@ -189,7 +189,7 @@ func guardedSites() []guardedSite {
 				// No work_item_id/attempt_id, so credential verification (the
 				// first thing that would touch the pool) is skipped.
 				return rejectViaEntryPoint(t, func() error {
-					_, err := EmitEvent(context.Background(), nil,
+					_, _, err := EmitEvent(context.Background(), nil,
 						&EmitEventRequest{EventType: "note", Payload: raw},
 						"u_test", "tester", "user")
 					return err
@@ -458,7 +458,7 @@ func TestSizeNoteMatchesTheCapThatActuallyExists(t *testing.T) {
 		t.Fatalf("the fixture must exceed EmitEvent's 64KB cap; got %d bytes", len(oversized))
 	}
 	emitErr := rejectViaEntryPoint(t, func() error {
-		_, err := EmitEvent(context.Background(), nil,
+		_, _, err := EmitEvent(context.Background(), nil,
 			&EmitEventRequest{EventType: "note", Payload: oversized},
 			"u_test", "tester", "user")
 		return err

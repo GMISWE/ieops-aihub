@@ -64,6 +64,14 @@ func applyNoteResult(result map[string]any, requested bool, err error) {
 // "complete_attempt: ..." leaves it unable to tell whether retrying will
 // duplicate the note or supply one that never landed. Returns "" when no note
 // was requested, so ordinary errors are unchanged.
+//
+// The recorded-note clause used to end "retrying this call will record it a
+// second time", and until aihub#636 that was true: the note is its own request,
+// so a refused completion left it on the timeline and every retry re-emitted
+// it — captured live during the 2026-09-13 deploy (aihub#635). The server now
+// keeps one copy of an identical re-send of the attempt's latest note
+// (domain.EmitEvent), so the clause states both halves: this process still
+// re-sends, and a server older than that fix still records the duplicate.
 func noteOutcomeSuffix(requested bool, err error) string {
 	switch {
 	case !requested:
@@ -71,7 +79,8 @@ func noteOutcomeSuffix(requested bool, err error) string {
 	case err != nil:
 		return " (the closing note was NOT recorded either: " + err.Error() + ")"
 	default:
-		return " (the closing note WAS already recorded; retrying this call will record it a second time)"
+		return " (the closing note WAS already recorded; a retry re-sends it, which a server with " +
+			"aihub#636 note dedup keeps as one copy - only a server older than that fix records it a second time)"
 	}
 }
 

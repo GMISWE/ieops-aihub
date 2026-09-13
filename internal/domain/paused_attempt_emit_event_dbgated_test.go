@@ -99,7 +99,7 @@ func TestPausedAttemptStillWritesTimelineEvents(t *testing.T) {
 		"precondition: the fixture must leave work_items.status='paused'")
 
 	emit := func(sessionSecret, text string) (string, error) {
-		return EmitEvent(ctx, pool, &EmitEventRequest{
+		id, _, err := EmitEvent(ctx, pool, &EmitEventRequest{
 			WorkItemID:    wiID,
 			AttemptID:     attemptID,
 			ClaimEpoch:    1,
@@ -107,6 +107,7 @@ func TestPausedAttemptStillWritesTimelineEvents(t *testing.T) {
 			EventType:     "note",
 			Payload:       json.RawMessage(`{"text":"` + text + `"}`),
 		}, caller, caller, "member")
+		return id, err
 	}
 
 	t.Run("the_paused_attempts_own_credentials_still_emit", func(t *testing.T) {

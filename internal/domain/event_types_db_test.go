@@ -33,7 +33,7 @@ import (
 // "was it refused?" assertion for entirely the wrong reason.
 func emitAs(t *testing.T, pool *pgxpool.Pool, callerUserID, wiID, eventType, role string, admin bool) (id, errMsg string, status int) {
 	t.Helper()
-	id, err := EmitEvent(context.Background(), pool, &EmitEventRequest{
+	id, _, err := EmitEvent(context.Background(), pool, &EmitEventRequest{
 		WorkItemID: wiID,
 		EventType:  eventType,
 		Payload:    json.RawMessage(`{"probe":"aihub444"}`),

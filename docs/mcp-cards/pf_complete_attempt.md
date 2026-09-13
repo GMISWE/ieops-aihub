@@ -151,9 +151,22 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   `TestFusedNoteAbsentMeansNoEvent`) and `internal/mcp/tools_events_note_test.go`
   (`TestNoteOutcomeSuffix`, `TestApplyNoteResultDistinguishesAbsentFromFailed`) hold
   between them.
-- **This is NOT exactly-once for the note.** A retry after a failed completion
-  records it twice. That is documented rather than solved; an idempotency key on
-  events is a bigger change.
+- **A straight retry of a refused completion no longer duplicates the note.** This
+  process still re-sends it on every retry, which
+  `internal/mcp/wrap_note_retry_test.go`
+  (`TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote`) drives against
+  a refusing server — but the server records an identical re-send of the attempt's
+  latest note once (`aihub#636`, after the `aihub#635` live capture where the
+  `aihub#350` derived gate refused the completion the note had already preceded):
+  the retried refusal leaves ONE note on the timeline, a different note still
+  records, and only the LATEST note is a dedup target, all three held by
+  `internal/domain/note_dedup_dbgated_test.go`
+  (`TestNoteDedup_ARetriedRefusedCompletionRecordsTheNoteOnce`,
+  `TestNoteDedup_ADifferentNoteStillRecords`,
+  `TestNoteDedup_ADeliberateReemissionAfterAnotherNoteStillRecords`). Still NOT
+  exactly-once in general: the dedup lives in the server's `EmitEvent`, so a server
+  older than that fix records every re-send, and the error suffix says both halves
+  (`internal/mcp/tools_events_note_test.go`, `TestNoteOutcomeSuffix`).
 - **A step still `in_progress` fails the completion on `wrapped` and `failed`** unless
   `force_terminate_step` is set — but **`paused` does not need the flag**
   (`TestTheStepInProgressRefusalIsGatedOnPausedOrTheFlagAlone`). The H-R9-11

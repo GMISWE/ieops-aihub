@@ -107,6 +107,21 @@ via `internal/mcp/tools_coding.go` (`emitCodingEvent`).
 - The event is appended to the work item's timeline and is the **only durable record**
   of several things: a wrap that actually delivered something, a lock release with
   its cause, a note whose credentials are about to be deleted.
+- **An identical re-send of the attempt's latest `note` records once** (`aihub#636`):
+  before the insert, `internal/domain/memory.go` (`EmitEvent`) reads the latest
+  `note` event of the same work item and attempt and, when the jsonb payload and the
+  pinned flag both match, returns the existing event's id with `deduplicated: true`
+  under a 200 instead of inserting — the retried refusal leaves one note, a different
+  note still records, and only the LATEST note is a dedup target, held by
+  `internal/domain/note_dedup_dbgated_test.go`
+  (`TestNoteDedup_ARetriedRefusedCompletionRecordsTheNoteOnce`,
+  `TestNoteDedup_ADifferentNoteStillRecords`,
+  `TestNoteDedup_ADeliberateReemissionAfterAnotherNoteStillRecords`). The caller this
+  defends is `pf_complete_attempt`'s fused note, emitted before a completion the
+  server may then refuse; the only recovery is retrying the whole call, which
+  re-sends the identical note — `internal/mcp/wrap_note_retry_test.go`
+  (`TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote`) drives that
+  re-send against a refusing server.
 - **A paused attempt may still call this tool, and that is a ruled contract**
   (owner ruling ②, 2026-09-10, `aihub#585`; driven end to end by
   `TestPausedAttemptStillWritesTimelineEvents`). The credential check here is

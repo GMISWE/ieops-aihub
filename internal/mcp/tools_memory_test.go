@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -245,13 +248,20 @@ func TestPublishedStrengthDeltaSaysWhatReinforceEnforces(t *testing.T) {
 
 // TestRecallMinStrengthPublishesWhichScaleItIsOn covers aihub#411 T2-19.
 //
-// min_strength is compared against base_strength after decay, so its default of
-// 0.3 sits below EVERY legal base_strength — it filters nothing. That is a
-// defensible default and this gate does not ask for it to change; it asks the
-// description to say which scale the number is on, because a threshold published
-// without its scale makes every caller's intuition about the value wrong in the
-// same direction. While base_strength was published as (0-1), 0.3 read as a
-// mid-range cutoff.
+// min_strength is compared against base_strength after decay, so a threshold
+// published without its scale makes every caller's intuition about the value
+// wrong in the same direction: while base_strength was published as (0-1), 0.3
+// read as a mid-range cutoff. This gate asks the description to say which scale
+// the number is on. It does not ask for the default to change.
+//
+// ⚠️ This comment used to continue "so its default of 0.3 sits below EVERY legal
+// base_strength — it filters nothing". aihub#645 measured that and it is false:
+// the CHECK bounds the RAW column, the compared quantity is the DECAYED one, and
+// the default hides 16 of the 261 rows the measured query reaches. The three
+// assertions below were always about the scale rather than about that claim, so
+// they are unchanged; what is corrected is the account of why they exist.
+// TestRecallMinStrengthDefaultIsPublishedAsFiltering is the arm that holds the
+// corrected claim.
 func TestRecallMinStrengthPublishesWhichScaleItIsOn(t *testing.T) {
 	desc := memoryPropDescription(t, "pf_recall", recallSchema(), "min_strength")
 	want := fmt.Sprintf("%g-%g", float64(domain.MinBaseStrength), float64(domain.MaxBaseStrength))
@@ -268,6 +278,206 @@ func TestRecallMinStrengthPublishesWhichScaleItIsOn(t *testing.T) {
 		t.Errorf("pf_recall publishes min_strength as %q, which no longer states the "+
 			"default; the default is the value whose meaning this gate is about", desc)
 	}
+}
+
+// minStrengthSelfDefaultRe reads an `if X <= 0 { X = 0.3 }` self-default out of a
+// function body. The comparison and the literal are captured separately because
+// the published description makes a distinct claim about each: the literal is the
+// default a caller is told about, and the comparison is the whole reason a
+// literal 0 means "unset" rather than "no floor".
+var minStrengthSelfDefaultRe = regexp.MustCompile(
+	`if\s+(?:req\.)?[Mm]inStrength\s*(<=|<)\s*0\s*\{\s*(?:req\.)?[Mm]inStrength\s*=\s*([0-9.]+)`)
+
+type minStrengthSelfDefault struct {
+	op      string
+	literal string
+}
+
+// domainFuncBody returns one top-level function's source, doc comment excluded.
+// Excluding the doc comment is load-bearing for the arms below: recallLexical's
+// comment discusses min_strength at length while its body must not apply it, so a
+// scan that included comments would report the opposite of the truth.
+func domainFuncBody(t *testing.T, path, fn string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v. It is one side of a comparison, and an unreadable side makes "+
+			"the comparison vacuous rather than green.", path, err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "\nfunc "+fn+"(")
+	if start < 0 {
+		t.Fatalf("%s declares no func %s, so this arm has no subject. If it was renamed, "+
+			"rename it here too rather than dropping the arm: the arm is what keeps the "+
+			"published description bound to the behaviour.", path, fn)
+	}
+	body := src[start+1:]
+	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+		body = body[:end+1]
+	}
+	return body
+}
+
+func readMinStrengthSelfDefault(t *testing.T, path, fn string) minStrengthSelfDefault {
+	t.Helper()
+	m := minStrengthSelfDefaultRe.FindStringSubmatch(domainFuncBody(t, path, fn))
+	if m == nil {
+		t.Fatalf("no min_strength self-default found in %s (%s). Every arm below compares the "+
+			"published sentence against that statement, so a scan that finds nothing would "+
+			"turn this whole gate green rather than red.", fn, path)
+	}
+	return minStrengthSelfDefault{op: m[1], literal: m[2]}
+}
+
+// TestRecallMinStrengthDefaultIsPublishedAsFiltering is aihub#645's gate.
+//
+// From aihub#433 until aihub#645 this schema published "Default 0.3 filters
+// nothing". The defect was an inference rather than a typo: base_strength IS
+// CHECK-constrained to 1-5 and 0.3 IS below 1, but the quantity compared is
+// `base_strength * exp(-days/stability_days)`, which the CHECK does not bound and
+// which crosses 0.3 on any memory old enough relative to its stability.
+//
+// Measured through the MCP tool on 2026-09-13, project=aihub, one query held
+// fixed and only this parameter varied: no min_strength gave total 245, `0` gave
+// 245, an explicit `0.3` gave 245, and `0.001` gave 261. So the default hides 16
+// of the 261 rows that query can reach, `0` is read as "unset" rather than as
+// "no floor", and
+// lexical.total stayed 10 across all four, which is the section split visible
+// from outside.
+//
+// A gate that only grepped the description for words would drift the moment the
+// behaviour moved instead of the string, so each arm is anchored on the source
+// that makes the published sentence true or false:
+//
+//	A1  the old "filters nothing" sentence returns              RED
+//	A2  recallRouted's self-default literal moves to 0.5 while
+//	    the description still says 0.3                          RED
+//	A3  the self-default condition weakens to `< 0`, which makes
+//	    a literal 0 a real "no floor" and the published sentence
+//	    about UNSET false                                       RED
+//	A4  recallLexical starts applying MinStrength, falsifying
+//	    the published section split                             RED
+//	A5  recallText or RecallWithVector stops applying it,
+//	    falsifying "gates the ranked halves"                    RED (control)
+//	A6  the handler widens min_strength below 0, so a negative
+//	    stops being a 400 and the published sentence about it
+//	    goes false                                             RED
+//
+// 🔴 It does NOT assert what the default should be. Whether 0.3 belongs there is
+// the owner's call and an input to aihub#364; this gate only requires that
+// whatever the code does is what the caller is told.
+func TestRecallMinStrengthDefaultIsPublishedAsFiltering(t *testing.T) {
+	desc := memoryPropDescription(t, "pf_recall", recallSchema(), "min_strength")
+	lower := strings.ToLower(desc)
+
+	// A1. The exact claim aihub#645 falsified, and the inference that produced it.
+	for _, banned := range []string{"filters nothing", "below every legal value"} {
+		if strings.Contains(lower, banned) {
+			t.Errorf("pf_recall publishes min_strength as %q, which is back to claiming %q. "+
+				"Measured 2026-09-13 on project aihub: 245 results at the default against 261 "+
+				"at min_strength=0.001, so the default hides 16 of the 261 rows that query can "+
+				"reach.", desc, banned)
+		}
+	}
+
+	// A2/A3. The self-default is applied in two places and they must agree with
+	// each other as well as with the description: a divergence means the same row
+	// is filtered on one path and kept on the other.
+	routed := readMinStrengthSelfDefault(t, filepath.Join(domainPkgDir, "memory.go"), "recallRouted")
+	vector := readMinStrengthSelfDefault(t, filepath.Join(domainPkgDir, "memory_vector.go"), "RecallWithVector")
+	if routed.literal != vector.literal {
+		t.Errorf("recallRouted defaults min_strength to %s and RecallWithVector to %s. One "+
+			"description cannot be true of both, and a row near the threshold would be "+
+			"visible on one path and gone on the other.", routed.literal, vector.literal)
+	}
+	for fn, d := range map[string]minStrengthSelfDefault{"recallRouted": routed, "RecallWithVector": vector} {
+		if !strings.Contains(desc, d.literal) {
+			t.Errorf("%s defaults min_strength to %s, and the published description %q does "+
+				"not state that number. A caller who is told the wrong default cannot "+
+				"predict which memories a plain pf_recall can reach.", fn, d.literal, desc)
+		}
+		if d.op != "<=" {
+			t.Errorf("%s self-defaults on `%s 0` rather than `<= 0`, so a literal 0 is no "+
+				"longer rewritten to the default. The published description says 0 means "+
+				"UNSET, and that sentence is now false: update it in the same change.",
+				fn, d.op)
+		}
+	}
+	if !strings.Contains(lower, "unset") {
+		t.Errorf("pf_recall publishes min_strength as %q without saying that 0 means unset. "+
+			"Both recall paths read a literal 0 as the default, and a negative is refused at "+
+			"the handler, so a caller sending 0 to remove the floor gets the floor and no "+
+			"warning.", desc)
+	}
+
+	// A4. The lexical section is outside the gate, by design (aihub#360).
+	lexicalBody := domainFuncBody(t, filepath.Join(domainPkgDir, "memory_lexical.go"), "recallLexical")
+	if strings.Contains(lexicalBody, "MinStrength") {
+		t.Error("recallLexical now applies MinStrength, so pf_recall's published claim that " +
+			"the lexical section ignores this parameter is false. That is a behaviour change " +
+			"rather than a typo: decide it deliberately, then republish the description.")
+	}
+	if !strings.Contains(lower, "lexical") {
+		t.Errorf("pf_recall publishes min_strength as %q without disclosing that the lexical "+
+			"section is outside this gate. One response then carries rows that its own "+
+			"threshold excluded, with nothing saying which half is which.", desc)
+	}
+
+	// A5. The control: the two ranked halves DO apply it. Without this arm, A4
+	// would stay green on a tree where nothing applied min_strength at all.
+	for _, c := range []struct{ file, fn string }{
+		{"memory.go", "recallText"},
+		{"memory_vector.go", "RecallWithVector"},
+	} {
+		body := domainFuncBody(t, filepath.Join(domainPkgDir, c.file), c.fn)
+		if !strings.Contains(body, "MinStrength") && !strings.Contains(body, "minStrength") {
+			t.Errorf("%s does not apply min_strength at all, so the published claim that this "+
+				"parameter gates the ranked halves of a recall is false.", c.fn)
+		}
+	}
+
+	// A6. The description tells a caller that a negative is a 400, which is the
+	// natural next guess once they learn 0 does not lift the floor. That sentence
+	// is true only while the handler's lower bound is 0: widen it and a negative
+	// stops being refused, at which point the published text is wrong in the
+	// direction that costs a caller a request. The bound is read rather than
+	// assumed, so this arm fails on the change rather than on the wording.
+	handler := readFileForArmLocal(t, filepath.Join("..", "server", "routes_memory.go"))
+	m := minStrengthRangeRe.FindStringSubmatch(handler)
+	if m == nil {
+		t.Fatal("internal/server/routes_memory.go no longer binds min_strength through " +
+			"queryFloatInRange, so the bound this arm compares the description against " +
+			"cannot be read. A scan that finds nothing must fail rather than pass.")
+	}
+	if m[1] != "0" {
+		t.Errorf("the handler bounds min_strength at [%s, +Inf) rather than [0, +Inf), so a "+
+			"negative is no longer refused and the published sentence \"a negative is a 400\" "+
+			"is false. Republish the description in the same change.", m[1])
+	}
+	if !strings.Contains(desc, "400") {
+		t.Errorf("pf_recall publishes min_strength as %q without saying that a negative is a "+
+			"400. A caller who has just read that 0 means unset will try -1 next, and the "+
+			"only thing standing between them and a wasted round-trip is this sentence.", desc)
+	}
+}
+
+// minStrengthRangeRe reads the lower bound the recall handler enforces on
+// min_strength. Captured rather than matched literally, so the arm can report
+// which bound it found instead of only that the expected one was absent.
+var minStrengthRangeRe = regexp.MustCompile(
+	`queryFloatInRange\(c,\s*"min_strength",\s*([^,]+),`)
+
+// readFileForArmLocal is package mcp's copy of the mcp_test helper of nearly the
+// same name: one side of a comparison, with an unreadable side treated as a
+// failure rather than as nothing to compare.
+func readFileForArmLocal(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v. An unreadable side makes the comparison vacuous rather "+
+			"than green.", path, err)
+	}
+	return string(raw)
 }
 
 // TestValidatePfRememberArgs covers the aihub#210 client-side guard: pf_remember

@@ -4,7 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "ad0170367823e8481a50ac51523b48131f2f22f738d4a15d24234dc12ffeaae3",
-  "input_schema_sha256": "ee436e3c81e2e56fc5cd6b629b410887e67bdef7feb91a8e7a023e2c657d2656",
+  "input_schema_sha256": "60538caf51ff437342c4b9ed3969d17c2e0c31c4b2ed75294d862dfa73904adc",
   "params": {
     "cursor": {
       "type": "string",
@@ -77,7 +77,7 @@ defect.
 | `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted (`TestWireQueryRecallTopKAcceptsAJSONNumber`) |
 | `similarity_threshold` | number | no | cosine 0-1, vector half only, **OFF by default** |
 | `cursor` | string | no | TEXT-path paging only |
-| `min_strength` | number | no | effective strength = `base_strength` (1-5) after decay; default 0.3 filters nothing |
+| `min_strength` | number | no | effective strength = `base_strength` (1-5) after decay; the 0.3 default DOES filter, `0` is read as unset, and the lexical half is exempt (`TestRecallMinStrengthDefaultIsPublishedAsFiltering`) |
 | `include_archived` | boolean | no | default false |
 | `fields` | enum | no | `brief` — first line only, drops `related`/`tags` |
 
@@ -506,20 +506,47 @@ other.
 - **§6.2 T2-19 — LANDED** with T1-3 (`aihub#433`), and in that order for the reason
   the ruling gave: a threshold and the value it thresholds must be published on the
   same scale, so `pf_remember`'s range was fixed first. `min_strength` now says which
-  scale it is on — it thresholds `base_strength` (1-5) after decay, which makes the
-  0.3 default **below every legal value**, i.e. it filters nothing, and the
+  scale it is on: it thresholds `base_strength` (1-5) after decay, and the
   published description is bound to the enforced range by
   `internal/mcp/tools_memory_test.go`
   (`TestRecallMinStrengthPublishesWhichScaleItIsOn`), which builds the expected
   scale from `domain.MinBaseStrength`/`domain.MaxBaseStrength` so the constants and
   the sentence cannot drift apart. The default is
   unchanged; only the statement of what it means is new.
+- **§6.2 T2-19 — CORRECTED** by `aihub#645`, measured 2026-09-13. That change also
+  asserted the 0.3 default is **below every legal value** and therefore filters
+  nothing, and this card repeated it, which `internal/mcp/tools_memory_test.go`
+  (`TestRecallMinStrengthDefaultIsPublishedAsFiltering`) now refuses outright: the
+  CHECK bounds the RAW `base_strength` column while the compared quantity is
+  `base_strength * exp(-days/stability_days)`, which it leaves unbounded below. One
+  query on project `aihub`, only this parameter varied, returned 245 rows with the
+  parameter absent, 245 at `0`, 245 at `0.3` and 261 at `0.001`, so the default
+  hides 16 of the 261 rows that query can reach and a literal `0` returns the same
+  page as sending none, via the `<= 0` self-defaults in `recallRouted`
+  (`internal/domain/memory.go`) and `RecallWithVector`
+  (`internal/domain/memory_vector.go`) that
+  `TestRecallMinStrengthDefaultIsPublishedAsFiltering` reads, while a negative
+  reaches neither because `queryFloatInRange` bounds the parameter at `[0, +Inf)`
+  and answers 400, held by `internal/server/queryparam_policy_test.go`
+  (`TestPolicyRule1_MalformedParamsAreRejectedEverywhere`). `lexical.total` held at
+  10 across all four values, which is `recallLexical`
+  (`internal/domain/memory_lexical.go`) omitting the predicate by design
+  (`aihub#360`) and is the half of the split
+  `TestRecallMinStrengthDefaultIsPublishedAsFiltering` holds by reading that
+  function's body. All three facts are published now, each bound to the source that
+  makes it true rather than to a word in the string.
 
 ## Open
 
-- Both scale rulings have landed, but **the 0.3 default was deliberately left
-  alone**, so `min_strength` still defaults to a value that cannot exclude anything.
-  Whether that default should move is not settled by any adjudicated row.
+- Both scale rulings have landed, and `aihub#645` (2026-09-13) corrected what the
+  second one claimed about the default, but **the 0.3 default itself was again
+  deliberately left alone**: it excludes 16 of the 261 rows the measured query can
+  reach, and whether it should is the owner's call rather than an engineering
+  finding, which is why `TestRecallMinStrengthDefaultIsPublishedAsFiltering` binds
+  the published description to whatever default the code applies and takes no
+  position on which default that should be. It is an input to `aihub#364`, and no
+  adjudicated row settles it.
+  <!-- prose-only: because=external-state -->
 - The two narrowed keys are a stated residual rather than a closed question: a new
   key inside `attrs` or inside a commit is dropped before the model sees it — which
   `internal/mcp/recall_projection_test.go` (`TestRecallResultNarrowsAttrsAndCommits`)

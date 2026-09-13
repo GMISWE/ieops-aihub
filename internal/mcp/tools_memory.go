@@ -509,14 +509,54 @@ func recallSchema() json.RawMessage {
 		"cursor": prop("string", "Opaque page token: pass a previous response's next_cursor. "+
 			"TEXT-path paging only: the semantic (vector) path and the hybrid merge "+
 			"return no next_cursor and ignore this."),
-		// aihub#433 / aihub#411 T2-19. The default is unchanged and deliberately
-		// so; what was missing is the scale. min_strength is compared against
-		// base_strength after decay, and base_strength is CHECK-constrained to
-		// 1-5, so 0.3 is below every legal value — it filters nothing. That reads
-		// as a sensible mid-range cutoff only if you believe the range this tool
-		// used to publish for base_strength, which is why the two strings are
-		// fixed together and gated together.
-		"min_strength":     prop("number", "Min effective strength, i.e. base_strength (1-5) after decay. Default 0.3 filters nothing"),
+		// aihub#433 / aihub#411 T2-19 put the SCALE on this description, and the
+		// scale is still right. aihub#645 removes what that change asserted
+		// alongside it: "Default 0.3 filters nothing" was false on the day it was
+		// written and is false today.
+		//
+		// 🔴 The defect is an inference, not a typo, which is why the reasoning is
+		// recorded rather than just the correction. The old argument ran:
+		// base_strength is CHECK-constrained to 1-5, 0.3 is below 1, therefore
+		// nothing can fall under it. Both premises are true and the conclusion does
+		// not follow, because the CHECK bounds the RAW column and the quantity
+		// actually compared is `base_strength * exp(-days/stability_days)` — the
+		// decayed value, which the CHECK says nothing about and which crosses 0.3
+		// on any memory old enough relative to its stability. The 1-5 floor holds
+		// for the stored value and never held for the compared one.
+		//
+		// Measured through the MCP tool on 2026-09-13, project=aihub, one query
+		// held fixed and only this parameter varied: no min_strength -> total 245,
+		// `0` -> 245, `0.3` -> 245, `0.001` -> 261. So the default hides 16 of the
+		// 261 rows that query can reach, and `0` is not a way to see them:
+		// recallRouted and RecallWithVector both self-default on `<= 0`, so a
+		// literal 0 means UNSET, never "no floor". The handler says so in a comment
+		// (internal/server/routes_memory.go, "Non-positive is legal and means
+		// unset") and no caller could read that comment. A NEGATIVE does not reach
+		// either self-default: queryFloatInRange bounds this parameter at [0, +Inf)
+		// and answers 400 "min_strength must be at least 0" (measured the same day),
+		// so 0 is the only value a caller can send that means unset.
+		//
+		// The two halves of a recall answer to DIFFERENT gates, which was also
+		// never published: recallText and RecallWithVector each carry the H9
+		// Ebbinghaus predicate, while recallLexical (internal/domain/memory_lexical.go)
+		// deliberately omits it, because the aihub#360 section answers "do these
+		// tokens appear anywhere" and hiding an old weak row there re-opens the
+		// blind spot that section exists to close. In the same measurement
+		// lexical.total stayed 10 across all four values, which is that design
+		// visible from outside.
+		//
+		// 🔴 The DEFAULT ITSELF IS UNTOUCHED here, and deliberately: whether 0.3
+		// should be the default is the owner's call, and it is an input to
+		// aihub#364's recall work. This change publishes what the code does; it
+		// does not change what the code does. Held by
+		// TestRecallMinStrengthDefaultIsPublishedAsFiltering.
+		"min_strength": prop("number", "Min effective strength: base_strength (1-5) AFTER decay, "+
+			"and a decayed value can sit far below 1, so the 0.3 default DOES filter (measured "+
+			"2026-09-13 on project aihub: 245 rows at the default against 261 at 0.001). 0 means "+
+			"UNSET, not \"no floor\": it is read as the default, and a negative is a 400, so pass "+
+			"a small positive number such as 0.001 to lift the floor. Gates the ranked halves "+
+			"(semantic and text) only; the aihub#360 lexical section ignores it by design, "+
+			"because it answers whether a memory exists rather than how relevant it is."),
 		"include_archived": prop("boolean", "Include archived memories (default false)"),
 		// ⚠️ No `recency_weight` here — withdrawn by aihub#469, see the note on
 		// recallNumberParams for the measurement. Its published description said

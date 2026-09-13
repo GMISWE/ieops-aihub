@@ -118,6 +118,8 @@ ck_not "$o" "superpowers:executing-plans"  "execute pointer fixed on SDD (execut
 agent_model() { # path -> model: value from the frontmatter block only
   awk '/^---[ \t]*$/{f++; next} f==1 && /^model:/{sub(/^model:[ \t]*/,""); sub(/[ \t]*$/,""); print; exit}' "$1"
 }
+src_lowest="$(agent_model "$plugin_root/agents/step-operator.md")"
+src_low="$(agent_model "$plugin_root/agents/step-explorer.md")"
 src_default="$(agent_model "$plugin_root/agents/step-executor.md")"
 src_raised="$(agent_model "$plugin_root/agents/step-reviewer.md")"
 if [ -n "$src_default" ] && [ -n "$src_raised" ]; then
@@ -130,8 +132,18 @@ else
   echo "  FAIL: the agent definition files no longer declare a model: frontmatter line — the derivation checks matched nothing" >&2
   fails=$((fails+1))
 fi
+if [ -z "$src_lowest" ] || [ -z "$src_low" ]; then
+  echo "  FAIL: step-operator.md / step-explorer.md no longer declare a model: frontmatter line — aihub#642's two new tier sources are missing" >&2
+  fails=$((fails+1))
+fi
 ck_not "$o" "@@DEFAULT_TIER@@" "no unsubstituted default-tier placeholder leaks"
 ck_not "$o" "@@RAISED_TIER@@"  "no unsubstituted raised-tier placeholder leaks"
+# aihub#642: the pointer prose does not reference the two new tiers today (no lowest/low-tier
+# advice for a superpowers subagent dispatch exists yet, and adding that prose is out of this
+# step's scope), but the router's TIERS dict now derives all 4 — so a stray raw placeholder
+# would leak if a future fragment referenced one without going through subst() correctly.
+ck_not "$o" "@@LOWEST_TIER@@" "no unsubstituted lowest-tier placeholder leaks"
+ck_not "$o" "@@LOW_TIER@@"    "no unsubstituted low-tier placeholder leaks"
 
 echo "== prefix stripping (skill without 'polyforge:' prefix) =="
 ck "$(run pf-spec "$ws_off")" "Three-Segment Output" "bare 'pf-spec' routes the same as the prefixed form"
@@ -220,6 +232,45 @@ if s2 == s:
 open(p, "w", encoding="utf-8").write(s2)
 DETIER
 ck_empty "$(run polyforge:pf-execute "$ws_on" "$fx2")" "missing agent model frontmatter -> superpowers payload not emitted (inert)"
+
+echo "== aihub#642: TIERS now requires all 4 tier-source files, not just default+raised =="
+# Pre-#642, TIERS was a 2-tuple read only from step-executor.md/step-reviewer.md; a broken
+# step-operator.md (the new LOWEST-tier source) would have had zero effect on it. Post-#642,
+# _tiers is computed for all 4 keys and TIERS is None unless every one resolves — this is the
+# actual semantic change plan step 9 makes, so prove it: break ONLY the new lowest-tier source
+# (default/raised untouched) and confirm the whole superpowers payload still goes inert.
+fx4="$tmp/plugin_fx4"; rm -rf "$fx4"; cp -r "$plugin_root" "$fx4"
+python3 - "$fx4/agents/step-operator.md" <<'STRIP_LOWEST'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+s2 = re.sub(r'(?m)^model:[ \t]*[a-z][a-z0-9.-]*[ \t]*\n', "", s, count=1)
+if s2 == s:
+    sys.exit("STRIP MUTATION DID NOT APPLY: model line not found in step-operator.md")
+open(p, "w", encoding="utf-8").write(s2)
+STRIP_LOWEST
+ck_empty "$(run polyforge:pf-execute "$ws_on" "$fx4")" "step-operator.md missing model: -> whole superpowers payload inert (only the new LOWEST-tier source is broken; default/raised are untouched)"
+
+echo "== aihub#642: @@LOWEST_TIER@@/@@LOW_TIER@@ substitute end-to-end through the real subst() path =="
+# No shipped fragment references the two new tokens yet (plan step 9 only wires the mechanism;
+# authoring lowest/low-tier steering prose is out of this step's scope), so a fixture that
+# injects a reference into the router's own pointer text is the only way to exercise the new
+# replacements through the real code path rather than re-deriving TIERS by hand in bash.
+fx3="$tmp/plugin_fx3"; rm -rf "$fx3"; cp -r "$plugin_root" "$fx3"
+python3 - "$fx3/hooks/pf-skill-router" <<'PATCH'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+anchor = '        "- spec-compliance review, code-quality review, architecture/design judgement -> model: @@RAISED_TIER@@\\n"\n'
+inject = '        "- routine mechanical delivery, read-only codebase investigation -> model: @@LOWEST_TIER@@ / @@LOW_TIER@@\\n"\n'
+if anchor not in s:
+    sys.exit("PATCH ANCHOR NOT FOUND -- pointer text changed shape")
+open(p, "w", encoding="utf-8").write(s.replace(anchor, anchor + inject, 1))
+PATCH
+o="$(run polyforge:pf-execute "$ws_on" "$fx3")"
+ck "$o" "investigation -> model: $src_lowest / $src_low" "injected lowest/low-tier reference substitutes to step-operator.md/step-explorer.md's model: values"
+ck_not "$o" "@@LOWEST_TIER@@" "no unsubstituted lowest-tier placeholder leaks from the injected reference"
+ck_not "$o" "@@LOW_TIER@@"    "no unsubstituted low-tier placeholder leaks from the injected reference"
 
 echo "== malformed / empty payloads are safe =="
 ck_empty "$(run_raw '' "$ws_off")"            "empty stdin -> no output"

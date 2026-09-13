@@ -24,6 +24,40 @@ type MachineConfig struct {
 
 	// Binary controls the polyforge CLI binary update channel (optional).
 	Binary *MachineBinary `toml:"binary,omitempty"`
+
+	// Roles configures per-tier candidate model lists consumed by
+	// `polyforge roles generate` for the pi and codex harnesses (aihub#642
+	// design decision #5). Claude Code does not read this: it uses the portable
+	// sonnet/opus/haiku aliases in internal/roles/definitions/cc_aliases.yaml
+	// instead, since a CC alias means the same thing on every machine. pi and
+	// codex agent files carry machine-local concrete model IDs, which is why
+	// this lives in machine config rather than in the repo. Optional; a machine
+	// that never sets it gets each harness's built-in defaults.
+	Roles *MachineRoles `toml:"roles,omitempty"`
+}
+
+// MachineRoles is the `[roles]` table in ~/.polyforge/config.toml.
+// See MachineConfig.Roles.
+type MachineRoles struct {
+	// Tiers maps a tier name (one of roles.ValidTiers: "lowest", "low",
+	// "default", "raised") to an ordered list of candidates. `polyforge roles
+	// generate` walks the list in order and uses the first candidate whose
+	// model resolves in that harness's local model catalog; if none resolve,
+	// the generated agent file omits the model field (so it inherits the
+	// caller's model) and generation prints a loud, non-suppressible warning
+	// naming the tier and harness rather than guessing an ID (aihub#642 AC7).
+	Tiers map[string][]RoleCandidate `toml:"tiers,omitempty"`
+}
+
+// RoleCandidate is one (harness, model) pair in a tier's candidate list.
+type RoleCandidate struct {
+	// Harness is "pi" or "codex". "cc" is not valid here: Claude Code is
+	// generated from cc_aliases.yaml, never from machine config.
+	Harness string `toml:"harness"`
+	// Model is the harness-native model identifier to try, e.g. a pi model ID
+	// or a codex catalog slug. Never emitted verbatim if it fails to resolve --
+	// see Tiers' doc comment.
+	Model string `toml:"model"`
 }
 
 type MachineAuth struct {
@@ -98,7 +132,14 @@ func SaveMachineConfig(mc *MachineConfig) error {
 		"\n# Binary update channel (optional; \"dev\" is the only published channel\n" +
 		"# and the default, so you normally leave this out entirely):\n" +
 		"# [binary]\n" +
-		"# channel = \"dev\"\n"
+		"# channel = \"dev\"\n" +
+		"\n# Per-tier candidate models for `polyforge roles generate` (pi and codex\n" +
+		"# only -- Claude Code uses built-in portable aliases and ignores this table).\n" +
+		"# Optional; omit entirely to accept each harness's defaults. Each tier lists\n" +
+		"# candidates in priority order, and generation uses the first one that\n" +
+		"# resolves in that harness's local model catalog:\n" +
+		"# [roles.tiers]\n" +
+		"# default = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n"
 	return os.WriteFile(MachineConfigPath(), append(append([]byte(header), b...), []byte(footer)...), 0600)
 }
 

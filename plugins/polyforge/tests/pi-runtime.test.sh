@@ -190,13 +190,84 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "== agent definitions are installable and well-formed =="
-agent_out="$(python3 - "$root" <<'PY'
+# aihub#642: pf-<role>.md is no longer a static tree committed to this repo --
+# it is GENERATED per machine by `polyforge roles generate pi`
+# (internal/cli/roles_generate.go) from internal/roles/definitions/*.yaml plus
+# this machine's ~/.polyforge/config.toml [roles.tiers] candidates. So this
+# check builds the CLI (or reuses one already on PATH / at $root/bin/polyforge)
+# and generates into a throwaway directory under a throwaway HOME, exercising
+# the real generator instead of reading a tree nothing writes to any more.
+# $generated_agents is read by the "read-only roles" section below too.
+repo_root="$(cd "$root/../.." && pwd)"
+gen_root=""
+generated_agents=""
+polyforge_bin=""
+# Deliberately NOT `command -v polyforge` / $root/bin/polyforge first: this
+# check exists to verify the generator code IN THIS WORKTREE, and both of
+# those may resolve to an unrelated, independently-updated system install
+# (this box's own /usr/local/bin/polyforge auto-updates daily, per
+# bin/polyforge-mcp.sh) that predates whatever change is under test here --
+# measured hitting exactly that path (`unknown command: roles`) against a
+# same-repo, differently-versioned binary while writing this check. Building
+# from source is the only way this assertion is actually about this checkout.
+# Falling back to a PATH/bin binary only when go itself is unavailable is a
+# last resort, matching the "opportunistic, degrades to SKIP" pattern used
+# throughout this suite -- not a preference over building fresh.
+if command -v go >/dev/null 2>&1; then
+  gen_root="$(mktemp -d 2>/dev/null || true)"
+  if [ -n "$gen_root" ] && [ -d "$gen_root" ]; then
+    polyforge_bin="$gen_root/polyforge-test-bin"
+    if ! (cd "$repo_root" && GOWORK=off go build -o "$polyforge_bin" ./cmd/polyforge) \
+        > "$gen_root/build.log" 2>&1; then
+      bad "could not build the polyforge CLI to generate pi agent files:"
+      sed 's/^/      /' "$gen_root/build.log" >&2
+      polyforge_bin=""
+    fi
+  else
+    bad "could not create a temp dir to build the polyforge CLI into"
+  fi
+else
+  polyforge_bin="$(command -v polyforge || true)"
+  if [ -z "$polyforge_bin" ] && [ -x "$root/bin/polyforge" ]; then
+    polyforge_bin="$root/bin/polyforge"
+  fi
+  if [ -z "$polyforge_bin" ]; then
+    skip "go is not on PATH and no polyforge binary was found -- cannot generate pi agent files"
+  fi
+fi
+if [ -n "$polyforge_bin" ]; then
+  [ -n "$gen_root" ] || gen_root="$(mktemp -d 2>/dev/null || true)"
+  if [ -n "$gen_root" ] && [ -d "$gen_root" ]; then
+    mkdir -p "$gen_root/agents" "$gen_root/home"
+    if HOME="$gen_root/home" "$polyforge_bin" roles generate pi --out "$gen_root/agents" \
+        > "$gen_root/gen.log" 2>&1; then
+      generated_agents="$gen_root/agents"
+    else
+      bad "polyforge roles generate pi failed:"
+      sed 's/^/      /' "$gen_root/gen.log" >&2
+    fi
+  else
+    bad "could not create a temp dir to generate pi agent files into"
+  fi
+fi
+
+if [ -n "$generated_agents" ]; then
+  missing_roles=""
+  for role in executor operator explorer reviewer designer; do
+    [ -f "$generated_agents/pf-$role.md" ] || missing_roles="$missing_roles pf-$role.md"
+  done
+  if [ -z "$missing_roles" ]; then
+    ok "generator wrote all 5 role agent files (executor/operator/explorer/reviewer/designer)"
+  else
+    bad "generator did not write:$missing_roles"
+  fi
+
+  agent_out="$(python3 - "$generated_agents" <<'PY'
 import os, re, sys
-root = sys.argv[1]
-d = os.path.join(root, "pi", "agents")
-files = sorted(f for f in os.listdir(d)) if os.path.isdir(d) else []
+d = sys.argv[1]
+files = sorted(f for f in os.listdir(d) if f.endswith(".md"))
 if not files:
-    print("FAIL|pi/agents/ holds no agent definitions"); raise SystemExit
+    print("FAIL|generated agents directory holds no .md files"); raise SystemExit
 for f in files:
     text = open(os.path.join(d, f)).read()
     m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
@@ -215,74 +286,107 @@ for f in files:
           else ("FAIL|%s needs a description long enough to route on" % f))
 PY
 )"
-while IFS='|' read -r verdict msg; do
-  [ -n "${verdict:-}" ] || continue
-  [ "$verdict" = "PASS" ] && ok "$msg" || bad "$msg"
-done <<< "$agent_out"
+  while IFS='|' read -r verdict msg; do
+    [ -n "${verdict:-}" ] || continue
+    [ "$verdict" = "PASS" ] && ok "$msg" || bad "$msg"
+  done <<< "$agent_out"
+else
+  skip "no polyforge binary could be built or found -- generated pi agent files not checked"
+fi
 
 [ -x "$root/pi/install.sh" ] && ok "pi/install.sh is executable" || bad "pi/install.sh is not executable"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "== pf-explore is restricted to read-only tools =="
-# An agent file with NO `tools:` field is not read-only, it is unrestricted: pi's subagent
-# extension pushes --tools only when one is declared (examples/extensions/subagent/
-# index.ts:307), so pf-explore shipped holding write, edit and subagent (aihub#606). The IR1
-# hook does not close that gap — its matcher names neither `edit` nor `write`.
+echo "== read-only roles carry a pi tools: allowlist; write-capable roles do not =="
+# aihub#642 generalizes the old single-file "pf-explore is restricted to
+# read-only tools" check across all 5 generated roles. explorer and reviewer
+# are the only read_only roles (internal/roles/definitions/{explorer,
+# reviewer}.yaml; internal/roles/compile.go's CompileCapability compiles that
+# one bool to the SAME piReadOnlyTools constant for both), so EXACTLY those
+# two must carry a tools: allowlist; executor/operator/designer must carry
+# NONE at all. An agent file with NO `tools:` field is not read-only, it is
+# unrestricted: pi's subagent extension pushes --tools only when one is
+# declared (examples/extensions/subagent/index.ts:307), so a stray allowlist
+# on a write-capable role, or a MISSING one on a read-only role, both reopen
+# aihub#606 (pf-explore shipped holding write, edit and subagent because its
+# allowlist was silently absent).
 #
-# `bash` is excluded on purpose, following pi's own read-only example agent (`planner`:
-# read, grep, find, ls) rather than `scout`/`reviewer`, which get a shell because they are
-# allowed side effects. A shell is a write vector no name-keyed gate can police.
+# The old body-quotes-its-own-tools check ("the 'Reading - ... - is fine'
+# sentence names ...") is gone: that prose lived only in the old hand-authored
+# pi-specific pf-explore.md. The generated files render one prompt shared
+# across CC/pi/codex (internal/roles/definitions/*.yaml's `prompt:`), which
+# does not (and should not) name pi-specific tool spellings — the allowlist's
+# correctness is checked directly below instead (fail-closed READ_PF set),
+# not by cross-referencing prose that no longer exists.
 #
-# pf-execute.md is EXEMPT by design — it is the write-capable agent, mirroring pi's own
-# `worker`, which also declares nothing. Nothing here asserts anything about its tools.
-#
-# The three couplings below are the reason this is a cross-file check and not a lint:
+# The couplings below are the reason this is a cross-file check and not a lint:
 #   - the allowlist is an exact-match Set (dist/core/agent-session.js:149, :2110), no globs;
 #   - it filters extension-registered tools too (:2111), and the polyforge tools are
-#     extension-registered, so a builtin-only allowlist silently removes pf-explore's own
+#     extension-registered, so a builtin-only allowlist silently removes a role's own
 #     documented read tools;
 #   - the `polyforge_` spelling is a function of pi/mcp.json's toolPrefix.
-pi_tools_dir=""
-for cand in \
-  "${POLYFORGE_PI_TOOLS:-}" \
-  "$(npm root -g 2>/dev/null || true)/@earendil-works/pi-coding-agent/dist/core/tools" \
-  "$HOME/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/core/tools"; do
-  [ -d "$cand" ] && { pi_tools_dir="$cand"; break; }
-done
-explore_out="$(python3 - "$root" "$pi_tools_dir" <<'PY'
-import json, os, re, sys
-root, pi_tools_dir = sys.argv[1], sys.argv[2]
+if [ -z "${generated_agents:-}" ]; then
+  skip "no generated pi agent files available -- read-only/write-capable tools: split not checked"
+else
+  pi_tools_dir=""
+  for cand in \
+    "${POLYFORGE_PI_TOOLS:-}" \
+    "$(npm root -g 2>/dev/null || true)/@earendil-works/pi-coding-agent/dist/core/tools" \
+    "$HOME/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/core/tools"; do
+    [ -d "$cand" ] && { pi_tools_dir="$cand"; break; }
+  done
 
-path = os.path.join(root, "pi", "agents", "pf-explore.md")
+  for role in executor operator explorer reviewer designer; do
+    case "$role" in
+      explorer|reviewer) want_tools=yes ;;
+      *)                 want_tools=no ;;
+    esac
+    role_out="$(python3 - "$generated_agents/pf-$role.md" "$role" "$want_tools" "$pi_tools_dir" "$root/pi/mcp.json" <<'PY'
+import json, os, re, sys
+path, role, want_tools, pi_tools_dir, mcp_path = sys.argv[1:6]
+
+def emit(v, m):
+    print("%s|pf-%s.md: %s" % (v, role, m))
+
 if not os.path.isfile(path):
-    print("FAIL|pi/agents/pf-explore.md is missing"); raise SystemExit
+    emit("FAIL", "file is missing"); raise SystemExit
 text = open(path).read()
 m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
 if not m:
-    print("FAIL|pf-explore.md has no frontmatter block"); raise SystemExit
-fm, body = m.group(1), text[m.end():]
+    emit("FAIL", "has no frontmatter block"); raise SystemExit
+fm = m.group(1)
 
-tm = re.search(r"^tools:[ \t]*(\S.*)$", fm, re.M)
-if not tm:
-    print("FAIL|pf-explore.md declares no tools: — pi reads that as inherit-everything, so "
-          "the read-only agent holds write, edit and subagent")
-    raise SystemExit
 # pi accepts both spellings: `tools: read, bash` and `tools: [read, bash]` (agents.ts).
+tm = re.search(r"^tools:[ \t]*(\S.*)$", fm, re.M)
+
+if want_tools == "no":
+    if tm:
+        emit("FAIL", "declares a tools: allowlist, but this is a write-capable role -- it "
+                     "must inherit everything (no tools: line), matching pi's own `worker` "
+                     "example and pf-execute.md's existing shape")
+    else:
+        emit("PASS", "declares no tools: line, so pi grants it every tool (write-capable role)")
+    raise SystemExit
+
+# want_tools == "yes": explorer or reviewer.
+if not tm:
+    emit("FAIL", "declares no tools: -- pi reads that as inherit-everything, so this "
+                 "read-only role would hold write, edit and subagent")
+    raise SystemExit
 raw = tm.group(1).strip()
 if raw.startswith("[") and raw.endswith("]"):
     raw = raw[1:-1]
 tools = [t.strip().strip("'\"") for t in raw.split(",") if t.strip()]
 if not tools:
-    print("FAIL|pf-explore.md's tools: is empty, which pi treats as no allowlist at all")
-    raise SystemExit
-print("PASS|pf-explore declares a tools: allowlist (%d entries)" % len(tools))
+    emit("FAIL", "tools: is empty, which pi treats as no allowlist at all"); raise SystemExit
+emit("PASS", "declares a tools: allowlist (%d entries)" % len(tools))
 
 # --- 1. nothing in it can write -------------------------------------------------------
 WRITE_BUILTINS = {"write", "edit", "bash", "powershell", "subagent", "apply_patch"}
 granted = sorted(t for t in tools if t in WRITE_BUILTINS)
-print(("FAIL|allowlist grants write-capable tool(s): %s" % ", ".join(granted)) if granted
-      else "PASS|allowlist grants no write-capable built-in (no write/edit/bash/subagent)")
+emit("FAIL", "allowlist grants write-capable tool(s): %s" % ", ".join(granted)) if granted \
+    else emit("PASS", "allowlist grants no write-capable built-in (no write/edit/bash/subagent)")
 
 # Fail CLOSED on polyforge tools: anything that is not on the known read-only list counts as
 # a write, so a pf_* tool added here later is caught even though this file never heard of it.
@@ -291,57 +395,38 @@ READ_PF = {"get_work_item", "get_step", "list_work_items", "list_projects", "lis
            "whoami", "diff", "predict_conflicts"}
 pf_tools = [t for t in tools if "pf_" in t]
 nonread = sorted(t for t in pf_tools if t.split("pf_", 1)[1] not in READ_PF)
-print(("FAIL|allowlist grants polyforge tool(s) that are not on the read-only list: %s"
-       % ", ".join(nonread)) if nonread
-      else "PASS|every polyforge tool in the allowlist is a read-only one (%d)" % len(pf_tools))
+emit("FAIL", "allowlist grants polyforge tool(s) that are not on the read-only list: %s"
+             % ", ".join(nonread)) if nonread \
+    else emit("PASS", "every polyforge tool in the allowlist is a read-only one (%d)" % len(pf_tools))
 
-# --- 2. it still grants what the agent's own body says it uses ------------------------
-# The prompt tells the agent to read polyforge state. Because the allowlist also filters
-# extension-registered tools, dropping these would not error — it would silently leave the
-# agent unable to read any polyforge state at all.
-reading = re.search(r"Reading\s*-(.*?)-\s*is fine", body, re.S)
-if not reading:
-    print("FAIL|pf-explore.md's body no longer carries the 'Reading - ... - is fine' list, "
-          "so the allowlist cannot be checked against what the prompt promises")
-else:
-    named = re.findall(r"`(\w*pf_\w+)`", reading.group(1))
-    if not named:
-        print("FAIL|the 'Reading - ... - is fine' sentence names no pf_* tool")
-    else:
-        absent = [n for n in named if not any(t.endswith(n) for t in tools)]
-        print(("FAIL|the body tells the agent to use %s, which the allowlist does not grant"
-               % ", ".join(absent)) if absent
-              else "PASS|every read tool the prompt names is in the allowlist (%d)" % len(named))
-
-# --- 3. the pf_* spelling matches pi/mcp.json's toolPrefix ----------------------------
-mcp_path = os.path.join(root, "pi", "mcp.json")
+# --- 2. the pf_* spelling matches pi/mcp.json's toolPrefix ----------------------------
 try:
     mcp = json.load(open(mcp_path))
 except Exception as e:
-    print("FAIL|pi/mcp.json is unreadable (%s)" % e); mcp = None
+    emit("FAIL", "pi/mcp.json is unreadable (%s)" % e); mcp = None
 if mcp is not None:
     server = next(iter((mcp.get("mcpServers") or {})), None)
     mode = (mcp.get("settings") or {}).get("toolPrefix", "server")
     expected = {"server": "%s_" % server, "short": "%s_" % server,
                 "none": "", "mcp": "mcp__%s_" % server}.get(mode)
     if server is None:
-        print("FAIL|pi/mcp.json declares no MCP server to derive a tool prefix from")
+        emit("FAIL", "pi/mcp.json declares no MCP server to derive a tool prefix from")
     elif expected is None:
-        print("FAIL|pi/mcp.json sets an unrecognised toolPrefix %r — cannot tell what the "
-              "polyforge tools will be called" % mode)
+        emit("FAIL", "pi/mcp.json sets an unrecognised toolPrefix %r -- cannot tell what the "
+                      "polyforge tools will be called" % mode)
     else:
         wrong = sorted(t for t in pf_tools if not t.startswith(expected + "pf_"))
-        print(("FAIL|toolPrefix is %r so polyforge tools are named %spf_*, but the allowlist "
-               "spells them: %s" % (mode, expected, ", ".join(wrong))) if wrong
-              else "PASS|pf_* spelling matches pi/mcp.json toolPrefix=%r (%spf_*)" % (mode, expected))
+        emit("FAIL", "toolPrefix is %r so polyforge tools are named %spf_*, but the allowlist "
+                      "spells them: %s" % (mode, expected, ", ".join(wrong))) if wrong \
+            else emit("PASS", "pf_* spelling matches pi/mcp.json toolPrefix=%r (%spf_*)" % (mode, expected))
 
-# --- 4. every built-in named actually exists in pi ------------------------------------
+# --- 3. every built-in named actually exists in pi ------------------------------------
 # Opportunistic, like the event-name cross-check below. A misspelled built-in is silent —
 # the allowlist is exact-match, so `list` instead of `ls` removes the tool rather than
 # erroring, which is the same silent-capability-loss failure as the skills defect.
 builtin_candidates = [t for t in tools if "pf_" not in t]
 if not pi_tools_dir:
-    print("SKIP|pi not installed here — built-in tool names in the allowlist not cross-checked")
+    emit("SKIP", "pi not installed here -- built-in tool names in the allowlist not cross-checked")
 else:
     known = set()
     for fn in sorted(os.listdir(pi_tools_dir)):
@@ -350,16 +435,18 @@ else:
         for name in re.findall(r'name:\s*"([a-z_]+)"', open(os.path.join(pi_tools_dir, fn)).read()):
             known.add(name)
     if not known:
-        print("FAIL|found pi's tools directory at %s but could not read any tool name out of "
-              "it — the cross-check would be vacuous" % pi_tools_dir)
+        emit("FAIL", "found pi's tools directory at %s but could not read any tool name out "
+                      "of it -- the cross-check would be vacuous" % pi_tools_dir)
     else:
         unknown = sorted(t for t in builtin_candidates if t not in known)
-        print(("FAIL|allowlist names built-in(s) pi does not define: %s (pi defines: %s)"
-               % (", ".join(unknown), ", ".join(sorted(known)))) if unknown
-              else "PASS|all %d built-ins in the allowlist exist in this pi" % len(builtin_candidates))
+        emit("FAIL", "allowlist names built-in(s) pi does not define: %s (pi defines: %s)"
+                      % (", ".join(unknown), ", ".join(sorted(known)))) if unknown \
+            else emit("PASS", "all %d built-ins in the allowlist exist in this pi" % len(builtin_candidates))
 PY
 )"
-verdicts <<< "$explore_out"
+    verdicts <<< "$role_out"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

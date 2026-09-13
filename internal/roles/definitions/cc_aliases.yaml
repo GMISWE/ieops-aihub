@@ -1,0 +1,11 @@
+# Portable, repo-committed Claude Code tier->alias table (aihub#642 plan decision #2).
+# Read ONLY by the build-time CC agent generator (internal/roles/gen) -- never by
+# internal/config.LoadMachineConfig -- so no contributor's personal ~/.polyforge/config.toml
+# can introduce staleness-gate noise. CC aliases are the one model identifier that is
+# portable across machines (measured aihub#642: pi/codex/opencode identifiers are not),
+# which is exactly why this table can live in the repo while the other three harnesses'
+# equivalent data must not (see internal/config/machine.go's MachineRoles instead).
+lowest: haiku
+low: haiku
+default: sonnet
+raised: opus

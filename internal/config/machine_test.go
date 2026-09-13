@@ -1,6 +1,12 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"reflect"
+	"testing"
+
+	"github.com/pelletier/go-toml/v2"
+)
 
 // TestResolveAPIKey verifies the credential precedence contract documented in
 // `polyforge --help`: POLYFORGE_API_KEY (highest priority) > config.toml
@@ -262,5 +268,108 @@ func TestResolveAihubURLStillReportsAnUnconfiguredMachineAsEmpty(t *testing.T) {
 	if got := (&MachineConfig{}).ResolveAihubURL(); got != "" {
 		t.Errorf("ResolveAihubURL() on an unconfigured machine = %q, want \"\" — see "+
 			"EffectiveAihubURL's comment: this value gets PERSISTED into .polyforge.yaml", got)
+	}
+}
+
+// TestMachineConfigRolesOmittedWhenUnset pins the "no [roles] table at all for a
+// machine that never touches it" contract (aihub#642): Roles is a pointer with
+// omitempty specifically so a config.toml written before this field existed, or
+// by a machine that never sets it, marshals with no [roles] section and
+// round-trips through Unmarshal with Roles == nil rather than a non-nil empty
+// struct.
+func TestMachineConfigRolesOmittedWhenUnset(t *testing.T) {
+	mc := &MachineConfig{MachineID: "m-1"}
+	b, err := toml.Marshal(mc)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	if got := string(b); containsRolesTable(got) {
+		t.Errorf("Marshal() with unset Roles produced a [roles] table:\n%s", got)
+	}
+
+	var round MachineConfig
+	if err := toml.Unmarshal(b, &round); err != nil {
+		t.Fatalf("Unmarshal() error: %v", err)
+	}
+	if round.Roles != nil {
+		t.Errorf("round-tripped Roles = %+v, want nil", round.Roles)
+	}
+}
+
+func containsRolesTable(s string) bool {
+	return len(s) >= len("[roles]") && (indexOf(s, "[roles]") >= 0 || indexOf(s, "[roles.tiers") >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestMachineConfigRolesRoundTrip pins aihub#642 mem_leO2mZmw decision #1's
+// shape: [roles.tiers] maps a tier name to an ORDERED list of (harness, model)
+// candidates, and both the ordering and the harness/model pairing survive a
+// Marshal -> Unmarshal round trip byte-for-byte in the decoded struct.
+func TestMachineConfigRolesRoundTrip(t *testing.T) {
+	mc := &MachineConfig{
+		MachineID: "m-1",
+		Roles: &MachineRoles{
+			Tiers: map[string][]RoleCandidate{
+				"default": {
+					{Harness: "pi", Model: "claude-sonnet-4-5"},
+					{Harness: "codex", Model: "gpt-5-codex"},
+				},
+				"raised": {
+					{Harness: "pi", Model: "claude-opus-4-1"},
+				},
+			},
+		},
+	}
+
+	b, err := toml.Marshal(mc)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+
+	var round MachineConfig
+	if err := toml.Unmarshal(b, &round); err != nil {
+		t.Fatalf("Unmarshal() error: %v\ntoml:\n%s", err, b)
+	}
+	if round.Roles == nil {
+		t.Fatalf("round-tripped Roles is nil; marshaled toml:\n%s", b)
+	}
+	if !reflect.DeepEqual(round.Roles.Tiers["default"], mc.Roles.Tiers["default"]) {
+		t.Errorf("round-tripped Tiers[default] = %+v, want %+v (order must survive)",
+			round.Roles.Tiers["default"], mc.Roles.Tiers["default"])
+	}
+	if !reflect.DeepEqual(round.Roles.Tiers["raised"], mc.Roles.Tiers["raised"]) {
+		t.Errorf("round-tripped Tiers[raised] = %+v, want %+v",
+			round.Roles.Tiers["raised"], mc.Roles.Tiers["raised"])
+	}
+	if len(round.Roles.Tiers) != 2 {
+		t.Errorf("round-tripped Tiers has %d keys, want 2: %+v", len(round.Roles.Tiers), round.Roles.Tiers)
+	}
+}
+
+// TestSaveMachineConfigRolesExample pins that SaveMachineConfig's footer
+// documents the [roles.tiers] table (so a reader of a fresh config.toml can
+// discover the feature without leaving the file), without asserting on the
+// exact prose so wording can still be improved freely.
+func TestSaveMachineConfigRolesExample(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	if err := SaveMachineConfig(&MachineConfig{MachineID: "m-1"}); err != nil {
+		t.Fatalf("SaveMachineConfig() error: %v", err)
+	}
+	b, err := os.ReadFile(MachineConfigPath())
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if indexOf(string(b), "roles.tiers") < 0 {
+		t.Errorf("SaveMachineConfig() footer does not mention roles.tiers; got:\n%s", b)
 	}
 }

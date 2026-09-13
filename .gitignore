@@ -250,3 +250,12 @@ __marimo__/
 #   git check-ignore -v bin/polyforge-linux-amd64 ...           # must NOT match
 /bin/aihub
 /bin/polyforge
+
+# aihub#642: codex's step-<role>.toml agent files are generated at MCP server
+# boot (cmd/polyforge/main.go, via internal/cli.GenerateRoles) from
+# internal/roles/definitions/*.yaml + the machine's config.toml [roles.tiers]
+# candidates -- never hand-authored, never committed. Claude Code's
+# step-<role>.md counterparts ARE committed (go:generate, not boot-time), and
+# pi's pf-<role>.md counterparts are written straight into $PI_DIR/agents (out
+# of tree) by pi/install.sh, so neither needs an entry here.
+/plugins/polyforge/.codex-plugin/agents/

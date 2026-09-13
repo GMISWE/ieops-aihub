@@ -976,10 +976,13 @@ host* with the serving container's `DATABASE_URL` and `EMBEDDING_*` vars, but
 cannot resolve, so a host-run backfill otherwise silently embeds nothing. It is
 idempotent — its selection is `emb_vector IS NULL OR emb_model mismatch OR
 embedded_len IS NULL`, over `status='active'` memories of embeddable types and
-over work items of **all** statuses. Two limits it does not cross, recorded so
-nobody assumes otherwise: it takes no flags, and it never touches **archived**
-memories — the aihub#625 ruling (archived over-limit rows ride along the next
-full re-embed) still needs either a flag on the CLI or a one-off manual pass.
+over work items of **all** statuses. A full re-embed that must also converge
+**archived** memories (the aihub#625 ruling: archived over-limit rows ride
+along the next full re-embed) passes `-include-archived` — the aihub#637 flag
+that widens the memory selection to active+archived while the flag-less
+default keeps the routine population active-only. One limit it does not cross
+under any flag, recorded so nobody assumes otherwise: it never touches
+**redacted** memories.
 
 ### Legacy single-Compose host (`10.146.0.16`, retired)
 

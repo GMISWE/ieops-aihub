@@ -893,71 +893,79 @@ targets, not an SLO:
 | Migrations `0039`+`0040` (step 4) | 9.72 ms + 5.34 ms, applied **before** the container swap |
 | Downtime across the swap (step 6) | **0.675 s** at 0.1 s poll resolution (5 failed polls in the gap) — vs 0.450–0.596 s for the bare-run era; the Compose create path costs a fraction of a second more |
 | Old binary on the new schema | healthy — which is why the local-image rollback is known to work rather than assumed to |
-| `tei` container | not restarted (its rebuild is a separate, pending step — see below) |
+| `tei` container | not restarted by the aihub swap; rebuilt in its own window later the same day (embedding down 124.6 s — see below) |
 | `error` / `42703` in the new container's log | 0 |
 | `/ui` session key | `from POLYFORGE_UI_COOKIE_SECRET (32 bytes)` |
 | Anchor left behind | `aihub-prev-b2c620c` (label-free; the last rename-era anchor) |
 
 #### The tei service — what the flags fix
 
-The Compose file gives `tei` two flags the bare-run container never had, both
-evidence-backed:
+The Compose file gives `tei` two flags the bare-run container never had. One
+changed production behaviour; the other turned out to pin a default — and the
+difference was **measured on cutover day**, which is the part worth reading:
 
-- **`--pooling last-token`** (aihub#368): production recall was broken while the
-  model was fine — the same Qwen3-Embedding-0.6B checkpoint scored recall@1 =
-  24/42 offline against 0/42 in production, and the production fingerprint
-  (cosine similarities compressed into a ~0.04 band where the correct pooling
-  gives 0.127 separation) matched **mean pooling**. The bare-run container
-  passed no `--pooling` flag, so TEI fell back to the model-repo default
-  (`/info` reported `"pooling": null`); the explicit flag pins the pooling the
-  checkpoint was trained for.
-- **`--max-batch-tokens 32768`** (aihub#504): measured on this host, TEI 1.7.2
-  ran with `max_input_length=32768` but `max_batch_tokens=16384` and
-  `auto_truncate=false` — a single input of (16384, 32768] tokens was accepted
-  but **could never be scheduled into a batch**: no error, the client burns its
-  `EMBEDDING_TIMEOUT`, and the row is left with `emb_vector` NULL. Raising
-  `max_batch_tokens` to equal `max_input_length` removes the dead zone.
+- **`--max-batch-tokens 32768`** (aihub#504) — the behavioural fix: measured on
+  this host, TEI 1.7.2 ran with `max_input_length=32768` but
+  `max_batch_tokens=16384` and `auto_truncate=false` — a single input of
+  (16384, 32768] tokens was accepted but **could never be scheduled into a
+  batch**: no error, the client burns its `EMBEDDING_TIMEOUT`, and the row is
+  left with `emb_vector` NULL. Raising `max_batch_tokens` to equal
+  `max_input_length` removes the dead zone.
+- **`--pooling last-token`** — pins the pooling explicitly instead of
+  inheriting the model-repo default. aihub#368 had fingerprinted production as
+  **mean pooling** (same checkpoint: recall@1 24/42 offline vs 0/42 in
+  production, cosine band compressed to ~0.04); the 2026-09-13 rebuild
+  **falsified that hypothesis**: the pre-swap container's `/info` already
+  reported `model_type.embedding.pooling: "last_token"` (the model-repo
+  default for Qwen3-Embedding IS last-token), and the same probe string
+  embedded through the old and new containers produced **byte-identical
+  vectors** (cosine 1.000000, max componentwise diff 0.0). Production was
+  never mean-pooling this model; the flag stays because an explicit config
+  cannot drift with an upstream model-repo edit, but it fixed nothing.
+  aihub#368's remaining live suspect is the missing instruct/query prefix.
 
-**⚠️ Pending as of 2026-09-13: the running `tei` is still the pre-Compose
-bare-run container** (started 2026-08-27, model-default pooling, the dead zone
-above included). Its rebuild — the first `docker compose up -d tei` — is blocked
-by a host-level fault: the NVIDIA userland libraries were upgraded to 580.178.04
-while the loaded kernel module is still 580.173.02, and the container toolkit
-refuses to create **any** GPU-visible container (`Failed to initialize NVML:
-Driver/library version mismatch` during CDI spec generation — measured on the
-day; plain containers are unaffected, which is why the aihub swap went through).
-The fix needs the GPU's two users released first:
+The rebuild itself happened later on cutover day than the aihub swap, because
+it was blocked by a host-level fault found during the deploy: the NVIDIA
+userland libraries had been upgraded to 580.178.04 while the loaded kernel
+module was still 580.173.02, and the container toolkit refused to create
+**any** GPU-visible container (`Failed to initialize NVML: Driver/library
+version mismatch` during CDI spec generation; plain containers were unaffected,
+which is why the aihub swap could go first). The reload sequence that fixed it,
+kept here because the same drift can recur on any unattended driver upgrade —
+GPU users (the tei container and the ops-agent otel collector, which holds
+`/dev/nvidia*`) must be released first:
 
 ```bash
 docker stop tei                                             # embedding degrades to text recall
 systemctl stop google-cloud-ops-agent-opentelemetry-collector   # holds /dev/nvidia*
 rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia
 modprobe nvidia && modprobe nvidia_uvm && modprobe nvidia_drm
-nvidia-smi                                                  # must report 580.178.04
+nvidia-smi                                                  # must report the on-disk version
 systemctl start google-cloud-ops-agent-opentelemetry-collector
 docker compose -f /root/docker-compose.yml up -d tei
-curl -s localhost:8085/info   # pooling and max_batch_tokens must reflect the flags
+curl -s localhost:8085/info   # model_type.embedding.pooling and max_batch_tokens must reflect the flags
 ```
 
-Until that runs, embedding keeps working on the old container with the old
-(wrong) pooling.
+Measured on 2026-09-13: embedding was down for **124.6 s** across that window
+(old container stopped 02:04:07.634Z, new one answering `/info` at
+02:06:12.186Z); aihub kept serving throughout and fell back to text recall.
 
-**After the pooling flag first takes effect, a full re-embed is mandatory, not
-optional.** Vectors written before and after the pooling change are two
-incompatible populations under the *same* `emb_model` string, and rows embedded
-between the 2026-09-13 server swap and the tei rebuild already carry
-`embedded_len`, so the backfill's own `embedded_len IS NULL` convergence clause
-will not catch them. Converge explicitly:
-
-```sql
-UPDATE memories SET embedded_len = NULL;
-UPDATE work_items SET embedded_len = NULL;
-```
-
-then run the backfill below once. Prove the pooling actually changed rather
-than assuming it: embed the same probe string through `localhost:8085/embed`
-before and after the rebuild — mean→last-token moves the vector far (cosine
-well below 1); an unchanged vector means the flag did not take.
+**If the embedding pipeline ever actually changes** (pooling, prompt,
+truncation behaviour), a full re-embed is mandatory, not optional: vectors
+written before and after such a change are two incompatible populations under
+the *same* `emb_model` string, and rows that already carry `embedded_len`
+escape the backfill's `embedded_len IS NULL` convergence clause. Converge
+explicitly with `UPDATE memories SET embedded_len = NULL; UPDATE work_items
+SET embedded_len = NULL;` and one backfill run. **Prove the pipeline changed
+rather than assuming it** — embed the same probe string through
+`localhost:8085/embed` before and after: a real pooling change moves the
+vector far (cosine well below 1). On 2026-09-13 this probe returned cosine
+1.000000, which is exactly how the mean-pooling hypothesis above was caught —
+so the NULL-out was deliberately skipped (one population, nothing to
+converge), and the backfill ran as-is: **811 active memories + 2468 work
+items re-embedded, 0 failures, 160 s**, converging recorded provenance and
+the pre-aihub#504 6000-rune truncation (the largest previously-truncated
+memory now embeds all 9,830 of its runes).
 
 **Embedding backfill** — after a release that adds or changes embeddings, and
 after any embedding-pipeline change (pooling, truncation, prompt). Build

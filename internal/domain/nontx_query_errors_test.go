@@ -234,7 +234,12 @@ func TestNonTransactionalQueryRowSitesAnswerTheirErrors(t *testing.T) {
 	// 21 -> 22 same day: aihub#360's listWorkItemsLexical counts its matches
 	// through a single-assign QueryRow, answered through dbErrCause (the
 	// memory side reuses countMemories, an already-counted site).
-	const wantSites = 22
+	//
+	// 22 -> 23 (2026-09-13): aihub#636's note dedup reads the attempt's latest
+	// note in EmitEvent (memory.go) through a single-assign QueryRow; ErrNoRows
+	// is the ordinary "no note yet" answer and every other error is classified
+	// through dbErrCause.
+	const wantSites = 23
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d QueryRow sites in non-transactional functions, want %d — fewer may mean a "+
 			"site moved into a stated blind spot (if-init, row-helper, blanked error), which "+

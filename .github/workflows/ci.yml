@@ -5387,6 +5387,32 @@ jobs:
           ! grep -q -- '--- SKIP' dedup_order.log \
             || { echo "::error::an aihub#628 dedup ordering test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#636: an identical re-send of an attempt's latest note records
+      # once. The fused note on pf_complete_attempt travels as its own request
+      # BEFORE the completion (completing deletes the credentials EmitEvent
+      # checks), so a refused completion — the aihub#350 derived gate, a
+      # mid-deploy 42703, a retryable 40001 — leaves the note on the timeline
+      # and every retry of the whole call used to record it again (captured
+      # live during the 2026-09-13 deploy, aihub#635). The dedup is a
+      # read-then-insert against agent_events, so only a database can hold it:
+      # the retry arm is the wi's acceptance criterion verbatim, the other two
+      # pin that dedup fires on identical re-sends and on nothing else (the
+      # window is exactly the attempt's LATEST note).
+      - name: aihub#636 note retry dedup DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestNoteDedup_' -count=1 -v 2>&1 | tee note_dedup.log
+          for want in TestNoteDedup_ARetriedRefusedCompletionRecordsTheNoteOnce \
+                      TestNoteDedup_ADifferentNoteStillRecords \
+                      TestNoteDedup_ADeliberateReemissionAfterAnotherNoteStillRecords; do
+            grep -q -- "--- PASS: $want (" note_dedup.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#636 note dedup is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' note_dedup.log \
+            || { echo "::error::an aihub#636 note dedup test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

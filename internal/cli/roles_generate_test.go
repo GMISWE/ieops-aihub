@@ -208,14 +208,14 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	os.Stderr = w
 	fn()
-	w.Close()
+	_ = w.Close()
 	os.Stderr = orig
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
 		t.Fatalf("read captured stderr: %v", err)
 	}
-	r.Close()
+	_ = r.Close()
 	return buf.String()
 }
 

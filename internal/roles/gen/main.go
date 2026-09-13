@@ -73,6 +73,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "roles gen: write %s: %v\n", path, err)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stdout, "roles gen: wrote %s\n", path)
+		_, _ = fmt.Fprintf(os.Stdout, "roles gen: wrote %s\n", path)
 	}
 }

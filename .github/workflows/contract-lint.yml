@@ -68,6 +68,7 @@ on:
       - 'internal/embedding/**'
       - 'internal/mcp/**'
       - 'internal/render/**'
+      - 'internal/roles/**'
       - 'internal/version/**'
       - 'pkg/client/**'
       - 'cmd/polyforge/**'

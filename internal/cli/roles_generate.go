@@ -315,7 +315,7 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 		fmt.Fprintf(os.Stderr, "roles generate: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stdout, "roles generate: wrote %s agent files to %s\n", harness, *outDir)
+	_, _ = fmt.Fprintf(os.Stdout, "roles generate: wrote %s agent files to %s\n", harness, *outDir)
 }
 
 // DefaultCodexAgentsDir returns plugins/polyforge/.codex-plugin/agents,

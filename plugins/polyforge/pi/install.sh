@@ -141,12 +141,54 @@ fi
 say "recorded pluginRoot=$PLUGIN_ROOT"
 
 step "agent definitions -> $PI_DIR/agents/"
+# aihub#642: pf-<role>.md is no longer a static tree copied out of the
+# checkout -- it's GENERATED per machine from internal/roles/definitions/*.yaml
+# + this machine's ~/.polyforge/config.toml [roles.tiers] candidates, via the
+# `polyforge roles generate pi` subcommand (internal/cli/roles_generate.go).
+# That is also why this step cannot go through place(): place() diffs a single
+# source file against a single destination, but here the SOURCE is a subcommand
+# invocation, not a file on disk.
+#
+# Non-fatal by design, matching every other "needs a binary" step in this
+# script (see the "pi runtime" step above): a machine bootstrapping pi for the
+# first time may not have the polyforge binary on PATH or at
+# $PLUGIN_ROOT/bin/polyforge yet, and that must not abort the rest of the
+# install under `set -euo pipefail`.
+POLYFORGE_BIN="$(command -v polyforge || true)"
+if [ -z "$POLYFORGE_BIN" ] && [ -x "$PLUGIN_ROOT/bin/polyforge" ]; then
+  POLYFORGE_BIN="$PLUGIN_ROOT/bin/polyforge"
+fi
 mkdir -p "$PI_DIR/agents"
-for f in "$PLUGIN_ROOT"/pi/agents/*.md; do
-  [ -e "$f" ] || continue
-  place "$f" "$PI_DIR/agents/$(basename "$f")"
-  say "installed agent $(basename "$f" .md)"
+# Stale leftovers from BEFORE aihub#642's rewrite above: this step used to
+# copy plugins/polyforge/pi/agents/*.md verbatim, and that tree shipped
+# exactly two files, pf-execute.md and pf-explore.md -- names the generator
+# above does not use (internal/roles/definitions/*.yaml names these roles
+# "executor" and "explorer", not "execute"/"explore", so it writes
+# pf-executor.md/pf-explorer.md/... instead). roles generate pi only WRITES
+# files under its own names, so it never touches these old ones; a machine
+# upgrading from a pre-aihub#642 install would otherwise keep them forever,
+# alongside their differently-named replacements, forever presenting pi with
+# both the old and the new definition for the same two roles. Retired the
+# same way the .agents/skills step further down does: moved aside rather than
+# deleted outright, in case a user had layered local edits onto one.
+for stale in pf-execute.md pf-explore.md; do
+  if [ -e "$PI_DIR/agents/$stale" ]; then
+    mv "$PI_DIR/agents/$stale" "$PI_DIR/agents/$stale.bak-$STAMP"
+    say "retired stale $stale (pre-aihub#642 naming) -> $stale.bak-$STAMP"
+  fi
 done
+if [ -n "$POLYFORGE_BIN" ]; then
+  if "$POLYFORGE_BIN" roles generate pi --out "$PI_DIR/agents"; then
+    say "generated pf-*.md agent definitions into $PI_DIR/agents/"
+  else
+    warn "polyforge roles generate pi failed -- $PI_DIR/agents/ may be missing or stale"
+    warn "re-run manually once fixed: $POLYFORGE_BIN roles generate pi --out \"$PI_DIR/agents\""
+  fi
+else
+  warn "polyforge binary not found on PATH or at $PLUGIN_ROOT/bin/polyforge -- skipped"
+  warn "agent generation. Once it is available, run:"
+  warn "    polyforge roles generate pi --out \"$PI_DIR/agents\""
+fi
 
 step "subagent tool"
 # Agent definitions are inert without the tool that dispatches them. pi ships the
@@ -309,7 +351,7 @@ cat <<EOF
 what this touches
   $PI_DIR/extensions/polyforge/   hook bridge (pi events -> polyforge's bash hooks)
   $PI_DIR/extensions/subagent/    pi's own subagent tool
-  $PI_DIR/agents/pf-*.md          polyforge agent definitions
+  $PI_DIR/agents/pf-*.md          polyforge agent definitions (generated per machine, aihub#642)
   $PI_DIR/skills/                 the polyforge skills — the copy pi loads by default
   $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings
 $PROJECT_SKILLS_LINE

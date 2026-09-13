@@ -37,6 +37,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// codex agent generation (aihub#642 plan step 10): codex DOES have a real
+	// install-time hook (codex-hooks.json declares a SessionStart hook), but
+	// wiring generation through that hook instead of this boot path is an
+	// architectural change out of this wi's scope (tracked as a follow-up work
+	// item) -- regenerating here, on every MCP server boot, was the pragmatic
+	// choice that shipped with aihub#642 because every codex session already
+	// boots this server fresh, giving boot-time generation the same
+	// stay-in-sync effect a SessionStart hook would, without adding a second
+	// invocation path. DefaultCodexAgentsDir only returns ok=true when cwd
+	// genuinely looks like the codex plugin tree (see its doc comment), so
+	// this is a silent no-op under CC/pi/local-dev invocations that don't.
+	// Errors are a warning only, NEVER fatal: role generation must not be able
+	// to break MCP server startup for anyone.
+	if codexAgentsDir, ok := cli.DefaultCodexAgentsDir(); ok {
+		if err := cli.GenerateRoles(mc, "codex", codexAgentsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "polyforge: codex agent generation failed (non-fatal, server continues): %v\n", err)
+		}
+	}
+
 	// Load .polyforge.yaml from POLYFORGE_WORKSPACE_ROOT, or by walking up from
 	// cwd to find .polyforge.yaml (non-fatal). When config.toml has api_key +
 	// server.url the workspace config is optional, allowing the MCP server to
@@ -169,6 +188,9 @@ func runCLI(ctx context.Context, args []string) {
 			fatalf("%s", noAPIKey)
 		}
 		cli.RunArtifact(ctx, aihubClient, args[1:])
+	case "roles":
+		// No aihubClient needed: purely local (embedded role YAMLs + mc.Roles).
+		cli.RunRolesGenerate(mc, args[1:])
 	case "help":
 		printUsage()
 	default:
@@ -236,6 +258,17 @@ Git helpers (machine-user):
 
 Artifact viewer:
   artifact view <memory_id>   Fetch spec/plan HTML and open in browser
+
+Role/tier agent generation (aihub#642):
+  roles generate <pi|codex> --out <dir>
+                              Render per-role agent files (pf-<role>.md for pi,
+                              step-<role>.toml for codex) from
+                              internal/roles/definitions/*.yaml and this
+                              machine's ~/.polyforge/config.toml [roles.tiers]
+                              candidate lists. Claude Code's step-<role>.md
+                              files are generated at build time instead
+                              (committed via "go generate ./internal/roles/...")
+                              -- this subcommand never touches them.
 
 Config files (§9.5.3):
   ~/.polyforge/config.toml   Machine-level config (machine_id, [auth] api_key)

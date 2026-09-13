@@ -110,6 +110,9 @@ func TestListWorkItems_EveryFilterParamReachesTheFilter(t *testing.T) {
 		{"user_id", "user_id=u_abc", func(t *testing.T, f domain.ListWorkItemsFilter) {
 			wantStrPtr(t, "filter.UserID", f.UserID, "u_abc")
 		}},
+		{"claimed_by", "claimed_by=u_claimer", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			wantStrPtr(t, "filter.ClaimedByUserID", f.ClaimedByUserID, "u_claimer")
+		}},
 		{"source", "source=human", func(t *testing.T, f domain.ListWorkItemsFilter) {
 			wantStrPtr(t, "filter.Source", f.Source, "human")
 		}},
@@ -185,7 +188,7 @@ func TestListWorkItems_UnknownParamSetsNoFilter(t *testing.T) {
 		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if f.WIType != nil || f.Priority != nil || f.Milestone != nil || f.Scenario != nil ||
-		f.Label != nil || f.Source != nil || f.UserID != nil || f.Since != nil ||
+		f.Label != nil || f.Source != nil || f.UserID != nil || f.ClaimedByUserID != nil || f.Since != nil ||
 		len(f.Status) != 0 || len(f.IDs) != 0 || f.ReadyOnly || f.IncludeStepState {
 		t.Errorf("an unrecognised param must leave every filter field unset; got %+v", f)
 	}
@@ -540,6 +543,7 @@ func TestListWorkItems_EveryScalarParamIsTrimmed(t *testing.T) {
 		{"scenario", func(f domain.ListWorkItemsFilter) *string { return f.Scenario }},
 		{"label", func(f domain.ListWorkItemsFilter) *string { return f.Label }},
 		{"user_id", func(f domain.ListWorkItemsFilter) *string { return f.UserID }},
+		{"claimed_by", func(f domain.ListWorkItemsFilter) *string { return f.ClaimedByUserID }},
 		{"source", func(f domain.ListWorkItemsFilter) *string { return f.Source }},
 	} {
 		t.Run(tc.param, func(t *testing.T) {

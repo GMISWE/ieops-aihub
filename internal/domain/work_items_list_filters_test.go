@@ -114,6 +114,15 @@ func TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL(t *testing.T) {
 			argIndex: 1,
 		},
 		{
+			// Exact equality, not ILIKE — an id filter, not a display-name
+			// search (aihub#652).
+			name:     "ClaimedByUserID",
+			filter:   ListWorkItemsFilter{ClaimedByUserID: ptrStr("u_claimer")},
+			wantSQL:  "ra.actor_user_id = $2",
+			wantArg:  "u_claimer",
+			argIndex: 1,
+		},
+		{
 			name:     "IDs",
 			filter:   ListWorkItemsFilter{IDs: []string{"wi_a", "wi_b"}},
 			wantSQL:  "(wi.id = ANY($2) OR wi.slug = ANY($2))",
@@ -149,6 +158,41 @@ func TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL(t *testing.T) {
 				t.Errorf("filter.%s bound $%d = %#v, want %#v", tc.name, tc.argIndex+1, got, tc.wantArg)
 			}
 		})
+	}
+}
+
+// OwnerDisplay and ClaimedByUserID share one join guard (aihub#652): both need
+// `LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id`, and the guard
+// that adds it must fire only ONCE even when both filters are set in the same
+// call. Two independent `if` blocks each assigning joinClause would still
+// produce a WHERE clause that parses — the duplicate JOIN only surfaces as a
+// runtime SQL error (or, worse, an ambiguous-column error) against a real
+// database, never against a string-matching unit test — so this asserts the
+// join clause's own text appears exactly once rather than merely asserting
+// both predicates are present.
+func TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin(t *testing.T) {
+	joinClause, where, args := buildListWorkItemsWhere("proj", ListWorkItemsFilter{
+		OwnerDisplay:    ptrStr("xiaokang"),
+		ClaimedByUserID: ptrStr("u_claimer"),
+	})
+	if n := strings.Count(joinClause, "LEFT JOIN run_attempts"); n != 1 {
+		t.Fatalf("expected exactly one `LEFT JOIN run_attempts` when both OwnerDisplay and "+
+			"ClaimedByUserID are set, got %d.\njoinClause: %s", n, joinClause)
+	}
+	for _, want := range []string{"ra.actor_display ILIKE", "ra.actor_user_id = $3"} {
+		if !strings.Contains(where, want) {
+			t.Errorf("expected %q in WHERE with both filters set; got: %s", want, where)
+		}
+	}
+	// $1=project, $2=OwnerDisplay, $3=ClaimedByUserID.
+	wantArgs := []any{"proj", "xiaokang", "u_claimer"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("expected %d bound args, got %d: %#v", len(wantArgs), len(args), args)
+	}
+	for i := range wantArgs {
+		if !argsEqual(args[i], wantArgs[i]) {
+			t.Errorf("arg $%d = %#v, want %#v", i+1, args[i], wantArgs[i])
+		}
 	}
 }
 

@@ -465,6 +465,7 @@ func handleListWorkItems(pool *pgxpool.Pool) echo.HandlerFunc {
 			{"scenario", &filter.Scenario},
 			{"label", &filter.Label},
 			{"user_id", &filter.UserID},
+			{"claimed_by", &filter.ClaimedByUserID},
 			{"source", &filter.Source},
 		} {
 			if v := trimmedParam(c, p.name); v != "" {

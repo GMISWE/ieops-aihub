@@ -30,7 +30,7 @@ codex mcp add polyforge -- /absolute/path/to/<plugin-cache>/bin/polyforge-mcp.sh
 | Skill text references (Claude Code) | Codex equivalent |
 |---|---|
 | `Skill` (invoke a `/pf-*` skill) | No `Skill` tool. Skills load natively - type `$pf-work` (etc.), use `/skills`, or let Codex select by description; then follow the skill's instructions. |
-| `Task` (dispatch a subagent) | `spawn_agent` (requires `~/.codex/config.toml [features] multi_agent = true`) |
+| `Task` (dispatch a subagent) | `spawn_agent` (feature `multi_agent` - stable and on by default, no `[features]` config needed) |
 | parallel `Task` | multiple `spawn_agent`, then `wait_agent` / `close_agent` |
 | `TodoWrite` | `update_plan` |
 | `Read` / `Write` / `Edit` | native file tools (`apply_patch` for edits) |

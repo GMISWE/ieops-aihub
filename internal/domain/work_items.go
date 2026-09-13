@@ -1223,14 +1223,19 @@ func ResolveVisibleWorkItemRef(ctx context.Context, pool *pgxpool.Pool, ref stri
 
 // ListWorkItemsFilter holds optional filters for ListWorkItems.
 type ListWorkItemsFilter struct {
-	Status             []string
-	WIType             *string
-	Priority           *string
-	Milestone          *string
-	Label              *string
-	UserID             *string  // reporter user_id exact match (legacy)
-	ReporterDisplay    *string  // case-insensitive contains on wi.reporter_display
-	OwnerDisplay       *string  // case-insensitive contains on run_attempts.actor_display (current attempt)
+	Status          []string
+	WIType          *string
+	Priority        *string
+	Milestone       *string
+	Label           *string
+	UserID          *string // reporter user_id exact match (legacy)
+	ReporterDisplay *string // case-insensitive contains on wi.reporter_display
+	OwnerDisplay    *string // case-insensitive contains on run_attempts.actor_display (current attempt)
+	// ClaimedByUserID is an exact match on run_attempts.actor_user_id for the
+	// CURRENT/LATEST attempt (the row wi.current_attempt_id points at). Additive
+	// complement to UserID: UserID is reporter-only (aihub#383) and this is the
+	// attempt-owner half that note explicitly left uncovered (aihub#652).
+	ClaimedByUserID    *string
 	AccessibleProjects []string // project allow-list for "view all" when project arg is ""
 	// WatcherUserID narrows the set to work items this user watches — the
 	// aihub#143 "Watching" scope. It is a MEMBERSHIP filter, never an access
@@ -1570,12 +1575,26 @@ func buildListWorkItemsWhere(project string, f ListWorkItemsFilter) (joinClause,
 		args = append(args, *f.ReporterDisplay)
 		argIdx++
 	}
-	// OwnerDisplay needs a JOIN to run_attempts. Only inject the join when
-	// the filter is requested so the no-filter path stays at zero extra cost.
-	if f.OwnerDisplay != nil && *f.OwnerDisplay != "" {
+	// OwnerDisplay and ClaimedByUserID both need a JOIN to run_attempts, and
+	// share ONE guard so the join clause is assigned exactly once even when
+	// both filters are requested in the same call — two independent
+	// assignments would still parse but silently double the LEFT JOIN in the
+	// rendered SQL (the aihub#312/315 class). Only inject the join when at
+	// least one of them is requested, so the no-filter path stays at zero
+	// extra cost.
+	if (f.OwnerDisplay != nil && *f.OwnerDisplay != "") || (f.ClaimedByUserID != nil && *f.ClaimedByUserID != "") {
 		joinClause = " LEFT JOIN run_attempts ra ON ra.id = wi.current_attempt_id"
+	}
+	if f.OwnerDisplay != nil && *f.OwnerDisplay != "" {
 		conds = append(conds, fmt.Sprintf("ra.actor_display ILIKE '%%' || $%d || '%%'", argIdx))
 		args = append(args, *f.OwnerDisplay)
+		argIdx++
+	}
+	// ClaimedByUserID is EXACT equality, not ILIKE — it is an id filter, not a
+	// display-name search.
+	if f.ClaimedByUserID != nil && *f.ClaimedByUserID != "" {
+		conds = append(conds, fmt.Sprintf("ra.actor_user_id = $%d", argIdx))
+		args = append(args, *f.ClaimedByUserID)
 		argIdx++
 	}
 	// Slugs as well as ids, because the MCP schema publishes "IDs or slugs" and a

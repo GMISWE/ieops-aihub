@@ -37,6 +37,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GMISWE/ieops-aihub/internal/citest/testname"
 	"github.com/GMISWE/ieops-aihub/internal/domain"
 )
 
@@ -112,6 +113,52 @@ func seedListParamsFixture(t *testing.T, pool *pgxpool.Pool) (project, uid strin
 	}
 	require.Len(t, ids, listParamsFixtureCount, "fixture size must match the documented constant")
 	return project, uid, ids
+}
+
+// seedStepTestReclaim simulates a release+reclaim on an ALREADY-claimed work
+// item: a second run_attempts row for the SAME work item, owned by a
+// DIFFERENT actor, with work_items.current_attempt_id repointed at it.
+//
+// review_fix (mem_dors6nNu) Issue 1: this is the aihub#652 regression fixture
+// for "claimed_by matches the CURRENT/LATEST attempt only". Before this
+// helper existed, mutating buildListWorkItemsWhere's join predicate from
+// `ra.id = wi.current_attempt_id` to `ra.work_item_id = wi.id` — i.e.
+// matching ANY attempt this wi ever had, not just the current one — left the
+// entire internal/domain + internal/mcp + internal/server suite green,
+// because no existing test ever released and reclaimed a work item.
+//
+// Modeled on this package's own seedStepTestAttempt (routes_step_test.go)
+// rather than calling it a second time for the same wiID: run_attempts has a
+// UNIQUE(work_item_id, claim_epoch) constraint (migration
+// 0004_run_attempts.sql), and seedStepTestAttempt always inserts
+// claim_epoch=1, so a second call for the same work item would violate it.
+// The epoch bump here reads the wi's CURRENT epoch and adds one, mirroring
+// fn_claim_work_item's own rule (migration 0004's H9 comment:
+// new_attempt.claim_epoch = wi.current_attempt_epoch + 1) rather than
+// hard-coding 2, so this helper works regardless of how many prior attempts
+// the wi already had. seedStepTestAttempt itself is left untouched — every
+// other caller of it (routes_step_*_test.go and friends) keeps working
+// unchanged.
+func seedStepTestReclaim(t *testing.T, pool *pgxpool.Pool, wiID, newActorUserID string) string {
+	t.Helper()
+	ctx := context.Background()
+	var prevEpoch int64
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT current_attempt_epoch FROM work_items WHERE id=$1`, wiID).Scan(&prevEpoch))
+	newEpoch := prevEpoch + 1
+
+	attemptID := domain.NewID("ra")
+	_, err := pool.Exec(ctx, `
+		INSERT INTO run_attempts (id, work_item_id, status, claim_epoch, idempotency_key,
+			actor_user_id, actor_display, machine_id, session_secret_hash)
+		VALUES ($1, $2, 'running', $3, $4, $5, $5, 'm_test', 'unused_hash')`,
+		attemptID, wiID, newEpoch, "idem_"+attemptID, newActorUserID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE work_items SET status='running', current_attempt_id=$1, current_attempt_epoch=$2 WHERE id=$3`,
+		attemptID, newEpoch, wiID)
+	require.NoError(t, err)
+	return attemptID
 }
 
 // listParamsCount issues one authenticated GET and returns the row count.
@@ -284,6 +331,93 @@ func TestListWorkItemsParams_EndToEnd(t *testing.T) {
 		_, code := listParamsItems(t, pool, base+"&since=last-tuesday", uc)
 		if code != http.StatusBadRequest {
 			t.Errorf("an unparseable since must 400; got %d", code)
+		}
+	})
+
+	// review_fix (mem_dors6nNu) Issue 3 (W3): the two claimed_by subtests below
+	// call seedStepTestAttempt/seedStepTestReclaim, which mutate fixture rows'
+	// work_items.status to 'running' (ids[0], ids[1], ids[2] respectively).
+	// Every subtest ABOVE this comment was written against the ORIGINAL fixture
+	// (e.g. "positive controls discriminate"'s status=wrapped,queued counts,
+	// "ready_only excludes the human-session item"'s status=='queued' assertion,
+	// "dropped params"' listParamsFixtureCount baseline) and would silently
+	// break if a status-mutating subtest ran before them. These two are placed
+	// LAST, after every subtest in this function, specifically so that
+	// invariant holds by construction rather than by accident of source order —
+	// do not insert a new subtest below this point without first checking it
+	// does not depend on ids[0]/ids[1]/ids[2] still being 'queued'.
+	t.Run("claimed_by filters by the CURRENT attempt's claimant", func(t *testing.T) {
+		// aihub#652. None of seedListParamsFixture's rows have ever been
+		// claimed, so this seeds two attempts on two distinct fixture items by
+		// two distinct actors directly, mirroring seedStepTestAttempt's own FK
+		// requirement (run_attempts.actor_user_id references users.id) by
+		// inserting the actor rows first.
+		actorA := "u_" + testname.Sanitize(t.Name()) + "a"
+		actorB := "u_" + testname.Sanitize(t.Name()) + "b"
+		for _, actor := range []string{actorA, actorB} {
+			_, err := pool.Exec(context.Background(),
+				`INSERT INTO users(id,email,display_name) VALUES($1,$1||'@test.local',$1) ON CONFLICT (id) DO NOTHING`, actor)
+			require.NoError(t, err)
+		}
+		seedStepTestAttempt(t, pool, ids[0], actorA)
+		seedStepTestAttempt(t, pool, ids[1], actorB)
+
+		items, code := listParamsItems(t, pool, base+"&claimed_by="+actorA, uc)
+		if code != http.StatusOK {
+			t.Fatalf("claimed_by=%s returned %d, want 200", actorA, code)
+		}
+		if len(items) != 1 || items[0]["id"] != ids[0] {
+			t.Errorf("claimed_by=%s must return exactly [%s], got %v", actorA, ids[0], items)
+		}
+
+		if n := listParamsCount(t, pool, base+"&claimed_by="+actorB, uc); n != 1 {
+			t.Errorf("claimed_by=%s: got n=%d, want 1 (actorB's own claim, not actorA's)", actorB, n)
+		}
+
+		// Same failure mode as the "dropped params" subtest above: a value
+		// that matches no attempt's actor must come back 0, not the whole
+		// fixture, or claimed_by is being silently ignored rather than applied.
+		if n := listParamsCount(t, pool, base+"&claimed_by=u_zzz_no_such_actor", uc); n != 0 {
+			t.Errorf("claimed_by=u_zzz_no_such_actor: got n=%d, want 0", n)
+		}
+	})
+
+	t.Run("claimed_by excludes a superseded claimant after reclaim", func(t *testing.T) {
+		// review_fix (mem_dors6nNu) Issue 1. The subtest above only ever
+		// claims a fixture item ONCE, so it cannot distinguish "matches the
+		// CURRENT attempt" from "matches ANY attempt this wi ever had" --
+		// proven by mutation: swapping buildListWorkItemsWhere's join
+		// predicate from `ra.id = wi.current_attempt_id` to
+		// `ra.work_item_id = wi.id` left every existing test green. This one
+		// actually releases and reclaims a work item: actorOrig claims
+		// ids[2] first, then actorReclaimer reclaims it (seedStepTestReclaim
+		// -- a second run_attempts row, current_attempt_id repointed), the
+		// same shape as a real force_takeover or complete+re-claim cycle.
+		actorOrig := "u_" + testname.Sanitize(t.Name()) + "_orig"
+		actorReclaimer := "u_" + testname.Sanitize(t.Name()) + "_reclaimer"
+		for _, actor := range []string{actorOrig, actorReclaimer} {
+			_, err := pool.Exec(context.Background(),
+				`INSERT INTO users(id,email,display_name) VALUES($1,$1||'@test.local',$1) ON CONFLICT (id) DO NOTHING`, actor)
+			require.NoError(t, err)
+		}
+		seedStepTestAttempt(t, pool, ids[2], actorOrig)
+		seedStepTestReclaim(t, pool, ids[2], actorReclaimer)
+
+		// The superseded claimant must now return NOTHING -- the whole point
+		// of "CURRENT/LATEST attempt", not "any attempt ever".
+		if n := listParamsCount(t, pool, base+"&claimed_by="+actorOrig, uc); n != 0 {
+			t.Errorf("claimed_by=%s (superseded claimant): got n=%d, want 0 -- "+
+				"the original claimant is no longer the CURRENT attempt owner", actorOrig, n)
+		}
+
+		// The reclaimer must see exactly the one item they now hold.
+		items, code := listParamsItems(t, pool, base+"&claimed_by="+actorReclaimer, uc)
+		if code != http.StatusOK {
+			t.Fatalf("claimed_by=%s returned %d, want 200", actorReclaimer, code)
+		}
+		if len(items) != 1 || items[0]["id"] != ids[2] {
+			t.Errorf("claimed_by=%s must return exactly [%s] (the reclaimed item), got %v",
+				actorReclaimer, ids[2], items)
 		}
 	})
 }

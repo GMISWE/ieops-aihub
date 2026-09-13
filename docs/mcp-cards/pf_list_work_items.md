@@ -4,8 +4,12 @@
 {
   "tool": "pf_list_work_items",
   "description_sha256": "4a2154c164801a0713044ec1702711b6535fd0a136fd4e0fd978d7b13809c183",
-  "input_schema_sha256": "7d2ec8c0fba24eeb26e07d1706d57c6ff0e6ce940c50fd419460ef8a0a68dd70",
+  "input_schema_sha256": "7737a24f2e088699bf2a35db5f39bc94205f410c80e108b8a6cf8363c996376e",
   "params": {
+    "claimed_by": {
+      "type": "string",
+      "required": false
+    },
     "cursor": {
       "type": "string",
       "required": false
@@ -110,10 +114,10 @@
 
 ## hop 0-1 — what the caller is told
 
-Twenty-one parameters — the largest published surface in the toolset, and the one
+Twenty-two parameters — the largest published surface in the toolset, and the one
 whose InputSchema carries an explicit byte budget
-(`internal/mcp/tools_list_wi_schema_size_test.go`, 5,400 B) because a schema sits in
-the prefix of every request.
+(`internal/mcp/tools_list_wi_schema_size_test.go`, 5,459 B as of `aihub#652`) because
+a schema sits in the prefix of every request.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -127,6 +131,7 @@ the prefix of every request.
 | `scenario` | string | no | in practice always `coding` |
 | `label` | string | no | filter by label |
 | `user_id` | string | no | **REPORTER only** — not attempt owner, not watchers |
+| `claimed_by` | string | no | attempt-owner half of `user_id`'s gap: exact match on the CURRENT/LATEST attempt's `run_attempts.actor_user_id`, via `wi.current_attempt_id`; watchers still uncovered (`aihub#652`) |
 | `source` | string | no | filter by source |
 | `ready_only` | boolean | no | same PREDICATE as the ready queue, different page |
 | `include_step_state` | boolean | no | attaches `step_state`; ABSENT means "no step state" |
@@ -250,6 +255,20 @@ parameter to have a value probe at all
   the shared reader. The `::timestamptz` cast belongs to the domain, and re-printing a
   parsed timestamp here would be a second conversion upstream of the one that counts.
   <!-- prose-only: because=counterfactual -->
+- `claimed_by` matches the CURRENT/LATEST attempt only — the predicate is
+  `ra.id = wi.current_attempt_id` rather than `ra.work_item_id = wi.id`, a distinction
+  pinned by mutation in `internal/server/routes_wi_list_params_db_test.go`
+  (`TestListWorkItemsParams_EndToEnd`, `"claimed_by excludes a superseded claimant after
+  reclaim"`), which reclaims a fixture item to a second actor and requires the original
+  claimant's count to drop to 0 while the reclaimer's count becomes exactly 1 — the
+  assertion the wrong predicate flips. It is exact equality rather than `ILIKE`, an id
+  filter rather than a display-name search — the `ClaimedByUserID` case in
+  `internal/domain/work_items_list_filters_test.go`
+  (`TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL`) pins the rendered predicate
+  as `ra.actor_user_id = $2`. It shares its `LEFT JOIN run_attempts` with `OwnerDisplay`
+  behind one guard, so setting both filters at once does not double the join:
+  `internal/domain/work_items_list_filters_test.go`
+  (`TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin`).
 
 ## hop 5 — what comes back
 
@@ -332,6 +351,12 @@ SELECTs, the paging one and the vector one, and requires neither to project
   and the two arms the hop-1 paragraph above names — the description
   (`TestListWorkItemsUserIDDescriptionDisclosesReporterOnly`) and the SQL
   (`TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL`) — are what keep the
-  correction and the predicate agreeing. Widening it to cover attempt owner and
-  watchers changes every existing caller's result set and is deliberately not done
-  here.
+  correction and the predicate agreeing. Widening user_id itself to cover attempt
+  owner and watchers would still change every existing caller's result set and is
+  deliberately not done. `aihub#652` (re-checked 2026-09-13) instead added
+  `claimed_by` as a separate, additive parameter for the attempt-owner half —
+  exact match on `run_attempts.actor_user_id` for the CURRENT/LATEST attempt,
+  sharing one JOIN guard with `OwnerDisplay`
+  (`TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin`) so the two
+  filters never double the `LEFT JOIN` when both are set. Watchers remain
+  uncovered by any published filter, a scope decision rather than a defect.

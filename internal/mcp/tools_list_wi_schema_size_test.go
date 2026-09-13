@@ -25,7 +25,28 @@ import "testing"
 // 🔴 If this fails, do not just raise the number. First check whether the new
 // sentence belongs in docs/mcp-tools.md instead, which is not resident and
 // therefore free.
-const listWorkItemsSchemaBudget = 5400
+//
+// aihub#652 added the `claimed_by` param (attempt-claimant filter,
+// complementing the reporter-only `user_id`). Even a same-shape property with
+// an EMPTY description still adds ~48 B of pure JSON structure
+// (`,"claimed_by":{"type":"string",...}`), and this schema had only ~44 B of
+// headroom left at 5400 — a floor no wording choice could clear. Measured
+// 5356 B before this param.
+//
+// The param's FIRST description ("Filter by attempt claimant, exact match.
+// See docs/mcp-tools.md.", 63 B) brought the schema to 5467 B (+111 B ≈
+// +28 tok/request over the 5356 B baseline). A code review (mem_dors6nNu)
+// then flagged that description as non-disclosing — it never said the filter
+// only matches the CURRENT/LATEST attempt, unlike `user_id`'s own disclosure
+// two properties up — so review_fix reworded it to "Filter by CURRENT
+// attempt's claimant only, exact match." (55 B). That is 8 B SHORTER than the
+// original despite disclosing more, landing the schema at 5459 B: +103 B over
+// the 5356 B baseline, net -8 B from the first (non-disclosing) draft.
+//
+// Set to the exact measured 5459 B, no padding — not a round number with
+// slack, so the next addition hits this same gate rather than inheriting
+// borrowed headroom.
+const listWorkItemsSchemaBudget = 5459
 
 func TestListWorkItemsSchemaStaysWithinItsWireBudget(t *testing.T) {
 	got := len(listWorkItemsSchema())

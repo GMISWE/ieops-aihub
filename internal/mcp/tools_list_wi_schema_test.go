@@ -88,15 +88,16 @@ var listWIWireProbes = map[string][]struct {
 	want    string
 	wantErr bool
 }{
-	"project": {{shape: "aihub", want: "aihub"}},
-	"label":   {{shape: "alpha", want: "alpha"}},
-	"user_id": {{shape: "u_abc", want: "u_abc"}},
-	"source":  {{shape: "human", want: "human"}},
-	"since":   {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"cursor":  {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"sort":    {{shape: "closed_at", want: "closed_at"}},
-	"order":   {{shape: "asc", want: "asc"}},
-	"query":   {{shape: "latency", want: "latency"}},
+	"project":    {{shape: "aihub", want: "aihub"}},
+	"label":      {{shape: "alpha", want: "alpha"}},
+	"user_id":    {{shape: "u_abc", want: "u_abc"}},
+	"claimed_by": {{shape: "u_abc", want: "u_abc"}},
+	"source":     {{shape: "human", want: "human"}},
+	"since":      {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"cursor":     {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"sort":       {{shape: "closed_at", want: "closed_at"}},
+	"order":      {{shape: "asc", want: "asc"}},
+	"query":      {{shape: "latency", want: "latency"}},
 	// aihub#277. A slug carries a '#', which url.Values.Encode percent-escapes
 	// on the wire; the probe compares the DECODED value, so "aihub#276" is what
 	// must come back out.

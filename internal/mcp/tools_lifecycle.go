@@ -38,7 +38,7 @@ var (
 	// listWorkItemsStringParams are forwarded verbatim when non-empty.
 	listWorkItemsStringParams = []string{
 		"project", "kind", "wi_type", "priority", "milestone", "scenario",
-		"label", "user_id", "source", "since", "limit", "cursor",
+		"label", "user_id", "claimed_by", "source", "since", "limit", "cursor",
 		"sort", "order", "query",
 		// aihub#277 / aihub#276. Both go through scalarArg (like `limit`), so
 		// a caller sending min_similarity as a JSON number — which is the
@@ -140,7 +140,17 @@ func listWorkItemsSchema() json.RawMessage {
 		// predicate changes every existing caller's result set and is not this wi.
 		// Wire cost 17 B -> 146 B, inside TestListWorkItemsSchemaStaysWithinItsWireBudget.
 		"user_id": prop("string", "Filter by REPORTER only: matches wi.reporter_user_id, i.e. the work items this user filed. Attempt owner and watchers are not covered (aihub#383)."),
-		"source":  prop("string", "Filter by source"),
+		// aihub#652: the attempt-owner half user_id explicitly disclaims above.
+		// Exact match on run_attempts.actor_user_id for the CURRENT/LATEST
+		// attempt (via wi.current_attempt_id) — not a display-name search.
+		//
+		// review_fix (mem_dors6nNu): the description string itself used to read
+		// "Filter by attempt claimant, exact match. See docs/mcp-tools.md.", which
+		// never disclosed the CURRENT-attempt-only narrowing — unlike user_id's
+		// own disclosure just above. "only" below is that disclosure: a superseded
+		// claimant (a prior attempt on a since-reclaimed work item) does not match.
+		"claimed_by": prop("string", "Filter by CURRENT attempt's claimant only, exact match."),
+		"source":     prop("string", "Filter by source"),
 		"ready_only": prop("boolean", "Only return items that are ready to claim: queued, "+
 			"not requiring a human session, and with no unfinished blocking dependency. "+
 			"Same PREDICATE as pf_get_ready_queue's items[] (one shared SQL constant), but "+

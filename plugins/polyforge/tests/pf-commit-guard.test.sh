@@ -229,6 +229,34 @@ block_ck "bare AI trailer in a pr_body" "$(p_pr 'This narrows the guard.
 Assisted-By: AI')"
 
 echo ""
+echo "== aihub#659: a renamed mcp.polyforge server key must still be recognized (closes the"
+echo "   fail-OPEN measured and pinned in MEASURED_2026_09_14_renamed_server_key_fails_open) =="
+# Three differently-shaped renames, all of which must still route to the guard and be
+# scanned/blocked exactly like the canonical "polyforge_pf_commit" shape does.
+block_ck "PREFIX rename (my_polyforge_x)"     '{"tool_name":"my_polyforge_x_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "INFIX rename (x_polyforge_y)"       '{"tool_name":"x_polyforge_y_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "__-bearing rename (pfx__polyforge)" '{"tool_name":"pfx__polyforge_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+pass_ck  "renamed-key clean commit is still allowed" '{"tool_name":"my_polyforge_x_pf_commit","tool_input":{"message":"fix race in reconnect logic"}}'
+# Negative control: without it, "any tool name ending in pf_commit is polyforge's" would
+# trivially pass the three cases above while being wrong — this key never contains the
+# substring "polyforge" at all, so it must stay unrecognized, same as before the fix.
+pass_ck  "genuinely unrelated server key (github) is not misclassified" '{"tool_name":"github_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+
+echo ""
+echo "== aihub#659 review_fix: kept-prefix-plus-suffix renames (MEASURED_2026_09_14_renamed_server_key_fails_open,"
+echo "   round 2 — the elif-vs-post-pass gap the code_review WARN found) =="
+# These three keep the literal polyforge_/polyforge- prefix the first two branches strip,
+# then append more text after it (a very plausible rename: versioning or environment tag).
+# Before this fix the literal-strip branch consumed the prefix, left a non-verb remainder
+# (e.g. "v2_pf_commit"), and the recovery elif never ran because it was mutually exclusive
+# with the strip that had already fired -- so these three measured ALLOW/ALLOW (still
+# fail-OPEN) even after the first round of aihub#659 closed the prefix/infix/__ shapes above.
+block_ck "prefix-kept, suffix-appended (polyforge_v2)"      '{"tool_name":"polyforge_v2_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "prefix-kept, different suffix (polyforge_prod)"   '{"tool_name":"polyforge_prod_pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+block_ck "dash-prefix-kept, suffix-appended (polyforge-mirror)" '{"tool_name":"polyforge-mirror-pf_commit","tool_input":{"message":"Co-Authored-By: Claude"}}'
+pass_ck  "kept-prefix-plus-suffix rename, clean commit is still allowed" '{"tool_name":"polyforge_v2_pf_commit","tool_input":{"message":"fix race in reconnect logic"}}'
+
+echo ""
 echo "== fail-open on bad payload =="
 pass_ck "unparseable payload"      'not json at all'
 
@@ -351,6 +379,16 @@ cases = {
     # subscribes accordingly, so the matcher lives in data here exactly like the other
     # three runtimes rather than being hardcoded in TypeScript where this gate cannot see it.
     "pi-hooks.json": (
+        ["polyforge_pf_" + t for t in ("commit", "pr", "wrap", "ship")] + ["bash"],
+        ["polyforge_pf_get_work_item"],
+    ),
+    # aihub#659: opencode also has no native hooks.json mechanism — its bridge
+    # (opencode/plugin/polyforge-hooks.js) reads THIS file the same way the pi bridge reads
+    # pi-hooks.json, and opencode's own MCP tool-id join (sanitize(serverKey) + "_" +
+    # sanitize(toolName), confirmed via opencode 1.18.30's compiled source — see this file's
+    # own _comment) yields the identical "polyforge_pf_commit" shape pi uses, so the
+    # must/must-not lists mirror pi-hooks.json's exactly.
+    "opencode/opencode-hooks.json": (
         ["polyforge_pf_" + t for t in ("commit", "pr", "wrap", "ship")] + ["bash"],
         ["polyforge_pf_get_work_item"],
     ),

@@ -378,9 +378,26 @@ jobs:
           python3 scripts/pf_docs_contract_check.py \
             --schemas /tmp/pf-tool-schemas.json
 
-      - name: Contract-lint the polyforge plugin
+      # aihub#671. This step used to pass exactly one `--target plugins/`, and
+      # that single missing line was the whole defect: tests/scenarios/ — 62
+      # markdown files that call pf_* tools constantly — had never been scanned
+      # by this script, and had accumulated 63 references to parameters the
+      # schema does not publish, 50 of them a `mode` argument aihub#394 withdrew
+      # from pf_claim_work_item. The scanned tree was clean over the same
+      # period, which is the control: scanned => clean, unscanned => 63 stale.
+      #
+      # There is deliberately NO --target here now. The scan roots moved into
+      # pf_contract_lint.py (REQUIRED_ROOTS), the way pf_docs_contract_check.py
+      # has always owned its own roots, so this invocation has no target line
+      # left to forget. Adding one back can only widen: the script refuses a run
+      # that left a required root unscanned, and its own --self-test replays
+      # this step's old one-target form and requires the refusal, so the hole
+      # cannot be reopened from here either.
+      #
+      # ⚠️ Do not "restore" --target plugins/ to shrink a noisy run. That is the
+      # exact edit this comment exists to stop, and the script will refuse it.
+      - name: Contract-lint the plugin and scenario trees
         run: |
           python3 scripts/pf_contract_lint.py \
             --schemas /tmp/pf-tool-schemas.json \
-            --target plugins/ \
             --baseline scripts/pf_contract_lint_baseline.json

@@ -23,6 +23,13 @@
 # The old exit sat before the baseline stale audit, so a typo'd --target plus a
 # non-empty baseline scanned nothing, checked nothing, and read as green (see
 # empty_scan_error). Re-apply on refresh.
+# aihub#671 modification (2026-09-14): the scan roots this repo's contract is
+# defined over live HERE (REQUIRED_ROOTS) instead of in the CI invocation, and
+# main() refuses a run that did not actually scan one of them (see
+# unscanned_root_errors). aihub#629 had already closed the "--target is
+# MISSPELLED" hole; this closes "--target is not LISTED", which no message
+# inside the script could see. Re-apply on refresh, retargeting REQUIRED_ROOTS
+# to the consuming repo's own trees.
 #
 # Rules
 # -----
@@ -58,13 +65,17 @@
 # ------
 #   <file>:<line> [RULE] description
 # Exit code 1 if any un-baselined violations or stale baseline entries, or when
-# the run cannot vouch at all: unusable schema, unloadable baseline, or zero
-# .md files collected (aihub#629). 0 only when checks actually ran and passed.
+# the run cannot vouch at all: unusable schema, unloadable baseline, zero .md
+# files collected (aihub#629), or a REQUIRED_ROOTS tree the run never scanned
+# (aihub#671). 0 only when checks actually ran and passed.
 #
 # Usage
 # -----
-#   pf_contract_lint.py --schemas <path|url> --target <dir> [--target <dir>...]
+#   pf_contract_lint.py --schemas <path|url> [--target <dir> ...]
 #                        [--baseline <json>] [--self-test]
+#
+# --target defaults to REQUIRED_ROOTS and may only ever WIDEN the scan: a
+# target set that leaves one of those trees unscanned is refused.
 
 
 import argparse
@@ -535,6 +546,243 @@ def empty_scan_error(targets: list, files: list) -> Optional[str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Required scan roots (aihub#671)
+# ---------------------------------------------------------------------------
+#
+# The trees this repo's tool contract is defined over. They live in the SCRIPT,
+# the way pf_docs_contract_check.py's DOCS/SCANNERS roots do, and deliberately
+# not in the workflow's invocation.
+#
+# The hole this closes, measured: the CI step passed exactly one `--target
+# plugins/` and nothing else, so tests/scenarios/ — 62 markdown files that call
+# pf_* tools all day — had never been scanned by this script at all. It held 63
+# references to parameters the schema does not publish, including 50 uses of a
+# `mode` argument aihub#394 withdrew from pf_claim_work_item. The scanned tree
+# was clean over the same period: all 7 `mode=` hits under plugins/ were either
+# a different live parameter (`dedup_mode=`) or the tombstone comment explaining
+# the withdrawal. Scanned => clean, unscanned => 63 stale.
+#
+# empty_scan_error (aihub#629) could not see any of it. It refuses a --target
+# that is MISSPELLED, because os.walk on a missing path silently yields nothing.
+# A target that is simply NOT LISTED produces no missing path and no empty file
+# list — the run scans plugins/, passes honestly, and reports green for a
+# question it was never asked. No message inside the script could observe that,
+# because the script was never told the tree existed.
+#
+# So it is told here, and the check is on the OUTPUT rather than on the flags:
+# unscanned_root_errors looks at the files actually collected, not at argv. That
+# makes it indifferent to HOW a root gets scanned — the default, `--target
+# plugins/ --target tests/scenarios/`, or `--target .` all satisfy it — while
+# leaving no way to scan less. Widening is always allowed; narrowing is refused.
+#
+# 🔴 Removing a tree from this tuple silences the gate for that tree with
+# nothing else going red, which is the original defect wearing a different hat.
+# What stops that is uncovered_pf_markdown() below, NOT the per-root fixtures in
+# run_self_test(): those iterate this tuple, so shortening it shortens them with
+# it. Measured — deleting "tests/scenarios" here left the whole suite green at
+# 38 passing fixtures. A check that takes its subject from the thing being
+# mutated cannot see the mutation.
+REQUIRED_ROOTS = ("plugins", "tests/scenarios")
+
+# Files that DO hold pf_-calling markdown and are deliberately out of scope.
+#
+# 🔴 Keys are FILES, never directory prefixes, and that is the whole design.
+# A prefix entry would make the escape from REQUIRED_ROOTS cost one line —
+# measured: moving "tests/scenarios" out of the tuple and adding "tests" here
+# left the suite green at 41 passing fixtures. Excepting the same tree file by
+# file costs 52 lines, each one a reviewer can see and none of them cheaper than
+# just scanning the tree. It is the baseline loader's own rule, which refuses an
+# entry without file + rule + match precisely so that no single entry can
+# swallow a category.
+#
+# Same doctrine as the baseline in the other direction too: an entry that
+# excepts nothing is deleted (stale_md_exceptions), so this list cannot outlive
+# what it was written for.
+_DOCS_TREE = (
+    "aihub#671: docs/ carries pf_ call fragments whose subject is the DESIGN, "
+    "not the shipped contract — polyforge-v1-design.md alone accounts for 32 of "
+    "the tree's 42 violations and deliberately describes shapes that were never "
+    "built (pf_sync_pull, pf_cut_alpha, the id_or_slug / session_info parameter "
+    "spellings) alongside ones that were. Holding that document to the live "
+    "schema is a decision about its status, not a lint fix, so the files are "
+    "NAMED here rather than left silently unscanned. docs/ is not unwatched "
+    "meanwhile: pf_docs_contract_check.py gates the whole tree on C1-C6."
+)
+
+UNSCANNED_PF_MARKDOWN = {
+    "docs/audits/aihub-380-mcp-contract-audit.md": _DOCS_TREE,
+    "docs/audits/aihub-385-mcp-contract-audit-batch1.md": _DOCS_TREE,
+    "docs/audits/aihub-411-design-decision-table.md": _DOCS_TREE,
+    "docs/design/polyforge-v1-design.md": _DOCS_TREE,
+    "docs/mcp-cards/pf_batch_create_work_items.md": _DOCS_TREE,
+    "docs/mcp-cards/pf_predict_conflicts.md": _DOCS_TREE,
+    "docs/mcp-cards/pf_save_artifact.md": _DOCS_TREE,
+    "docs/mcp-cards/pf_ship.md": _DOCS_TREE,
+    "docs/mcp-cards/pf_wrap.md": _DOCS_TREE,
+    "docs/mcp-tools.md": _DOCS_TREE,
+    "docs/superpowers/archive/2026-08-06-memory-recall-ranking-spec.md": _DOCS_TREE,
+    "docs/using-polyforge.md": _DOCS_TREE,
+}
+
+# scripts/ sits one level under the repo root, so the roots resolve the same way
+# from any working directory rather than only from a run started at the root.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _is_under(path: str, root_abs: str) -> bool:
+    """True when `path` names the root itself or something inside it.
+
+    Both sides are normalised to absolute paths, so `--target plugins/`,
+    `--target ./plugins`, `--target .` and an absolute target all answer alike.
+    """
+    p = os.path.abspath(path)
+    return p == root_abs or p.startswith(root_abs + os.sep)
+
+
+def default_targets() -> list:
+    """The --target set used when the caller names none: every required root."""
+    return [os.path.relpath(os.path.join(REPO_ROOT, r)) for r in REQUIRED_ROOTS]
+
+
+def unscanned_root_errors(files: list) -> list:
+    """Return one refusal line per REQUIRED_ROOTS tree this run did not scan.
+
+    Judged from the collected file list, not from --target, so a root counts as
+    scanned however it was reached. The two ways a root goes unscanned get
+    different messages and the same nonzero exit:
+
+      - the directory is gone (renamed, moved, deleted). Then the requirement
+        itself is stale and the repair is to retarget REQUIRED_ROOTS. Left
+        unguarded this is how a widened gate silently un-widens — the same
+        failure pf_docs_contract_check.py guards each of its roots against.
+      - the directory is there and the run simply did not look at it. That is
+        aihub#671's defect verbatim; the repair is to stop narrowing --target.
+    """
+    errors = []
+    for root in REQUIRED_ROOTS:
+        root_abs = os.path.join(REPO_ROOT, root)
+        if any(_is_under(f, root_abs) for f in files):
+            continue
+        if not os.path.isdir(root_abs):
+            errors.append(
+                f"ERROR: required scan root {root!r} is not a directory under "
+                f"{REPO_ROOT}. Either it was renamed or moved — then retarget "
+                "REQUIRED_ROOTS in the same change, because a root that "
+                "silently stops existing takes its whole tree out of this gate "
+                "— or it was deleted, and the entry goes with it."
+            )
+        else:
+            errors.append(
+                f"ERROR: required scan root {root!r} exists but this run "
+                "scanned no .md file inside it, so the run cannot vouch for it "
+                "— an absent check is not a passing one. --target may WIDEN the "
+                "scan and never narrow it; drop the narrowing --target (the "
+                "default is every required root) or add this one back. This is "
+                "the aihub#671 defect: the CI step passed only --target "
+                "plugins/, so tests/scenarios/ went unscanned and accumulated "
+                "63 references to parameters the schema does not publish."
+            )
+    return errors
+
+
+def pf_calling_markdown(roots: list) -> list:
+    """Repo-relative .md files holding a pf_xxx(...) fragment, outside `roots`.
+
+    "Holds a fragment this linter would have something to say about" is spelled
+    with _TOOL_CALL_RE itself rather than a second recognizer, so the question
+    asked here is exactly the question Rule A answers.
+    """
+    abs_roots = [os.path.join(REPO_ROOT, r) for r in roots]
+    found = []
+    for dirpath, dirnames, fnames in os.walk(REPO_ROOT):
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d != "node_modules"]
+        for fn in sorted(fnames):
+            if not fn.endswith(".md"):
+                continue
+            path = os.path.join(dirpath, fn)
+            if any(_is_under(path, r) for r in abs_roots):
+                continue
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            if _TOOL_CALL_RE.search(text):
+                found.append(os.path.relpath(path, REPO_ROOT))
+    return sorted(found)
+
+
+def uncovered_pf_markdown() -> list:
+    """Repo-relative .md files that call pf_ tools and nothing here covers.
+
+    This is the membership guard for REQUIRED_ROOTS, and the reason it works
+    where the per-root fixtures do not: its subject is the REPOSITORY, not the
+    tuple. Drop a tree from REQUIRED_ROOTS and its files show up here; add a
+    whole new tree of pf_-calling markdown and it shows up here the day it
+    lands, which is the next version of aihub#671 arriving under a new name.
+
+    Derived, not restated: no second list of "trees that matter" is maintained,
+    the way the workflow's "paths: filter covers every package the plugin links"
+    step derives its answer from `go list -deps` instead of a hand-written set.
+    """
+    outside = pf_calling_markdown(list(REQUIRED_ROOTS))
+    return [p for p in outside if p not in UNSCANNED_PF_MARKDOWN]
+
+
+def stale_md_exceptions() -> list:
+    """Exception entries that except nothing — a stale baseline entry's shape.
+
+    An exemption with nothing behind it is worse than the drift it excused: it
+    reads as a considered decision while covering an empty set, and the day a
+    file lands at that path it starts covering something nobody agreed to.
+
+    Three ways an entry goes dead, all errors: the file is gone; the file no
+    longer calls any pf_ tool (so it was never in scope and the entry is
+    noise); or it has since moved under a REQUIRED_ROOTS tree, where it is
+    scanned anyway and the exception is a lie about what is checked.
+    """
+    stale = []
+    outside = set(pf_calling_markdown(list(REQUIRED_ROOTS)))
+    for rel in UNSCANNED_PF_MARKDOWN:
+        path = os.path.join(REPO_ROOT, rel)
+        if not os.path.isfile(path):
+            stale.append(
+                f"{rel!r}: no such file. Deleted or renamed — delete or "
+                "retarget this entry in the same change."
+            )
+        elif any(_is_under(path, os.path.join(REPO_ROOT, r))
+                 for r in REQUIRED_ROOTS):
+            stale.append(
+                f"{rel!r}: lives under a REQUIRED_ROOTS tree, so it IS scanned. "
+                "The entry claims an exemption it does not have; delete it."
+            )
+        elif rel not in outside:
+            stale.append(
+                f"{rel!r}: holds no pf_xxx(...) fragment, so this lint would "
+                "have had nothing to say about it. Delete the entry."
+            )
+    return stale
+
+
+def exception_reason_errors() -> list:
+    """Every exception must say why, and name the work item that decided it.
+
+    The baseline refuses an entry with no `wi` for the same reason: an
+    exemption whose justification is not written down cannot be re-judged, and
+    'somebody must have had a reason' is how they become permanent.
+    """
+    errors = []
+    for rel, reason in UNSCANNED_PF_MARKDOWN.items():
+        if not reason or not re.search(r"\b\w+#\d+", reason):
+            errors.append(
+                f"{rel!r}: its reason names no work item (expected something "
+                f"like 'aihub#671: ...'), got {reason!r}"
+            )
+    return errors
+
+
 def lint_file(file_path: str, schema: dict) -> list[Violation]:
     """Run both rule sets on a single file."""
     try:
@@ -712,6 +960,28 @@ _SELF_TEST_BASELINE = [
 ]
 
 
+def _probe_missing_root_message() -> bool:
+    """True when a required root that does not exist gets the retarget message.
+
+    The branch cannot be reached from this checkout — every real root is
+    present, which is itself asserted — so it is driven by pointing the
+    requirement at a path that cannot exist and reading the message back. A
+    branch no fixture can enter is a branch nobody has ever seen work.
+    """
+    global REQUIRED_ROOTS
+    saved = REQUIRED_ROOTS
+    try:
+        REQUIRED_ROOTS = ("no/such/tree/pf671",)
+        errors = unscanned_root_errors([])
+    finally:
+        REQUIRED_ROOTS = saved
+    return (
+        len(errors) == 1
+        and "not a directory" in errors[0]
+        and "scanned no .md file" not in errors[0]
+    )
+
+
 def run_self_test():
     """Run built-in fixture tests; exit(1) on failure."""
     import tempfile
@@ -879,6 +1149,166 @@ def run_self_test():
                     f"FAIL {name}: rc={proc.returncode} stderr={proc.stderr!r}"
                 )
 
+        # ── Required-root coverage (aihub#671) ──
+        # Unit half: the mechanism. Judged from a synthetic file list so it is
+        # independent of what this checkout happens to contain.
+        root_abs = {r: os.path.join(REPO_ROOT, r) for r in REQUIRED_ROOTS}
+        all_roots_files = [os.path.join(root_abs[r], "x.md") for r in REQUIRED_ROOTS]
+        first, rest = REQUIRED_ROOTS[0], REQUIRED_ROOTS[1:]
+        first_only = [os.path.join(root_abs[first], "deep", "x.md")]
+        coverage_checks = [
+            # Vacuity guard: an empty tuple makes every check below trivially
+            # true and the gate a no-op, so the requirement must have members.
+            ("required_roots_non_empty", len(REQUIRED_ROOTS) > 0),
+            # Each named root must be real in THIS checkout, or the requirement
+            # is unsatisfiable and every run is refused for the wrong reason.
+            ("required_roots_all_exist",
+             all(os.path.isdir(p) for p in root_abs.values())),
+            # A run that scanned nothing is missing every root, by name.
+            ("coverage_empty_run_names_every_root",
+             len(unscanned_root_errors([])) == len(REQUIRED_ROOTS)
+             and all(any(repr(r) in e for e in unscanned_root_errors([]))
+                     for r in REQUIRED_ROOTS)),
+            # Full coverage is silent — the green control between the two red
+            # arms, without which "always refuses" and "works" look identical.
+            ("coverage_full_run_is_silent",
+             unscanned_root_errors(all_roots_files) == []),
+            # Partial coverage names the missing roots and ONLY those.
+            ("coverage_partial_run_names_the_gap",
+             len(unscanned_root_errors(first_only)) == len(rest)
+             and not any(repr(first) in e
+                         for e in unscanned_root_errors(first_only))),
+            # Paths are normalised, not string-matched: collect_md_files emits
+            # a path built from whatever --target was spelled, so a repo-
+            # relative hit must count the same as an absolute one. Without this
+            # the check would pass only for the spelling CI happens to use.
+            ("coverage_normalises_relative_paths",
+             unscanned_root_errors(
+                 [os.path.relpath(f) for f in all_roots_files]) == []),
+            # A root that stopped existing gets the retarget message, not the
+            # narrowing one: "the tree moved" and "the run looked away" have
+            # different repairs, and collapsing them routes the reader wrong.
+            # Driven by pointing the requirement at a path that cannot exist.
+            ("coverage_missing_dir_gets_its_own_message",
+             _probe_missing_root_message()),
+        ]
+        for name, ok in coverage_checks:
+            if ok:
+                passed += 1
+            else:
+                failures.append(f"FAIL {name}: REQUIRED_ROOTS={REQUIRED_ROOTS!r}")
+
+        # ── Membership, derived from the repo (aihub#671) ──
+        # Everything above takes REQUIRED_ROOTS as given and only proves the
+        # mechanism works for whatever is in it. That is not enough on its own:
+        # measured, deleting "tests/scenarios" from the tuple left every check
+        # above green, because they all iterate it. This one asks the repository
+        # instead — which markdown actually calls pf_ tools — so shortening the
+        # tuple surfaces 52 files here and goes red.
+        uncovered = uncovered_pf_markdown()
+        if not uncovered:
+            passed += 1
+        else:
+            failures.append(
+                "FAIL required_roots_cover_every_pf_calling_file: "
+                f"{len(uncovered)} markdown file(s) call pf_ tools and are in "
+                "neither REQUIRED_ROOTS nor UNSCANNED_PF_MARKDOWN, so nothing "
+                "checks them against the schema — the aihub#671 defect, one "
+                f"tree over: {uncovered[:8]}"
+            )
+        for label, errs in (("unscanned_pf_markdown_all_live",
+                             stale_md_exceptions()),
+                            ("unscanned_pf_markdown_all_justified",
+                             exception_reason_errors())):
+            if not errs:
+                passed += 1
+            else:
+                failures.append(f"FAIL {label}: " + "; ".join(errs))
+        # The guard must be capable of firing, or its silence means nothing:
+        # take a real required root away and the files under it must appear.
+        witness = [p for p in pf_calling_markdown(list(REQUIRED_ROOTS)[1:])
+                   if p not in UNSCANNED_PF_MARKDOWN]
+        if witness:
+            passed += 1
+        else:
+            failures.append(
+                "FAIL membership_guard_can_fire: dropping "
+                f"{REQUIRED_ROOTS[0]!r} from the covered set surfaced no "
+                "pf_-calling markdown, so the guard above is vacuous and would "
+                "stay silent however REQUIRED_ROOTS is edited"
+            )
+
+        # E2E half: replay the exact pre-aihub#671 CI invocation (one --target)
+        # against each required root in turn, through a real process, and
+        # require the refusal to name the roots it left out. This proves the
+        # refusal reaches the EXIT and the message, not just the helper.
+        #
+        # ⚠️ It does NOT pin membership, and an earlier revision of this comment
+        # claimed it did. Measured: the loop iterates REQUIRED_ROOTS, so
+        # deleting a root deletes its arm and the suite stays green at 38
+        # fixtures. uncovered_pf_markdown above is what pins membership,
+        # because its subject is the repository rather than the tuple.
+        #
+        # Run from REPO_ROOT so the repo-relative targets resolve regardless of
+        # where --self-test was invoked. Exit code alone cannot discriminate
+        # here (the minimal schema makes the real corpus produce violations
+        # either way), so these assert on the MESSAGE.
+        for scanned in REQUIRED_ROOTS:
+            narrow = subprocess.run(
+                [sys.executable, os.path.abspath(__file__),
+                 "--schemas", schema_path, "--target", scanned],
+                capture_output=True, text=True, cwd=REPO_ROOT,
+            )
+            omitted = [r for r in REQUIRED_ROOTS if r != scanned]
+            arm = [
+                (f"coverage_e2e_{scanned}_only_refused",
+                 narrow.returncode != 0),
+                (f"coverage_e2e_{scanned}_only_names_the_omitted",
+                 all(repr(r) in narrow.stderr for r in omitted)),
+                (f"coverage_e2e_{scanned}_only_does_not_blame_itself",
+                 f"required scan root {scanned!r}" not in narrow.stderr),
+            ]
+            for name, ok in arm:
+                if ok:
+                    passed += 1
+                else:
+                    failures.append(
+                        f"FAIL {name}: rc={narrow.returncode} "
+                        f"stderr={narrow.stderr[:400]!r}"
+                    )
+
+        # Green control for the arms above: the full target set must produce NO
+        # coverage refusal at all. Without this, an unscanned_root_errors that
+        # refuses unconditionally would satisfy every red arm.
+        wide = subprocess.run(
+            [sys.executable, os.path.abspath(__file__),
+             "--schemas", schema_path,
+             *sum([["--target", r] for r in REQUIRED_ROOTS], [])],
+            capture_output=True, text=True, cwd=REPO_ROOT,
+        )
+        if "required scan root" not in wide.stderr:
+            passed += 1
+        else:
+            failures.append(
+                "FAIL coverage_e2e_full_target_set_not_refused: covering every "
+                f"required root still produced a coverage refusal: "
+                f"{wide.stderr[:400]!r}"
+            )
+
+        # Same control for the default: omitting --target entirely must scan
+        # every required root, which is what lets the CI step name none.
+        default_run = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--schemas", schema_path],
+            capture_output=True, text=True, cwd=REPO_ROOT,
+        )
+        if "required scan root" not in default_run.stderr:
+            passed += 1
+        else:
+            failures.append(
+                "FAIL coverage_e2e_default_targets_cover_every_root: a run with "
+                f"no --target was refused: {default_run.stderr[:400]!r}"
+            )
+
     if failures:
         print(f"self-test: {len(failures)} failure(s):")
         for f in failures:
@@ -899,7 +1329,9 @@ def main():
     parser.add_argument("--schemas", help="Path or URL to pf-tool-schemas.json")
     parser.add_argument(
         "--target", action="append", dest="targets",
-        help="Directory or file to lint (repeatable)",
+        help="Directory or file to lint (repeatable). Defaults to every "
+             "REQUIRED_ROOTS tree. May only widen that set: a run that leaves "
+             "a required root unscanned is refused (aihub#671).",
     )
     parser.add_argument("--baseline", help="Path to baseline JSON file")
     parser.add_argument(
@@ -914,8 +1346,9 @@ def main():
 
     if not args.schemas:
         parser.error("--schemas is required (unless --self-test)")
-    if not args.targets:
-        parser.error("--target is required (unless --self-test)")
+    # --target is optional since aihub#671: omitting it scans every required
+    # root, so the CI invocation has no target line left to forget.
+    targets = args.targets or default_targets()
 
     # Load schema.
     try:
@@ -949,10 +1382,22 @@ def main():
     # Collect files. Zero files is a refusal, not a pass (aihub#629): the old
     # sys.exit(0) here sat BEFORE the baseline stale audit, so a run that
     # scanned nothing could never turn red no matter what the baseline held.
-    files = collect_md_files(args.targets)
-    refusal = empty_scan_error(args.targets, files)
+    files = collect_md_files(targets)
+    refusal = empty_scan_error(targets, files)
     if refusal:
         print(refusal, file=sys.stderr)
+        sys.exit(1)
+
+    # Zero files is not the only way a run can vouch for nothing. A run that
+    # collected plenty of files while never looking at one of the trees the
+    # contract is defined over is just as blind, and until aihub#671 it read as
+    # a clean pass. Checked after the empty-scan refusal so a mistyped target
+    # keeps its own "fix the path" message rather than being reported as a
+    # narrowing.
+    root_refusals = unscanned_root_errors(files)
+    if root_refusals:
+        for line in root_refusals:
+            print(line, file=sys.stderr)
         sys.exit(1)
 
     all_violations = []

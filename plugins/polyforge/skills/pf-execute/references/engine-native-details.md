@@ -397,6 +397,44 @@ this file and the loop above is pseudocode it executes by hand. The `workflow_id
   than assume ambient context will be there, because for A it will be present twice and for B/C
   it is the only copy.
 
+**S3 (aihub#675) - the one asymmetry that was NOT licensed, and is now closed.** Both loops open
+`steps[0]` themselves; `bracket-plan` does not make that call. Until aihub#675 they made it
+WITHOUT `step_attempt_id`, while A (`internal/drain/runner.go`) passed one - a difference in
+*execution logic*, which is exactly what `workflow_identity_constraint` forbids, and the forbidden
+direction (A carrying a field B/C lacks). `internal/mcp/tools_step.go` calls the parameter
+"Optional on `in_progress`", so the server accepted it and nothing went red.
+
+What that cost, MEASURED on a real Postgres (pgvector pg18, migrations 0001-0041) rather than
+reasoned about: the server stores `current_step_attempt = NULL`, so if the attempt is later
+**paused during that first step**, `fnForceTerminateStep` files its `wi_step_completions` row
+under the literal `step_attempt_id = "unknown"`. `idx_wsc_attempt` (migration 0005) is a **global**
+UNIQUE index and the insert is `ON CONFLICT (step_attempt_id) DO NOTHING` - so the FIRST such row
+in the whole database lands and **every later one is silently discarded**. Two work items, each
+paused on its first step: 1 history row, 2 `step_failed` events. The timeline looks right and
+`pf_get_step`'s `completed_steps` has lost the step. A control arm with distinct ids filed 2 of 2.
+
+Every B/C attempt's first step was exposed; later steps were not, because they get their id from
+the fused `next_step_attempt_id` that `bracket-plan` threads.
+
+Passing `step_attempt_id` on the opening call is the fix, and **nothing server-side branches on
+`current_step_attempt` being NULL**. Four places read the column: the pause path and
+`FnForceTakeover` hand it straight to `fnForceTerminateStep`, which already handled a non-NULL
+value; `pf_get_step` and `pf_list_work_items(include_step_state)` carry it into their responses
+without examining it. The completion path never compares it - it sets it to NULL unconditionally
+and files its history row from the caller's own `step_attempt_id`.
+
+One visible consequence, stated rather than called neutrality: the response field is tagged
+`omitempty`, so `pf_get_step` for a B/C session now **carries** a `current_step_attempt` it used to
+omit. That is additive, and it is the column doing what its own DDL comment says it is for ("has
+value when in_progress") - but it is a wire-shape change, not the absence of one.
+
+`internal/cli/engine_bc_contract_test.go`'s
+`TestEngineNativeLoopOpensTheFirstStepAsTheEngineDoes` now compares that call's ARGUMENT SET
+against the fields `engine.PlanStepBracket` puts on its own step-opening call, so a document that
+drops the field goes red. It used to assert only that the two substrings `status="in_progress"`
+and `new_ulid()` appeared SOMEWHERE in the file - which both documents satisfied throughout the
+whole period they were wrong.
+
 ## 0h. `polyforge engine <verb>` - what both loops call instead of re-deriving it (aihub#657)
 
 `internal/engine` is the single implementation of the mechanics this file used to spell out as
@@ -407,7 +445,8 @@ MCP call, so `pf_update_step` / `pf_complete_attempt` remain the loop's own call
 reading what the verb printed.
 
 **QUOTE every flag value, on every verb** - `--name='<value>'`, not `--name=<value>`. The rule is
-spelled out under `bracket-plan` below and the reason is identical for all five;
+spelled out under `bracket-plan` below, including what to do when the value itself contains a
+single quote, and the reason is identical for all five;
 `internal/cli/engine_bc_contract_test.go` now reads EVERY documented invocation in this plugin,
 not only the `bracket-plan` blocks, so an unquoted value goes red wherever it is written.
 
@@ -437,6 +476,23 @@ happened when the command returns: it is a plan.
   as two words, the summary silently becomes `pr=x/y#1`, and the step is filed with a truncated
   record. `artifact_summary` is prose and routinely contains spaces, so this is the normal case,
   not an edge one.
+- **A value that itself contains `'` needs one more step (aihub#675).** Single quotes do not nest,
+  so `--artifact-summary='it's done'` is an UNTERMINATED string: the shell answers
+  `Unterminated quoted string` and exits 2, and unlike the unquoted case nothing runs at all.
+  Replace every `'` in the value with the four characters `'\''` BEFORE wrapping it, then wrap as
+  usual. Written as a substitution over the value:
+
+  ```text
+  ' => '\''
+  ```
+
+  so the value `it's done` is passed as `--artifact-summary='it'\''s done'`. An apostrophe in an
+  English `artifact_summary` is ordinary, not exotic - "it's", "doesn't", a possessive. The line
+  in that block is the rule under test, not an illustration of it: the contract test parses it and
+  renders EVERY fixture value through it before running the command under `sh -c`, so a rule that
+  is wrong, or missing, reddens the same fixtures it is supposed to protect. Before aihub#675 that
+  rendering used an escaper defined in the test file, which is why a document that never taught
+  the substitution at all still passed.
 - `--next-step-attempt-id` is a NEW ulid that YOU mint, once, before the call. No verb mints
   ids; `bracket-plan` only threads the one you give it into the right call of the plan, and the
   same value becomes the next iteration's `--step-attempt-id`.
@@ -485,7 +541,8 @@ merely shorter. It gates §0c's invocation the same way.
 # No pf_get_step is needed FOR THE BRACKET (it carries no version token); it is still the
 # authority for prior-step context.
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
+pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress",
+               step_attempt_id=sa_id)   # NOT optional here - omitting it loses a pause (§0g)
 
 for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
     role = `polyforge engine resolve-role --step-id='<step_id>'`.role   # never re-derive

@@ -547,6 +547,78 @@ func TestFusedUpdateStepDetectsAServerThatDroppedNextStep(t *testing.T) {
 	}
 }
 
+// TestNextStepRecoveryCallAlwaysNamesAnAttemptID pins the one thing the recovery text tells the
+// caller to type (aihub#675).
+//
+// checkNextStepHonoured used to append step_attempt_id only when the caller had supplied a
+// next_step_attempt_id — and validateNextStepArgs permits next_step WITHOUT one, so that branch is
+// reachable and handed the agent a `pf_update_step(step_id=…, status="in_progress")` carrying no
+// attempt id: the exact call shape this work item removed from six plugin documents, emitted from
+// inside the repo, at the moment a caller is recovering from an error and least likely to
+// second-guess the instruction. The server then stores current_step_attempt=NULL, and a pause
+// during that step files its history row under a synthesised sentinel rather than an id the caller
+// can join on.
+//
+// Driven through the same HTTP fake as the sibling above, which covers only the supplied-id half.
+//
+// MUTANT (run 2026-09-14): restore the `if nextStepAttemptID != ""` guard around the field  ->  RED
+// on the empty-id arm and GREEN on the supplied-id arm, which is what makes the pair say the field
+// is UNCONDITIONAL rather than merely present.
+func TestNextStepRecoveryCallAlwaysNamesAnAttemptID(t *testing.T) {
+	// droppedNextStep replies exactly as a pre-aihub#290 server does: success, no echo.
+	droppedNextStep := func(t *testing.T, wiID string) *fakeAihub {
+		t.Helper()
+		f := newFakeAihub(t)
+		f.on("/v1/work_items/"+wiID+"/step", func(map[string]any) (int, any) {
+			return http.StatusOK, map[string]any{"status": "completed"}
+		})
+		return f
+	}
+
+	t.Run("with an attempt id, the recovery call reuses it", func(t *testing.T) {
+		const wiID = "wi_recovery_withid"
+		seedStateFile(t, wiID)
+		result, isErr := callTool(t, droppedNextStep(t, wiID), "pf_update_step", map[string]any{
+			"work_item_id": wiID, "step_id": "alpha", "status": "completed",
+			"step_attempt_id": "sa_alpha",
+			"next_step":       "beta", "next_step_attempt_id": "sa_beta",
+		})
+		if !isErr {
+			t.Fatalf("a server that dropped next_step must be reported: %v", result)
+		}
+		raw, _ := result["_raw"].(string)
+		if !strings.Contains(raw, `step_attempt_id="sa_beta"`) {
+			t.Errorf("the recovery call must REUSE the id the caller already minted, so the step it "+
+				"opens is the one the next completing call will name; got %q", raw)
+		}
+	})
+
+	t.Run("with no attempt id, it says to mint one rather than omitting the field", func(t *testing.T) {
+		const wiID = "wi_recovery_noid"
+		seedStateFile(t, wiID)
+		result, isErr := callTool(t, droppedNextStep(t, wiID), "pf_update_step", map[string]any{
+			"work_item_id": wiID, "step_id": "alpha", "status": "completed",
+			"step_attempt_id": "sa_alpha",
+			"next_step":       "beta",
+		})
+		if !isErr {
+			t.Fatalf("a server that dropped next_step must be reported: %v", result)
+		}
+		raw, _ := result["_raw"].(string)
+		if !strings.Contains(raw, "step_attempt_id=") {
+			t.Errorf("the recovery call omits step_attempt_id entirely. That is the aihub#675 defect "+
+				"shape, published by this repo to an agent already recovering from an error: the "+
+				"server stores current_step_attempt=NULL, and a pause during that step files its "+
+				"wi_step_completions row under a synthesised sentinel rather than an id anyone can "+
+				"join on. Name the field and tell the caller to mint a value.\nGot: %s", raw)
+		}
+		if strings.Contains(raw, `step_attempt_id=""`) {
+			t.Errorf("the recovery call passes an EMPTY step_attempt_id, which the server treats "+
+				"exactly like a missing one; got %s", raw)
+		}
+	})
+}
+
 // TestFusedUpdateStepAcceptsAServerThatHonouredNextStep is the control: a server
 // that echoes next_step must not be flagged, or the guard above would make the
 // fused path unusable everywhere.

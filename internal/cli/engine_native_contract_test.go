@@ -803,9 +803,24 @@ func subAgentPromptTemplate(body string) (string, bool) {
 // So the load-bearing assertion has to be one that runs unconditionally, in aihub CI, on the
 // pull request that widens the predicate. That is what this test is: a change detector, and
 // deliberately so. It does not verify the out-of-tree copies are in sync — from here it cannot.
-// It makes widening the predicate impossible to do SILENTLY and hands the author the list of
-// copies to update. ReconcilesAgainstLiveScenarioRepo adds the verification half wherever a
-// checkout happens to be reachable, and says so loudly when it is not.
+// What it does is make any edit to the predicate's body fail this test, and hand the author the
+// list of copies to update. ReconcilesAgainstLiveScenarioRepo adds the verification half
+// wherever a checkout happens to be reachable, and says so loudly when it is not.
+//
+// ⚠️ THE SCOPE OF THAT CLAIM WAS CORRECTED ONCE, so do not re-broaden it. This comment first
+// read "makes widening the predicate impossible to do SILENTLY", which a review measured FALSE:
+// the structured extraction below reads two SHAPES only — a quoted literal inside
+// strings.HasSuffix(stepID, "…"), and the literals inside the `switch stepID` block — and two
+// perfectly ordinary widenings contribute a literal to NEITHER, so they escaped with exit 0:
+//
+//	if strings.HasSuffix(stepID, "_review") || stepID == "arch_audit" {   // a name via ==
+//	const auditSuffix = "_audit"; strings.HasSuffix(stepID, auditSuffix)  // a suffix via a const
+//
+// pinnedReviewPredicateBody was added to close them, and it closes the general case rather than
+// those two instances: it compares the whole normalised body text, so ANY edit to the predicate
+// is red. Two lesser assertions were kept beside it because they fail with an actionable message
+// naming what changed, which a body-text diff does not. If you ever replace the body pin with
+// something cleverer, re-measure the two forms above before claiming coverage.
 //
 // MEASURED BEFORE WRITING IT (copy-based backup of internal/engine/role.go, restored after):
 // with `arch_audit` appended to the exact-name arm, and separately with a second `_audit`
@@ -820,16 +835,26 @@ func subAgentPromptTemplate(body string) (string, bool) {
 // (a Go test runs with its own package directory as the working directory).
 const reviewPredicateSourceRel = "../engine/role.go"
 
-// reviewPredicateCopies names every hand-written re-implementation of engine.IsReviewStep known
-// to live outside this repository, so the failure below can tell an author WHAT TO GO UPDATE
-// rather than merely that something changed. Surveyed 2026-09-14 with
-// `git grep -nE '_is_review|IsReviewStep|_review' -- '.ci/' 'scripts/'` in both repositories:
-// aihub's own scripts/pf_contract_lint.py has none, and polyforge-coding's
+// reviewPredicateCopies names every EXECUTABLE hand-written re-implementation of
+// engine.IsReviewStep known to live outside this repository, so the failure below can tell an
+// author WHAT TO GO UPDATE rather than merely that something changed. Add to this list rather
+// than to a comment: it is what the failure message prints.
+//
+// Surveyed 2026-09-14 with `git grep -nE '_is_review|IsReviewStep|_review' -- '.ci/' 'scripts/'`
+// in both repositories: aihub's own scripts/pf_contract_lint.py has none, and polyforge-coding's
 // .ci/pf_contract_lint_vendored.py — vendored wholesale from GMI-marketplace — has none either.
-// Add to this list rather than to a comment: it is what the failure message prints.
+//
+// "EXECUTABLE" is doing work in that first sentence and is not hedging: polyforge-coding's
+// README also states the predicate in PROSE, and that statement has already drifted once and
+// been corrected (its f7412d3, "correct the Rule H is_review sentence"). Prose cannot widen a
+// role's capability, so it is deliberately out of this list and out of this gate's scope — but
+// it is a second thing to update by hand, so it is recorded here rather than left to be
+// rediscovered.
 var reviewPredicateCopies = []string{
 	"polyforge-coding .ci/pf_contract_lint.py::_is_review_step " +
 		"(Rule H's review-shape-vs-declared-role check), plus its self-test pin if one exists",
+	"polyforge-coding README.md — PROSE restatement, not executable; update for accuracy, " +
+		"it cannot cause the capability-widening defect itself",
 }
 
 // The pinned decision surface of engine.IsReviewStep: the suffixes it accepts and the exact
@@ -843,17 +868,49 @@ var (
 	}
 )
 
+// pinnedReviewPredicateBody is engine.IsReviewStep's whole body, normalised by normaliseGoBody.
+// It is the assertion that actually bounds the predicate; the two set pins beside it exist for
+// their error messages. See the ⚠️ paragraph above for the two widenings that escaped before
+// this existed.
+//
+// Brittle ON PURPOSE. For a function with hand-written re-implementations in another repository,
+// "you cannot edit this without one deliberate line here" is the correct cost. normaliseGoBody
+// strips line comments and collapses whitespace runs, so the two edits that change the text
+// WITHOUT changing behaviour do not cost anything: adding a comment, and gofmt re-wrapping a
+// long line. Both verified 2026-09-14 to normalise byte-identical to this value.
+const pinnedReviewPredicateBody = `if strings.HasSuffix(stepID, "_review") { return true } ` +
+	`switch stepID { case "review", "code_review", "release_review": return true } return false`
+
 var (
 	// The Go function's body, from its signature to the closing brace in column 0. Inner blocks
 	// are indented, so `\n}` cannot terminate early on one of them.
 	goReviewPredicateRe = regexp.MustCompile(`(?s)func IsReviewStep\(stepID string\) bool \{\n(.*?)\n\}`)
 	goSuffixCallRe      = regexp.MustCompile(`strings\.HasSuffix\(stepID, "([^"]*)"\)`)
-	goCaseArmRe         = regexp.MustCompile(`(?m)^[ \t]*case[ \t]+(.+):[ \t]*$`)
-	stringLiteralRe     = regexp.MustCompile(`"([^"]*)"`)
+
+	// The `switch stepID { … }` block, whose string literals are the exact accepted names.
+	// Scoped to the BLOCK, not to `case` LINES: the first version of this matched
+	// `(?m)^[ \t]*case[ \t]+(.+):[ \t]*$`, and an end-of-line anchor stops matching the moment
+	// gofmt wraps a long arm across two lines or someone appends a trailing `// comment` —
+	// neither of which changes the surface, so the gate went red claiming the predicate had
+	// lost every name. Measured in review, 2026-09-14; both forms are regression fixtures in
+	// ExtractorsAreNotBlind now.
+	goSwitchBlockRe = regexp.MustCompile(`(?s)switch stepID \{(.*?)\n[ \t]*\}`)
+
+	stringLiteralRe = regexp.MustCompile(`"([^"]*)"`)
+	goLineCommentRe = regexp.MustCompile(`//[^\n]*`)
+	whitespaceRunRe = regexp.MustCompile(`\s+`)
 
 	pySuffixCallRe = regexp.MustCompile(`endswith\("([^"]*)"\)`)
 	pyMembershipRe = regexp.MustCompile(`(?s)step_id in \(([^)]*)\)`)
 )
+
+// normaliseGoBody renders a Go function body as one canonical line: line comments stripped,
+// whitespace runs collapsed to a single space, trimmed. Those two normalisations are exactly
+// what stops pinnedReviewPredicateBody from firing on a comment edit or a gofmt re-wrap.
+func normaliseGoBody(body string) string {
+	stripped := goLineCommentRe.ReplaceAllString(body, "")
+	return strings.TrimSpace(whitespaceRunRe.ReplaceAllString(stripped, " "))
+}
 
 // goReviewPredicateSurface extracts the literal decision surface of engine.IsReviewStep out of
 // the Go SOURCE of internal/engine/role.go.
@@ -864,31 +921,44 @@ var (
 // gate exists to catch. ThePinAgreesWithTheRunningPredicate binds the text back to behaviour so
 // that reading the wrong text cannot pass as agreement.
 //
+// It also returns the normalised body, which is what pinnedReviewPredicateBody is compared
+// against. The two sets are a decomposition of that body for messaging purposes and are NOT the
+// bound: they read two shapes, and a widening expressed any other way contributes to neither.
+//
 // ok is false when the function could not be located at all. That must be a FAILURE and never an
 // empty (and therefore trivially agreeing) surface.
-func goReviewPredicateSurface(src string) (suffixes, names map[string]bool, ok bool) {
+func goReviewPredicateSurface(src string) (suffixes, names map[string]bool, body string, ok bool) {
 	m := goReviewPredicateRe.FindStringSubmatch(src)
 	if m == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	suffixes, names = map[string]bool{}, map[string]bool{}
 	for _, s := range goSuffixCallRe.FindAllStringSubmatch(m[1], -1) {
 		suffixes[s[1]] = true
 	}
-	for _, arm := range goCaseArmRe.FindAllStringSubmatch(m[1], -1) {
-		for _, lit := range stringLiteralRe.FindAllStringSubmatch(arm[1], -1) {
+	for _, blk := range goSwitchBlockRe.FindAllStringSubmatch(m[1], -1) {
+		for _, lit := range stringLiteralRe.FindAllStringSubmatch(blk[1], -1) {
 			names[lit[1]] = true
 		}
 	}
-	return suffixes, names, true
+	return suffixes, names, normaliseGoBody(m[1]), true
 }
 
 // pythonDefBody returns the body of a top-level `def <name>(` in Python source: the signature
 // line and every line after it up to the next line that starts in column 0 and is not blank.
 // ok is false when the def is absent, which the caller must not read as "the body is empty".
+//
+// A def at byte 0 is handled explicitly; searching only for "\ndef " would miss it and report a
+// present function as absent. An INDENTED def (a class method) is still not found — the copy is
+// module-level today, and the caller's not-found branch logs loudly rather than passing quietly,
+// so that limitation surfaces as "not reconciled" rather than as agreement.
 func pythonDefBody(src, name string) (body string, ok bool) {
-	idx := strings.Index(src, "\ndef "+name+"(")
-	if idx < 0 {
+	needle := "def " + name + "("
+	idx := strings.Index(src, "\n"+needle)
+	switch {
+	case strings.HasPrefix(src, needle):
+		idx = -1 // the def starts the file; the loop below wants src from byte 0
+	case idx < 0:
 		return "", false
 	}
 	var out []string
@@ -952,7 +1022,7 @@ func TestReviewPredicateSurfaceIsPinnedForOutOfTreeCopies(t *testing.T) {
 			"\tswitch stepID {\n" +
 			"\tcase \"review\", \"code_review\", \"release_review\", \"arch_audit\":\n" +
 			"\t\treturn true\n\t}\n\treturn false\n}\n"
-		sfx, names, ok := goReviewPredicateSurface(goFixture)
+		sfx, names, _, ok := goReviewPredicateSurface(goFixture)
 		if !ok {
 			t.Fatalf("goReviewPredicateSurface could not locate IsReviewStep in its own reference " +
 				"fixture, so every 'the surface matches the pin' check below compares two empty " +
@@ -966,10 +1036,73 @@ func TestReviewPredicateSurfaceIsPinnedForOutOfTreeCopies(t *testing.T) {
 			t.Errorf("goReviewPredicateSurface read names %v from a fixture declaring four — it "+
 				"cannot see a fourth exact name being added", keysOf(names))
 		}
-		if _, _, ok := goReviewPredicateSurface("func SomethingElse() {}\n"); ok {
+		if _, _, _, ok := goReviewPredicateSurface("func SomethingElse() {}\n"); ok {
 			t.Errorf("goReviewPredicateSurface claims success on source that does not define " +
 				"IsReviewStep. A renamed or moved predicate would then read as an empty surface " +
 				"and agree with any pin")
+		}
+
+		// FALSE-RED regression fixtures, both measured in review 2026-09-14 against the first
+		// version of this gate, which matched `case` LINES with an end-of-line anchor. Each of
+		// these leaves the accepted surface completely unchanged, so each MUST extract today's
+		// three names — the old regex extracted zero and the gate went red claiming the
+		// predicate had lost every name.
+		for _, tc := range []struct{ name, caseArm string }{
+			{"trailing comment on the case arm",
+				"\tcase \"review\", \"code_review\", \"release_review\": // the three exact names\n"},
+			{"gofmt-wrapped case arm",
+				"\tcase \"review\", \"code_review\",\n\t\t\"release_review\":\n"},
+		} {
+			src := "func IsReviewStep(stepID string) bool {\n" +
+				"\tif strings.HasSuffix(stepID, \"_review\") {\n\t\treturn true\n\t}\n" +
+				"\tswitch stepID {\n" + tc.caseArm +
+				"\t\treturn true\n\t}\n\treturn false\n}\n"
+			gotSfx, gotNames, gotBody, gotOK := goReviewPredicateSurface(src)
+			if !gotOK || len(gotNames) != 3 || !gotNames["release_review"] || len(gotSfx) != 1 {
+				t.Errorf("%s: extracted suffixes %v / names %v, want the unchanged surface "+
+					"[_review] / [code_review release_review review]. This shape changes no "+
+					"behaviour, so reporting a different surface for it is a FALSE RED.",
+					tc.name, keysOf(gotSfx), keysOf(gotNames))
+			}
+			// ...and the body pin must be indifferent to both, or the same innocent edit that
+			// no longer trips the set pins would trip the body pin instead.
+			if gotBody != pinnedReviewPredicateBody {
+				t.Errorf("%s: normalised body %q != pinnedReviewPredicateBody %q. Comment "+
+					"stripping and whitespace collapsing exist precisely so this shape costs "+
+					"nothing.", tc.name, gotBody, pinnedReviewPredicateBody)
+			}
+		}
+
+		// The two widenings that escaped the set pins entirely (review, 2026-09-14). Neither
+		// contributes a literal to a HasSuffix call or to the switch block, so the sets alone
+		// stay equal to the pin — which is the whole reason pinnedReviewPredicateBody exists.
+		// Assert on the BODY here: these must be detectable, and the body is what detects them.
+		for _, tc := range []struct{ name, src string }{
+			{"exact name smuggled in as an == comparison",
+				"func IsReviewStep(stepID string) bool {\n" +
+					"\tif strings.HasSuffix(stepID, \"_review\") || stepID == \"arch_audit\" {\n" +
+					"\t\treturn true\n\t}\n\tswitch stepID {\n" +
+					"\tcase \"review\", \"code_review\", \"release_review\":\n" +
+					"\t\treturn true\n\t}\n\treturn false\n}\n"},
+			{"second suffix behind a named constant",
+				"func IsReviewStep(stepID string) bool {\n" +
+					"\tif strings.HasSuffix(stepID, \"_review\") {\n\t\treturn true\n\t}\n" +
+					"\tif strings.HasSuffix(stepID, auditSuffix) {\n\t\treturn true\n\t}\n" +
+					"\tswitch stepID {\n" +
+					"\tcase \"review\", \"code_review\", \"release_review\":\n" +
+					"\t\treturn true\n\t}\n\treturn false\n}\n"},
+		} {
+			_, _, gotBody, gotOK := goReviewPredicateSurface(tc.src)
+			if !gotOK {
+				t.Errorf("%s: could not locate the predicate at all", tc.name)
+				continue
+			}
+			if gotBody == pinnedReviewPredicateBody {
+				t.Errorf("%s: normalised body is IDENTICAL to pinnedReviewPredicateBody, so this "+
+					"widening is invisible to every assertion in this test. That is the exact "+
+					"hole the body pin was added to close — re-measure before weakening it.",
+					tc.name)
+			}
 		}
 
 		// The Python fixture is the upstream copy's shape, widened the same two ways. Proving it
@@ -1014,17 +1147,57 @@ func TestReviewPredicateSurfaceIsPinnedForOutOfTreeCopies(t *testing.T) {
 				"moved, the gate must stop covering it loudly rather than go green.",
 				reviewPredicateSourceRel, err)
 		}
-		sfx, names, ok := goReviewPredicateSurface(string(b))
+		sfx, names, body, ok := goReviewPredicateSurface(string(b))
 		if !ok {
 			t.Fatalf("%s no longer defines `func IsReviewStep(stepID string) bool`. Either it was "+
 				"renamed or moved — in which case this pin and every copy in %v needs revisiting "+
 				"— or this extractor's shape assumption broke. Both are red, neither is green.",
 				reviewPredicateSourceRel, reviewPredicateCopies)
 		}
+
+		// ── The bound: the whole body. Checked FIRST, because it is the assertion that actually
+		// holds, and the set comparisons below are its more legible decomposition.
+		if body != pinnedReviewPredicateBody {
+			t.Errorf("engine.IsReviewStep's BODY changed.\n  now:    %q\n  pinned: %q\n\n"+
+				"This pin is brittle deliberately: the predicate has hand-written "+
+				"re-implementations outside this repository and nothing in either tree compares "+
+				"them:\n  %s\n\nIf you changed which step ids are review-shaped, update every "+
+				"copy above and then this pin, in one reviewable change. If the behaviour is "+
+				"identical and only the text moved, update this pin alone and say so in the "+
+				"commit message — but check the surface report below first, because a widening "+
+				"that adds no string literal (an `==` comparison, a suffix behind a constant) "+
+				"looks exactly like a pure refactor to every other assertion here.",
+				body, pinnedReviewPredicateBody, strings.Join(reviewPredicateCopies, "\n  "))
+		}
+
 		if len(sfx) == 0 || len(names) == 0 {
-			t.Fatalf("%s: extracted suffixes %v and names %v from the LIVE predicate. An empty "+
-				"side agrees with a pin it never read; the predicate has both today.",
+			// Deliberately worded as a SHAPE failure, not as "the predicate went empty". The
+			// Python branch below got this distinction from the start; the Go branch did not,
+			// and a review found it pointed the reader at role.go's decision surface when the
+			// real fault was this extractor. Same asymmetry, now closed.
+			t.Fatalf("%s: extracted suffixes %v and names %v from the LIVE predicate, and it has "+
+				"BOTH today. Read that as THIS gate's shape assumption breaking rather than as "+
+				"the predicate going empty: goSuffixCallRe reads `strings.HasSuffix(stepID, "+
+				"\"…\")` and goSwitchBlockRe reads the literals inside `switch stepID { … }`. "+
+				"Teach the extractor the new shape. (The body pin above is the assertion that "+
+				"bounds behaviour; this one only keeps the messages honest.)",
 				reviewPredicateSourceRel, keysOf(sfx), keysOf(names))
+		}
+
+		// Every string literal in the body must be accounted for by one of the two sets. This
+		// is what turns `|| stepID == "arch_audit"` — an exact name smuggled in as a comparison
+		// instead of a case arm — into a NAMED failure rather than leaving it to the body pin's
+		// more generic "the body changed".
+		for _, lit := range stringLiteralRe.FindAllStringSubmatch(body, -1) {
+			if sfx[lit[1]] || names[lit[1]] {
+				continue
+			}
+			t.Errorf("engine.IsReviewStep's body contains the string literal %q, which is "+
+				"neither a suffix this gate read nor an exact name it read. If that literal is "+
+				"a step id the predicate now accepts, it WIDENS the surface while leaving both "+
+				"set pins equal to their pinned values — update %v and this gate's pins. If it "+
+				"is unrelated to the decision, this accounting check needs to learn to skip it.",
+				lit[1], reviewPredicateCopies)
 		}
 
 		for _, c := range []struct {
@@ -1117,20 +1290,44 @@ func TestReviewPredicateSurfaceIsPinnedForOutOfTreeCopies(t *testing.T) {
 				"those apart", dir, lintRel))
 			return
 		}
+		// Distinguish "the copy accepts nothing" from "this gate can no longer read it". Without
+		// this the diff below would report the copy as missing names it plainly has — a true
+		// statement of the extracted sets and a false account of the file, sending the reader to
+		// fix the wrong thing. The realistic trigger is the copy being refactored to hold its
+		// surface in constants (`endswith(_REVIEW_SUFFIXES)`), which is exactly what adding a
+		// pin on that side would tempt someone to do.
+		//
+		// Tested PER SIDE, not with `len(sfx) == 0 && len(names) == 0`. A review found that a
+		// PARTIAL refactor — suffix moved behind a constant, membership still a literal tuple —
+		// leaves names non-empty, slips past an AND, and gets reported as drift. The discriminator
+		// is whether the construct is PRESENT in the body but unreadable: `endswith` appearing
+		// with no literal extracted means the shape changed, whereas `endswith` being absent
+		// altogether is a genuine narrowing and belongs in the drift report below.
+		pyBody, _ := pythonDefBody(string(b), "_is_review_step")
+		for _, c := range []struct {
+			construct, marker string
+			got               map[string]bool
+		}{
+			{"suffix test", "endswith", sfx},
+			{"exact-name membership test", "step_id in", names},
+		} {
+			if len(c.got) > 0 || !strings.Contains(pyBody, c.marker) {
+				continue
+			}
+			t.Errorf("%s/%s defines _is_review_step and its body mentions `%s`, but no literal "+
+				"could be read out of that %s. Treat this as THIS gate's shape assumption "+
+				"breaking, NOT as the copy having narrowed: it reads only the literal forms "+
+				"`endswith(\"…\")` and `step_id in (…)`. Teach pythonReviewPredicateSurface the "+
+				"new shape rather than reading it as drift.",
+				dir, lintRel, c.marker, c.construct)
+			return
+		}
 		if len(sfx) == 0 && len(names) == 0 {
-			// Distinguish "the copy accepts nothing" from "this gate can no longer read it".
-			// Without this the diff below would report the copy as missing all three names,
-			// which is a true statement of the extracted sets and a false account of the file —
-			// and it would send the reader to fix the wrong thing. The realistic trigger is the
-			// copy being refactored to hold its surface in constants
-			// (`endswith(_REVIEW_SUFFIXES)`), which is exactly what adding a pin on that side
-			// would tempt someone to do.
-			t.Errorf("%s/%s defines _is_review_step, but neither a suffix test nor an exact-name "+
-				"membership test could be read out of it. Treat that as THIS gate's shape "+
-				"assumption breaking, not as the copy being empty: it currently reads the "+
-				"literal forms `endswith(\"...\")` and `step_id in (...)`. Teach "+
-				"pythonReviewPredicateSurface the new shape rather than reading this as drift.",
-				dir, lintRel)
+			t.Errorf("%s/%s defines _is_review_step but neither a suffix test nor an exact-name "+
+				"membership test could be read out of it, and its body mentions neither "+
+				"construct. Either the copy no longer decides anything — in which case Rule H "+
+				"treats every review step as ordinary work — or it was rewritten in a shape this "+
+				"gate cannot read. Both are red.", dir, lintRel)
 			return
 		}
 		t.Logf("reconciling engine.IsReviewStep against %s/%s", dir, lintRel)

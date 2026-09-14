@@ -516,7 +516,7 @@ container). The current setup and the retired one are both recorded below.
 | Database | **Cloud SQL** — managed Postgres 18 + pgvector at `10.20.80.3:5432`, `sslmode=require`. This is the "managed Postgres" path from [What you are deploying](#what-you-are-deploying); there is **no `postgres` container** |
 | Compose file | `/root/docker-compose.yml` (project `aihub`), two services: `aihub` and `tei`. The network `aihub-net` is declared **`external: true`** — it predates the file, and letting Compose create or rename it would break the `aihub↔tei` link (`EMBEDDING_BASE_URL=http://tei:80` resolves on that network) |
 | Server | service `aihub` with `container_name: aihub`, `8080:8080`, `restart: unless-stopped`, `env_file: /root/aihub.env` (holds `DATABASE_URL`, the `EMBEDDING_*` vars, `PORT`, `POLYFORGE_UI_COOKIE_SECRET`). The env-file is the only place a generated secret survives a deploy: the container is replaced wholesale, so neither its writable layer nor the image can hold one |
-| Embedding | service `tei` (`ghcr.io/huggingface/text-embeddings-inference:89-1.7.2`) with `container_name: tei`, `8085:80`, GPU via `gpus: all`, model cache bind `/root/hf_cache:/data`, flags `--model-id Qwen/Qwen3-Embedding-0.6B --pooling last-token --max-batch-tokens 32768` — see [The tei service](#the-tei-service--what-the-flags-fix) |
+| Embedding | service `tei` (`ghcr.io/huggingface/text-embeddings-inference:89-1.9.3`) with `container_name: tei`, `8085:80`, GPU via `gpus: all`, model cache bind `/root/hf_cache:/data`, flags `--model-id Qwen/Qwen3-Embedding-0.6B --pooling last-token --max-batch-tokens 32768 --auto-truncate false` — see [The tei service](#the-tei-service--what-the-flags-fix). **Source: the aihub#650 execution record** (`attrs.execution_2026_09_14` steps 2–4, 2026-09-14), not a reading taken for this document — the image tag and the fourth flag are the change that work item made, and the row said `89-1.7.2` with three flags until aihub#677 caught it disagreeing with the two-line-change section sixty lines below. Confirm against the host before relying on it: `docker compose -f /root/docker-compose.yml config` and `curl -s localhost:8085/info` |
 | Image | `us-west1-docker.pkg.dev/devv-404803/public/aihub`, pulled by **git-SHA tag** (not `:latest`). CI tags with the full 40-char commit SHA. A deploy is: edit the `image:` line to the new SHA, `docker compose up -d aihub` |
 | Rollback | the outgoing **image** stays in the local image store, so rolling back is editing the `image:` line back and `docker compose up -d aihub` — no registry pull needed. See [Rollback under Compose](#rollback-under-compose--what-replaced-the-rename-anchor) for why the older stop+rename anchor flow no longer works |
 
@@ -901,9 +901,9 @@ targets, not an SLO:
 
 #### The tei service — what the flags fix
 
-The Compose file gives `tei` two flags the bare-run container never had. One
-changed production behaviour; the other turned out to pin a default — and the
-difference was **measured on cutover day**, which is the part worth reading:
+The Compose file gives `tei` three flags the bare-run container never had. One
+changed production behaviour; the other two pin a default — and the difference
+was **measured** rather than assumed, which is the part worth reading:
 
 - **`--max-batch-tokens 32768`** (aihub#504) — the behavioural fix: measured on
   this host, TEI 1.7.2 ran with `max_input_length=32768` but
@@ -922,11 +922,47 @@ difference was **measured on cutover day**, which is the part worth reading:
   embedded through the old and new containers produced **byte-identical
   vectors** (cosine 1.000000, max componentwise diff 0.0). Production was
   never mean-pooling this model; the flag stays because an explicit config
-  cannot drift with an upstream model-repo edit, but it fixed nothing.
-  aihub#368's remaining live suspect is the missing instruct/query prefix.
+  cannot drift with an upstream model-repo edit, but it fixed nothing. The
+  compressed band in that fingerprint was real and is **gone**: the same page
+  band read `0.0503` mean / `0.0428` median on 2026-09-13 and `0.1382` /
+  `0.1281` after the serving fix below (aihub#650). `~0.04` is the signature of
+  the broken pipeline, not of this model — see the block after the next bullet.
+- **`--auto-truncate false`** (aihub#650) — also pins a default, but a default
+  that *moved*: 1.7.2 shipped `auto_truncate=false`, 1.9.3 flipped it to true.
+  Measured on a local L4, not in production (aihub#658): a 69,254-token input
+  under the new default is silently truncated to 32,768 and answered `200`;
+  with the flag it answers `422`, which is what 1.7.2 did. Nothing reaches that
+  size today (the longest active memory is 8,091 runes), so this changes no
+  behaviour now — it keeps a loud failure from becoming a silent one, which is
+  the aihub#504 defect class.
 
-The rebuild itself happened later on cutover day than the aihub swap, because
-it was blocked by a host-level fault found during the deploy: the NVIDIA
+**What aihub#368's "remaining live suspect" turned out to be** (corrected here
+by aihub#677; the line this replaces named the missing instruct/query prefix,
+in the present tense, and both halves of that are now settled):
+
+- The 15× gap was **serving**, not the prefix. aihub#648 measured production
+  TEI 1.7.2 forwarding `Qwen3ForCausalLM` under **bidirectional** attention,
+  which makes its last-token vector meaningless: cosine between that space and
+  a correct causal reference is **0.139–0.348** on 17/17 identical documents.
+  Forcing the reference bidirectional reproduced production at 0.999978–0.999999.
+- Repairing it repaired recall. aihub#650 swapped to `89-1.9.3` and re-embedded
+  the corpus; the **same 44 frozen queries** (`ce13215`, criterion unchanged)
+  went from `@1/@5/@10 = 0/1/2` to **`20/26/30`** of 42.
+- The prefix was then re-measured **in the repaired space** (aihub#660) and
+  shipped (aihub#669). Its real effect is `+2/+3/+0` at @1/@5/@10 — a
+  re-ranking, not a rescue: the 12-query miss set at @10 is identical with and
+  without it. What it does buy is negative-control separation, which the
+  serving fix alone did not restore: real queries scoring below a garbage hex
+  string went `17/36 → 0/36`.
+
+⇒ Do not quote a pre-2026-09-14 **production** recall number as a property of
+the index: every one of those was measured through the aihub#648 defect. The
+exception is aihub#368's OFFLINE readings (24/30/36 pure-cosine), taken outside
+production — they are what aihub#650's live result was calibrated against, and
+it landed within one hit of them at every N.
+
+The 2026-09-13 rebuild itself happened later on cutover day than the aihub swap,
+because it was blocked by a host-level fault found during the deploy: the NVIDIA
 userland libraries had been upgraded to 580.178.04 while the loaded kernel
 module was still 580.173.02, and the container toolkit refused to create
 **any** GPU-visible container (`Failed to initialize NVML: Driver/library
@@ -998,6 +1034,14 @@ More than one row from that second query means the index currently holds more
 than one vector population. `cmd/aihub-embed-verify` prints the same comparison
 per row, including a warning when `EMBEDDING_SERVING_ID` is unset.
 
+🔴 **Run `aihub-embed-verify` with a SMALL `-sample`.** The flag has no ceiling
+and prints no warning, and a large value is a load generator aimed at the
+embedding service: aihub#368 records `-sample 30` as "the load that took
+production down on 2026-09-01", and aihub#311 notes that aihub#316's 5 s
+per-call cap has since kept that from reaching the whole platform **without**
+making the load safe — its standing instruction is still to run serially, never
+concurrently. The default of `5` is the intended order of magnitude.
+
 **Still prove the pipeline changed rather than assuming it** — embed the same
 probe string through `localhost:8085/embed` before and after: a real pooling or
 attention change moves the vector far (cosine well below 1). On 2026-09-13 that
@@ -1011,15 +1055,39 @@ changes nothing does not need an `EMBEDDING_SERVING_ID` bump; bumping it anyway
 costs one backfill run, which is the cheap side of the trade.
 
 **Embedding backfill** — after a release that adds or changes embeddings, and
-after any embedding-pipeline change (pooling, truncation, prompt). Build
-`cmd/aihub-embed-backfill` for linux/amd64 at the deployed SHA, run it *on the
-host* with the serving container's `DATABASE_URL` and `EMBEDDING_*` vars, but
+after any change to the pipeline that produces **stored-row** vectors: the
+model, the dims, the input budget, `EMBEDDING_SERVING_ID` (pooling, truncation,
+attention direction, backend version). A change to the **query** prefix is NOT
+on that list, and the omission is deliberate rather than an oversight: the model
+ships `prompts.document = ""`, so the aihub#669 prefix is applied to queries and
+to nothing else, and it moves no stored point. `emb_pipeline` records it in a
+second segment (`qry:p=<fingerprint>`) precisely so that it is auditable without
+driving a re-embed — `internal/domain/embed_pipeline.go` states the split and
+`TestBackfillComparesTheDocumentSegmentNotTheWholeStamp` pins it. Running the
+backfill after a query-prefix change is harmless but selects nothing.
+
+Build `cmd/aihub-embed-backfill` for linux/amd64 at the deployed SHA, run it *on
+the host* with the serving container's `DATABASE_URL` and `EMBEDDING_*` vars, but
 **override `EMBEDDING_BASE_URL=http://localhost:8085`**: the value in
 `/root/aihub.env` is the Docker-network name `http://tei:80`, which the host
 cannot resolve, so a host-run backfill otherwise silently embeds nothing. It is
-idempotent — its selection is `emb_vector IS NULL OR emb_model mismatch OR
-embedded_len IS NULL`, over `status='active'` memories of embeddable types and
-over work items of **all** statuses. A full re-embed that must also converge
+idempotent — its selection is five OR'd clauses, not three:
+
+```sql
+emb_vector IS NULL
+OR emb_model    IS DISTINCT FROM $1     -- current model
+OR embedded_len IS NULL                 -- pre-migration-0039 row
+OR emb_pipeline IS NULL                 -- pre-migration-0041 row
+OR split_part(emb_pipeline, '|', 1) IS DISTINCT FROM $2   -- doc segment
+```
+
+The last two are the convergence clauses migration 0041 added, and they are the
+ones the two paragraphs above depend on — without them an
+`EMBEDDING_SERVING_ID` bump selects nothing and the "no manual UPDATE" sequence
+is false. Authority: `memoriesQuery` and `workItemsSelectSQL` in
+`cmd/aihub-embed-backfill/main.go`, which carry the same five clauses as each
+other. The scope is `status='active'` memories of embeddable types and work
+items of **all** statuses. A full re-embed that must also converge
 **archived** memories (the aihub#625 ruling: archived over-limit rows ride
 along the next full re-embed) passes `-include-archived` — the aihub#637 flag
 that widens the memory selection to active+archived while the flag-less

@@ -8,19 +8,48 @@
 // embedded at write time, an id<->vector mismatch from a backfill run, a
 // stale provider swap that never got backfilled, ...).
 //
-// # Why this exists (aihub#311)
+// # Why this exists, and what it is NOT (corrected by aihub#677)
 //
-// aihub#311 reports that querying a memory with a verbatim substring of its
-// own content fails to return that memory — similarities cluster in a narrow,
-// non-discriminating band regardless of query content. The leading untested
-// hypothesis is that stored emb_vector values simply do not correspond to
-// their row's content. The decisive probe is exactly what this command
-// automates: re-embed a known row with the current provider and cosine it
-// against what is stored. That probe needs a reachable embedding endpoint,
-// which is not available from every machine that has DB access (in
-// particular, not from the machine this command was written on — see
-// wi_zAAnriiC's memories) — hence a small standalone command, for whoever
-// holds the embedding-endpoint credential, rather than a test.
+// It was written for aihub#311, on the hypothesis that stored emb_vector values
+// simply did not correspond to their row's content. That hypothesis was
+// examined and retired — aihub#311's own record concludes that no code path can
+// produce a vector out of sync with its row, because every memory edit inserts
+// a NEW row with a fresh embedding. Each symptom it reported has since been
+// accounted for by something else, and by three different things:
+//
+//   - The narrow half — "did not return it FIRST" — was the FUSED SCORE, and
+//     that is the only half aihub#311 fixed: commit 7ad96be made bucketed
+//     cosine the primary sort key, because 0.7*cosine + 0.3*tanh(strength) was
+//     letting a fresher, weaker row overturn a 0.0025 cosine gap. Its own
+//     report is a rank INVERSION on a page the target was already on (highest
+//     cosine in the set at 0.7227, returned #2 behind 0.7202). See
+//     internal/domain/memory_vector.go's ORDER BY.
+//   - The broad half — "does not return it AT ALL" — was ruled an inherent
+//     property of the index, not a bug to fix. aihub#311
+//     attrs.root_cause_found_2026_09_05 names the cause "C2 — ONE dense vector
+//     per row, no chunking, no reranker, no lexical union", verdict "INHERENT
+//     PROPERTY of single-vector dense retrieval — document it and work around
+//     it, do not 'fix' it", and the work item is CANCELLED rather than closed
+//     as fixed. The workaround shipped as aihub#360's lexical section; see
+//     internal/domain/lexical.go.
+//   - "similarities cluster in a narrow, non-discriminating band" was SERVING,
+//     and was not known until much later. aihub#648 measured production TEI
+//     forwarding a causal checkpoint under bidirectional attention, which
+//     compressed the page band about 2.8x; aihub#650 repaired it and the band
+//     went from median 0.0428 to 0.1281.
+//
+// So this command does NOT diagnose aihub#311, and a MISMATCH verdict from it
+// is not aihub#311 reproducing. What it diagnoses is exactly what it measures:
+// a stored vector that is not a vector of its row's current text — a wrong field
+// embedded at write time, an id<->vector mismatch from a backfill run, or a
+// provider/pipeline swap that never got backfilled. That last one is now its
+// most useful job, and it is why the per-row emb_pipeline comparison below
+// exists (aihub#661).
+//
+// It stays a standalone command rather than a test because the probe needs a
+// reachable embedding endpoint, which is not available from every machine that
+// has DB access (in particular, not from the machine this command was written
+// on — see wi_zAAnriiC's memories).
 //
 // Reuses the same EMBEDDING_* config as the server (internal/embedding.FromEnv)
 // and the same DATABASE_URL as cmd/aihub-embed-backfill.
@@ -101,6 +130,27 @@ func truncatedForEmbedding(content, embInput string) bool {
 
 func main() {
 	idFlag := flag.String("id", "", "comma-separated memory id(s) to verify; if empty, sample rows instead")
+	// 🔴 OPERATIONAL, and the reason this comment exists at all (aihub#677):
+	// -sample has no ceiling and prints no warning, while a large value is a load
+	// generator aimed at whatever EMBEDDING_BASE_URL points at — which in the
+	// documented invocation above is production. The work-item records are blunt
+	// about it. aihub#368's body says, verbatim, "绝对不要跑
+	// cmd/aihub-embed-verify -sample 30" — do not run it. aihub#311 repeats the
+	// warning throughout its attrs and is where the English phrasing comes from:
+	// -sample 30 is "the load that took production down on 2026-09-01"
+	// (attrs.root_cause_found_2026_09_05, verbatim).
+	//
+	// The blast radius has since been REDUCED, not removed, and the difference is
+	// the part worth reading. aihub#311's attrs.blockers_cleared_2026_09_01 records
+	// that aihub#316 capped every embedding call at 5s, and says -sample 30 can no
+	// longer take the whole platform down the way it did on 2026-09-01 — while in
+	// the same breath still instructing that it be run SERIALLY, never
+	// concurrently. No record states a mechanism beyond that, so none is claimed
+	// here.
+	//
+	// ⇒ Keep it small. The default of 5 is the intended order of magnitude, not a
+	// starting point to scale up from. No cap is enforced in code, so the bound is
+	// the operator's; that is what this note is for.
 	sample := flag.Int("sample", 5, "number of already-embedded rows to sample when -id is not given")
 	project := flag.String("project", "", "restrict sampling to this project (ignored when -id is set)")
 	flag.Parse()
@@ -231,10 +281,10 @@ func main() {
 			// prefix — a low cosine there is the expected shape of a perfectly
 			// legitimate old row, not evidence of drift, and must not be
 			// reported as a root-cause finding.
-			verdict = fmt.Sprintf("INCONCLUSIVE — cosine is below threshold, but this row's content exceeds the %d-rune embedding budget; a row embedded by the pre-aihub#361 live Remember path carries an UNTRUNCATED vector, so a low cosine here is an expected artifact of comparing prefix-fresh against full-text-stored, not evidence of drift — this result does NOT indicate the aihub#311 root cause and should be disregarded", embInputRunes)
+			verdict = fmt.Sprintf("INCONCLUSIVE — cosine is below threshold, but this row's content exceeds the %d-rune embedding budget; a row embedded by the pre-aihub#361 live Remember path carries an UNTRUNCATED vector, so a low cosine here is an expected artifact of comparing prefix-fresh against full-text-stored, not evidence of drift and should be disregarded", embInputRunes)
 			inconclusive++
 		case cosine < cosineOKThreshold:
-			verdict = "MISMATCH — stored vector does NOT correspond to this row's content (this is the aihub#311 root cause if it reproduces)"
+			verdict = "MISMATCH — stored vector does NOT correspond to this row's content (wrong field embedded at write time, an id<->vector mismatch from a backfill run, or a pipeline swap never backfilled — compare emb_pipeline above. NOT aihub#311, which was ruled an inherent property of the single-vector index, nor aihub#648's band compression, which was serving)"
 			mismatches++
 		}
 		fmt.Printf("  cosine(stored, fresh) = %.6f  -> %s\n\n", cosine, verdict)

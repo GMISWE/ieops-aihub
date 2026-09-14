@@ -5544,6 +5544,40 @@ jobs:
           ! grep -q -- '--- SKIP' owner_visibility.log \
             || { echo "::error::an aihub#668 owner-visibility arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#675: the force-terminate history row for a step opened WITHOUT a
+      # step_attempt_id used to be filed under the bare literal "unknown".
+      # idx_wsc_attempt (migration 0005) is a GLOBAL unique index on
+      # step_attempt_id and the INSERT is ON CONFLICT DO NOTHING, so the first
+      # such row in the whole database landed and every later one — any project,
+      # any work item — was discarded in silence while step_failed still fired
+      # and the request still answered 200. Measured on the pre-change build:
+      # two work items paused during a step whose current_step_attempt was NULL
+      # produced 1 history row and 2 events.
+      #
+      # This step is the arm that observes ROWS, so it needs the Postgres
+      # service. The other half of aihub#675 — the two pf-execute loop documents
+      # that produced the NULL by omitting the field — is gated without a
+      # database by TestEngineNativeLoopOpensTheFirstStepAsTheEngineDoes in
+      # internal/cli, which the "Unit tests" step above already runs.
+      - name: aihub#675 force-terminate step-attempt-id sentinel DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run '^TestForceTerminateSynthesisesAUniqueStepAttemptID$' -count=1 -v 2>&1 | tee force_terminate_sentinel.log
+          for want in 'TestForceTerminateSynthesisesAUniqueStepAttemptID/two_paused_steps_without_an_attempt_id_each_file_their_own_row' \
+                      'TestForceTerminateSynthesisesAUniqueStepAttemptID/the_synthesised_id_says_it_was_synthesised'; do
+            grep -q -- "--- PASS: $want (" force_terminate_sentinel.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#675 DB-wide silent drop of force-terminate history rows is not actually verified against a database"; exit 1; }
+          done
+          for want in 'TestForceTerminateSynthesisesAUniqueStepAttemptID/a_step_that_carried_an_attempt_id_is_still_filed_under_that_id' \
+                      'TestForceTerminateSynthesisesAUniqueStepAttemptID/a_repeat_force_terminate_of_the_same_attempt_id_is_still_idempotent'; do
+            grep -q -- "--- PASS: $want (" force_terminate_sentinel.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without these controls the fix is equally satisfied by a build that discards the caller's OWN step_attempt_id, or by one that bought uniqueness by deleting the ON CONFLICT clause that makes a repeated force-terminate idempotent"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' force_terminate_sentinel.log \
+            || { echo "::error::an aihub#675 sentinel arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

@@ -12,7 +12,7 @@ step_ids:
   - code_review
   - review
   - release_review
-description: 'Clean-context reviewer for review-kind steps of a polyforge work item. Edit/Write/NotebookEdit disallowed by construction; Bash stays for running builds and tests. Dispatched by the pf-execute loop as subagent_type "polyforge:step-reviewer"; not for ad-hoc routing.'
+description: 'Clean-context reviewer for review-kind steps of a polyforge work item. Edit/Write/NotebookEdit disallowed by construction; Bash stays for running builds and tests. Dispatched by the pf-execute loop as the "reviewer"-role step agent; not for ad-hoc routing.'
 prompt: |
   You review one step's work with clean context: you did not write the code under review, and you
   do not trust the author's claims. Verify against the tree, the tests and the diff. The dispatch

@@ -29,7 +29,7 @@ step_ids:
   - prove_unchanged
   - finalize
   - commit_loop
-description: 'Executes one non-review step of a claimed polyforge work item. Dispatched by the pf-execute loop as subagent_type "polyforge:step-executor"; not for ad-hoc routing.'
+description: 'Executes one non-review step of a claimed polyforge work item. Dispatched by the pf-execute loop as the "executor"-role step agent; not for ad-hoc routing.'
 prompt: |
   You execute exactly one step of a polyforge work item. The dispatch prompt carries the step
   instructions and the work item identifiers; the prompt, not this file, says what the step does.

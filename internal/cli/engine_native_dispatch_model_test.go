@@ -207,6 +207,28 @@ var (
 	// Captures the role name and the agent id; the tier/step-id columns are free text.
 	tableRoleRowRe = regexp.MustCompile("\\| `([a-z][a-z0-9_]*)` \\| [^|]*\\| [^|]*\\| `([a-z][a-z0-9:._-]*)` \\|")
 
+	// harnessRowRe builds the matcher for ONE harness's row of §0f's harness table (aihub#670),
+	// e.g.
+	//   | pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |
+	// Group 1 is the agent-id cell (backticked, so a row that lost its formatting does not
+	// match at all rather than matching loosely), group 2 the dispatch-call cell, which is free
+	// text because the "no dispatchable agent" row is prose rather than a call.
+	//
+	// Built per harness instead of as one generic row regex ON PURPOSE: a generic one would be
+	// satisfied by four rows for the SAME harness, which is exactly the copy-paste mistake a
+	// fifth harness would arrive as.
+	harnessRowRe = func(harness string) *regexp.Regexp {
+		return regexp.MustCompile("(?m)^\\|\\s*" + regexp.QuoteMeta(harness) +
+			"\\s*\\|\\s*`([^`]*)`\\s*\\|\\s*(.*?)\\s*\\|\\s*$")
+	}
+
+	// harnessTableRowRe matches ANY row of that table, capturing the harness cell. It exists for
+	// the orphan direction: harnessRowRe can only look for harnesses the Go table already names,
+	// so it can never see a row for a harness that was DELETED from the Go table (or never added
+	// to it). The harness cell is deliberately un-backticked in the document so this cannot also
+	// match the role table above it, whose first cell is `role` in backticks.
+	harnessTableRowRe = regexp.MustCompile("(?m)^\\|\\s*([a-z][a-z0-9]*)\\s*\\|\\s*`[^`]*`\\s*\\|\\s*.*?\\s*\\|\\s*$")
+
 	// retiredPredicateTokens is any restatement of the two-way predicate aihub#664 retired.
 	// Checked against LIVE pseudocode regions only (the resident loop, the §0b template) —
 	// never against prose that explains the retirement, which legitimately names these tokens
@@ -267,6 +289,27 @@ func dispatchAgentRegion(tmpl string) (string, bool) {
 		return "", false
 	}
 	return tmpl[s:p], true
+}
+
+// harnessNameRe matches a harness key as a WORD. Not a bare substring: "pi" occurs inside
+// "pinned" in engine.native.md's startup paragraph, and a strings.Contains check on a
+// two-letter key was measured green against a document that had stopped mentioning pi at all.
+func harnessNameRe(harness string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(harness) + `\b`)
+}
+
+// harnessNamePairedWithID reports whether doc states the harness name and its agent-id form on
+// ONE line. Extracted rather than inlined so the anti-vacuity fixtures can feed it the documents
+// that must NOT satisfy it — a fixture that re-implements the predicate proves only that the
+// fixture agrees with itself, which is the decoration this file rejects elsewhere.
+func harnessNamePairedWithID(doc, harness, wantID string) bool {
+	re := harnessNameRe(harness)
+	for _, ln := range strings.Split(doc, "\n") {
+		if re.MatchString(ln) && strings.Contains(ln, wantID) {
+			return true
+		}
+	}
+	return false
 }
 
 func readAgentDoc(t *testing.T, pluginRoot, rel string) string {
@@ -520,6 +563,157 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		}
 	})
 
+	// ── The harness table (aihub#670) ──────────────────────────────────────────────────────
+	//
+	// WHAT WENT WRONG A FOURTH TIME
+	// ------------------------------
+	// Everything above pins the dispatch as `Agent(subagent_type=ROLE_AGENT[role])` with ids of
+	// the form `polyforge:step-<role>`. All three of those spellings — the tool name, the
+	// argument name and the namespace — are Claude Code's alone, and engine.native.md ships
+	// BYTE-IDENTICAL to pi, codex and opencode: pi's installer copies skills/ with `cp -r`,
+	// .codex-plugin/plugin.json points codex at "./skills/" in place, and opencode's installer
+	// never copies skills at all. Three of the four harnesses have no installer stage that could
+	// rewrite a line, so a gate that pins ONLY the cc shape is not merely incomplete — it
+	// actively certifies a cross-harness contract written in one harness's private API.
+	//
+	// The measured failure is not symmetric, which is why this is a table and not a footnote.
+	// Under pi the tool is `subagent` and BOTH arguments are renamed (`agent`/`task`). Under
+	// opencode the argument IS `subagent_type`, so the row looks right and fails anyway:
+	// `Agent.get("polyforge:step-executor")` throws, and the REQUIRED `description` is missing.
+	// Under codex there is no dispatchable polyforge agent at all.
+	//
+	// So: internal/roles/dispatch.go is the single source of truth (the renderers in that
+	// package take each harness's agent name from it), and the two documents must AGREE with it.
+	// A renamed agent file therefore cannot leave the documented dispatch naming something
+	// nobody ships — which is the failure a markdown-only table would have permitted silently.
+	t.Run("EveryHarnessHasADocumentedDispatchRow", func(t *testing.T) {
+		table := roles.Dispatches()
+		if len(table) < 2 {
+			t.Fatalf("roles.Dispatches() returned %d row(s). This subtest iterates it, so a "+
+				"collapsed table would assert nothing while passing.", len(table))
+		}
+		for _, d := range table {
+			m := harnessRowRe(d.Harness).FindAllStringSubmatch(details, -1)
+			if len(m) != 1 {
+				t.Errorf("%s: §0f's harness table has %d row(s) for harness %q, expected exactly "+
+					"1. internal/roles/dispatch.go declares it, the renderers in that package "+
+					"generate its agent files, and a model running under it reads THIS file to "+
+					"learn how to dispatch them — an absent row leaves it with Claude Code's "+
+					"call and no way to know that is wrong.", dispatchDetailDoc, len(m), d.Harness)
+				continue
+			}
+			wantID := fmt.Sprintf(d.AgentIDFormat, "<role>")
+			if got := m[0][1]; got != wantID {
+				t.Errorf("%s: §0f's %q row names agent id %q, but internal/roles/dispatch.go's "+
+					"AgentIDFormat renders %q. The renderers in that package build the actual "+
+					"file names from the same row, so the documented dispatch is naming an agent "+
+					"nobody generates.", dispatchDetailDoc, d.Harness, got, wantID)
+			}
+			call := m[0][2]
+			if d.Call != "" {
+				if !strings.Contains(call, d.Call) {
+					t.Errorf("%s: §0f's %q row states the dispatch call as %q, but "+
+						"internal/roles/dispatch.go declares %q. These are the literal tokens a "+
+						"model copies; a paraphrase is a different call.",
+						dispatchDetailDoc, d.Harness, call, d.Call)
+				}
+				continue
+			}
+			// An empty Call means "this harness cannot dispatch one of these agents in-session".
+			// The doc must SAY so — a blank cell reads as an oversight, and a model that reads an
+			// oversight falls back to the nearest call it can see, which is cc's.
+			if !strings.Contains(strings.ToLower(call), "none") {
+				t.Errorf("%s: §0f's %q row has no dispatch call and does not say so (cell: %q). "+
+					"internal/roles/dispatch.go records that this harness has no in-session "+
+					"dispatch; the document has to state that outright, or a reader treats the "+
+					"gap as an omission and copies another row.",
+					dispatchDetailDoc, d.Harness, call)
+			}
+		}
+
+		// ...and the ORPHAN direction, which the loop above cannot see. It asks "is every Go row
+		// documented?"; without this, DELETING a row from internal/roles/dispatch.go leaves that
+		// harness's markdown row checked by nothing and free to rot into a lie, while the gate
+		// goes green because there is no longer a Go row asking after it. This is the same
+		// asymmetry TestEngineDispatchIsRootedInTheRoleCatalog closes for roles (a role with no
+		// agent file, an agent file with no role); the harness table needs both halves too.
+		//
+		// Counted by re-finding every row of the table the loop above matched into, keyed on the
+		// first cell, so a row for an unknown harness is caught by the COUNT even though no
+		// per-harness matcher would ever look for it.
+		documented := harnessTableRowRe.FindAllStringSubmatch(details, -1)
+		if len(documented) != len(table) {
+			var names []string
+			for _, row := range documented {
+				names = append(names, row[1])
+			}
+			sort.Strings(names)
+			t.Errorf("%s: §0f's harness table has %d row(s) (%v) but internal/roles/dispatch.go "+
+				"declares %d (%v). A row the Go table does not declare is documentation nothing "+
+				"checks — and a Go row the document dropped is a harness reading somebody else's "+
+				"dispatch.", dispatchDetailDoc, len(documented), names, len(table),
+				roles.DispatchHarnesses())
+		}
+	})
+
+	t.Run("TheResidentLoopSaysWhichHarnessItIsShowing", func(t *testing.T) {
+		// engine.native.md is the RESIDENT payload — the only text a step body is guaranteed to
+		// carry — so the substitution rule has to survive there, not only in the on-demand
+		// reference. It cannot carry the whole table (skill_router_payload_test.go's
+		// pf-execute/native floor sits a few hundred characters under the harness limit), so
+		// what is asserted here is the minimum a non-cc reader needs: that its harness is NAMED,
+		// and that the id spelling it must substitute is stated ON THE SAME LINE as the name.
+		//
+		// WHY LINE-ASSOCIATED, AND WHY A WORD BOUNDARY (this was measured, not reasoned)
+		// ------------------------------------------------------------------------------
+		// The first version of this subtest asked `strings.Contains(engineDoc, d.Harness)`. A
+		// mutant that deleted "(pi)" from the substitution rule — the exact edit someone shaving
+		// the payload budget makes — left it GREEN, because "pi" is a substring of "pinned" in
+		// the startup paragraph. A two-letter harness key cannot be checked as a bare substring.
+		//
+		// The word boundary alone is not enough either: it would be satisfied by the name and
+		// the id sitting in unrelated paragraphs, which tells a reader nothing about which id is
+		// THEIRS. Requiring both on one line is what makes the text answer the only question
+		// being asked: "I am on pi, so which id do I use?"
+		//
+		// DO NOT DELETE THE NAME CHECK AS REDUNDANT. Measured: for pi, codex and opencode it IS
+		// subsumed by the pairing check below (deleting the name also breaks the pair). Its only
+		// independent catch is "cc", which the pairing check skips because cc's ids are
+		// enumerated in the dict rather than given as a format. Disabling the name check and
+		// deleting the words "Off cc" from the document escapes with exit 0 — so this is the one
+		// assertion standing between the resident loop and never saying whose dispatch it shows.
+		for _, d := range roles.Dispatches() {
+			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(d.Harness) + `\b`)
+			if !nameRe.MatchString(engineDoc) {
+				t.Errorf("%s never names the harness %q as a word. A model running under it reads "+
+					"this file, finds only Claude Code's dispatch, and has no signal that the "+
+					"line is not addressed to it — which is exactly the aihub#670 defect.",
+					dispatchEngineDoc, d.Harness)
+				continue
+			}
+			if d.Harness == "cc" {
+				continue // cc's ids are spelled out entry by entry in the ROLE_AGENT dict
+			}
+			wantID := fmt.Sprintf(d.AgentIDFormat, "<role>")
+			if !harnessNamePairedWithID(engineDoc, d.Harness, wantID) {
+				t.Errorf("%s never states harness %q and its agent id form %q on the SAME line. "+
+					"Naming the harness without pairing it to an id is the half-fix: opencode's "+
+					"argument is spelled `subagent_type` exactly as cc's is, so a reader who "+
+					"substitutes only the tool name still passes an id that harness has never "+
+					"heard of.", dispatchEngineDoc, d.Harness, wantID)
+			}
+		}
+	})
+
+	// NOT ASSERTED, and measured rather than assumed: that agentIdPrefix/agentNamePrefix above
+	// still agree with internal/roles/dispatch.go's cc row. A subtest doing exactly that was
+	// written, and then deleted after its own mutant escaped nothing: breaking cc's
+	// AgentIDFormat in dispatch.go goes RED at EveryHarnessHasADocumentedDispatchRow instead,
+	// because §0f's cc row states the old spelling and the two stop matching. Breaking the
+	// consts here instead stops dispatchRoleOfAgentID cutting the documented ids, which
+	// dispatchCatalogRole already fatals on. There is no mutant the extra check catches alone,
+	// so it was decoration, and a decorative assertion is worse than none: it reads as
+	// protection nobody has. Recorded here so the gap is not "found" and re-added.
 	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
 		// Every assertion above is "no defect was found", which a parser that finds nothing
 		// satisfies for free. Each fixture below is one of the mutants this gate exists to reject.
@@ -533,6 +727,39 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		got, dictOK := parseRoleAgentDict(`ROLE_AGENT = {"executor": "polyforge:step-executor", "reviewer": "polyforge:step-reviewer"}`)
 		if !dictOK || got["executor"] != "polyforge:step-executor" || got["reviewer"] != "polyforge:step-reviewer" {
 			t.Errorf("parseRoleAgentDict misparsed a reference two-entry dict: %v, %v", got, dictOK)
+		}
+
+		// aihub#670: the mutant that ESCAPED the first draft of
+		// TheResidentLoopSaysWhichHarnessItIsShowing, kept because the reason it escaped is not
+		// visible from reading the assertion. These fixtures call harnessNamePairedWithID and
+		// harnessNameRe, the SAME functions the live check calls — an earlier version of this
+		// block asserted properties of its own string literals instead, which left it passing
+		// when the live check was weakened from per-line to whole-document, i.e. it was exactly
+		// the decoration this file refuses ten lines further down.
+		accidental := "`<workspace_root>/.repo/<owner>__<repo>/`, SHA pinned into `.pf_meta.json`"
+		if !strings.Contains(accidental, "pi") {
+			t.Error("the accidental-substring fixture no longer contains \"pi\", so it cannot " +
+				"demonstrate why a bare-substring name check was unsafe")
+		}
+		if harnessNameRe("pi").MatchString(accidental) {
+			t.Errorf("harnessNameRe(\"pi\") fires on %q. That is the carrier the escaped mutant "+
+				"rode: if this ever becomes true the name check is satisfiable by prose that "+
+				"says nothing about the pi harness.", accidental)
+		}
+		// Name and id in the same DOCUMENT but on different lines must not satisfy the pairing.
+		// This is the fixture that goes red if the live check is relaxed to whole-document.
+		if harnessNamePairedWithID(
+			"# pi is one of the four harnesses.\n# unrelated\n# the id is `pf-<role>`.",
+			"pi", "pf-<role>") {
+			t.Error("harnessNamePairedWithID accepted a name and an id on DIFFERENT lines — a " +
+				"reader of that text still cannot tell which id is theirs, which is the whole " +
+				"question the rule exists to answer")
+		}
+		// ...and the positive control, so "nothing paired" cannot mean "the matcher is dead".
+		if !harnessNamePairedWithID("# off cc: id `pf-<role>` (pi) / `step-<role>`.",
+			"pi", "pf-<role>") {
+			t.Error("harnessNamePairedWithID rejected a correctly paired line; every pairing " +
+				"assertion above would then pass for the wrong reason")
 		}
 
 		noAgent := "Agent(\n  prompt: \"\"\"\nbody\n\"\"\"\n)"

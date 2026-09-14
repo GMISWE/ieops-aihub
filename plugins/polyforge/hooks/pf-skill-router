@@ -474,6 +474,18 @@ if len(ctx) > MAX_CHARS:
 # proceed and adds the assembled body to context. Dual-shape so one script serves both
 # harnesses: Claude Code reads hookSpecificOutput.additionalContext; Copilot CLI reads the
 # top-level additionalContext (both verified). Each runtime ignores the key it does not use.
+#
+# This script distinguishes harnesses in DELIVERY only -- `ctx` itself is byte-identical for
+# every harness that reaches this line, and (aihub#670) it is now correct for that to be so.
+# It was not before: the body carried Claude Code's private dispatch API
+# (`Agent(subagent_type="polyforge:step-<role>")`) as though it were the cross-harness contract,
+# and this script fanned it out verbatim. The fragments now carry every harness's dispatch row
+# instead (engine.native.md's compact rule, engine-native-details.md's §0f table, both pinned
+# against internal/roles/dispatch.go), so one body for all harnesses is the DESIGN, not an
+# unexamined convenience. If a future fragment needs to differ per harness, note that this hook
+# cannot tell you which one you are on: it sniffs payload SHAPE (tool_input vs Copilot's
+# toolArgs) and pi normalizes to tool_input upstream, while codex and opencode never register
+# this hook at all -- they load the same files through their own skill loaders.
 out = {
     "additionalContext": ctx,
     "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": ctx},

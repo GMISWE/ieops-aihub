@@ -1,6 +1,6 @@
 ---
 name: step-reviewer
-description: Clean-context reviewer for review-kind steps of a polyforge work item. Edit/Write/NotebookEdit disallowed by construction; Bash stays for running builds and tests. Dispatched by the pf-execute loop as subagent_type "polyforge:step-reviewer"; not for ad-hoc routing.
+description: Clean-context reviewer for review-kind steps of a polyforge work item. Edit/Write/NotebookEdit disallowed by construction; Bash stays for running builds and tests. Dispatched by the pf-execute loop as the "reviewer"-role step agent; not for ad-hoc routing.
 model: opus
 disallowedTools: Edit, Write, NotebookEdit
 ---

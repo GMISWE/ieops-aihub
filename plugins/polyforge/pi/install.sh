@@ -78,6 +78,22 @@ place() {
 # for one of them and not the other.
 # The count is an ARGUMENT, not a global read from here: under `set -u` a global would make
 # this function usable only after the line that assigns it, which is 140 lines below.
+# The skills are copied VERBATIM, and that is now correct BY CONSTRUCTION rather than by
+# assumption (aihub#670). It was not before: pf-execute/engine.native.md stated the step
+# dispatch as Claude Code's `Agent(subagent_type="polyforge:step-<role>", prompt=...)`, and this
+# function shipped that line to pi unchanged while printing "no modification needed" -- a claim
+# nothing checked. Under pi the tool is `subagent`, both argument names differ (`agent`/`task`),
+# and the agent this installer generates two steps below is `pf-<role>`, so every coordinate of
+# that line was wrong here.
+#
+# The fix is deliberately NOT a sed in this function. Two of the other three harnesses have no
+# installer stage at all to put one in -- .codex-plugin/plugin.json points codex at "./skills/"
+# in place, and opencode/install.sh never copies skills -- so a transform here would fix one
+# harness of three, in a language no Go test can see, duplicating the role->agent-id mapping
+# internal/roles already owns. Instead the skills now CARRY every harness's row
+# (engine.native.md's compact rule + engine-native-details.md's §0f table, both pinned against
+# internal/roles/dispatch.go by internal/cli/engine_native_dispatch_model_test.go). A verbatim
+# copy is therefore the right thing to do, and the message below is true.
 place_skills() {
   local dst="$1" label="$2" count="$3"
   if [ -d "$dst" ] && [ -n "$(ls -A "$dst" 2>/dev/null)" ]; then
@@ -86,7 +102,7 @@ place_skills() {
   fi
   mkdir -p "$dst"
   cp -r "$PLUGIN_ROOT"/skills/* "$dst/"
-  say "installed $count skills into $label (no modification needed)"
+  say "installed $count skills into $label (harness-neutral by construction; see aihub#670)"
 }
 
 [ -f "$PLUGIN_ROOT/pi-hooks.json" ] || die "not a polyforge plugin checkout: $PLUGIN_ROOT"

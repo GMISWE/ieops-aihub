@@ -28,7 +28,8 @@ func RenderPiAgentFiles(roleList []Role, resolvedModels map[string]string) (map[
 		// render_cc.go's (name, description, model, disallowedTools).
 		var b bytes.Buffer
 		b.WriteString("---\n")
-		fmt.Fprintf(&b, "name: pf-%s\n", r.Name)
+		name := mustAgentName("pi", r.Name)
+		fmt.Fprintf(&b, "name: %s\n", name)
 		fmt.Fprintf(&b, "description: %s\n", r.Description)
 		if model := resolvedModels[r.Name]; model != "" {
 			fmt.Fprintf(&b, "model: %s\n", model)
@@ -39,7 +40,7 @@ func RenderPiAgentFiles(roleList []Role, resolvedModels map[string]string) (map[
 		b.WriteString("---\n\n")
 		b.WriteString(r.Prompt)
 
-		out[fmt.Sprintf("pf-%s.md", r.Name)] = b.String()
+		out[name+".md"] = b.String()
 	}
 	return out, nil
 }

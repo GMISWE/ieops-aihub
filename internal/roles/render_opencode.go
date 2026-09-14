@@ -55,7 +55,7 @@ func RenderOpencodeAgentFiles(roleList []Role, resolvedModels map[string]string)
 		b.WriteString("---\n\n")
 		b.WriteString(r.Prompt)
 
-		out[fmt.Sprintf("step-%s.md", r.Name)] = b.String()
+		out[mustAgentName("opencode", r.Name)+".md"] = b.String()
 	}
 	return out, nil
 }

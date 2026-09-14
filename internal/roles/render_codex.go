@@ -42,7 +42,7 @@ import (
 // auto-discovery mechanism exists in this codex version at all -- see
 // RenderCodexProfiles below for the actually-loadable path).
 func RenderCodexAgentFiles(roleList []Role, resolvedModels map[string]string) (map[string]string, error) {
-	return renderCodexTOML(roleList, resolvedModels, "step-%s.toml")
+	return renderCodexTOML(roleList, resolvedModels, ".toml")
 }
 
 // RenderCodexProfiles renders every role in roleList into a codex CONFIG
@@ -64,14 +64,17 @@ func RenderCodexAgentFiles(roleList []Role, resolvedModels map[string]string) (m
 // `codex exec --strict-config -p <name>` accepts from a profile file;
 // `name` and `description` are never written.
 func RenderCodexProfiles(roleList []Role, resolvedModels map[string]string) (map[string]string, error) {
-	return renderCodexTOML(roleList, resolvedModels, "step-%s.config.toml")
+	return renderCodexTOML(roleList, resolvedModels, ".config.toml")
 }
 
 // renderCodexTOML is the shared body behind RenderCodexAgentFiles and
 // RenderCodexProfiles -- the two differ only in output filename, never in
 // field shape, so both stay identical by construction instead of by
 // discipline.
-func renderCodexTOML(roleList []Role, resolvedModels map[string]string, filenameFormat string) (map[string]string, error) {
+// The agent NAME half of the output filename comes from dispatch.go (one copy for all
+// four harnesses); filenameSuffix is only the extension that distinguishes an agent file
+// from a config profile.
+func renderCodexTOML(roleList []Role, resolvedModels map[string]string, filenameSuffix string) (map[string]string, error) {
 	out := make(map[string]string, len(roleList))
 	for _, r := range roleList {
 		shape, err := CompileCapability(r.Capability.ReadOnly, "codex")
@@ -90,7 +93,7 @@ func renderCodexTOML(roleList []Role, resolvedModels map[string]string, filename
 		}
 		fmt.Fprintf(&b, "developer_instructions = %s\n", tomlTripleQuoted(r.Prompt))
 
-		out[fmt.Sprintf(filenameFormat, r.Name)] = b.String()
+		out[mustAgentName("codex", r.Name)+filenameSuffix] = b.String()
 	}
 	return out, nil
 }

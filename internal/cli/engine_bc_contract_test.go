@@ -348,9 +348,85 @@ func bcParseCommand(block string) (verb string, flags []bcDocFlag, err error) {
 	return verb, flags, nil
 }
 
-// bcShellQuote renders s as a single POSIX shell word.
+// bcShellQuote renders s as a single POSIX shell word. It is TEST PLUMBING, and since aihub#675
+// the ONLY thing rendered through it is the temp path of the freshly built binary — a path no
+// document describes, and one that would break the fixtures for a reason unrelated to the markdown
+// if the document's own rule were wrong. Every value that comes from a DOCUMENTED flag, on either
+// verb this file drives, goes through bcQuoteRule.quote instead; see bcDocumentedQuoteRule for why
+// that difference is the point rather than a detail.
 func bcShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// bcQuoteRule is §0h's own instruction for a flag value that itself contains a single quote,
+// READ OUT OF THE MARKDOWN rather than restated here: replace every `from` in the value with
+// `to`, then wrap the result in single quotes.
+type bcQuoteRule struct{ from, to string }
+
+// quote renders s as a single shell word using the DOCUMENTED rule.
+func (r bcQuoteRule) quote(s string) string {
+	return "'" + strings.ReplaceAll(s, r.from, r.to) + "'"
+}
+
+var (
+	// bcQuoteRuleRe reads the substitution out of §0h's `text` block. `\S+` on both sides is
+	// what makes the line parse at all: neither `'` nor `'\''` contains a space, and a rule
+	// that did could not be typed into a shell word in the first place.
+	bcQuoteRuleRe = regexp.MustCompile(`(?m)^[ \t]*(\S+)[ \t]+=>[ \t]+(\S+)[ \t]*$`)
+
+	// bcQuoteExampleRe reads §0h's worked example: the raw value, and the flag as a reader is
+	// told to type it. It is the cross-check on the substitution above — a rule and an example
+	// that disagree mean the document teaches two different things and a reader may follow
+	// either.
+	bcQuoteExampleRe = regexp.MustCompile("the value `([^`]*)` is passed as `--artifact-summary=([^`]*)`")
+)
+
+// bcDocumentedQuoteRule extracts §0h's single-quote rule and checks it against §0h's own worked
+// example.
+//
+// WHY THIS IS DERIVED AND NOT WRITTEN HERE (aihub#675). Until this function existed, every
+// fixture value was rendered through bcShellQuote — the escaper defined a few lines up, in this
+// file. The fixture "summary carrying a quote, a dollar and a semicolon" therefore passed while
+// §0h said NOTHING about a value containing `'`, because the thing under test was the test's own
+// escaper. A reader following the document literally would have typed
+// `--artifact-summary='it's done'`, which is an unterminated string: `sh` exits 2 and the
+// bracket-plan call never runs, so the step is never filed at all. An apostrophe in an English
+// artifact_summary is ordinary. Rendering through the DOCUMENT's rule is what makes the shipped
+// instruction, rather than this file, the thing the fixtures exercise.
+func bcDocumentedQuoteRule(t *testing.T, doc string) bcQuoteRule {
+	t.Helper()
+	m := bcQuoteRuleRe.FindAllStringSubmatch(doc, -1)
+	if len(m) != 1 {
+		t.Fatalf("§0h must state its single-quote substitution exactly once, as a `<from> => <to>` "+
+			"line; found %d. Without it the fixtures below fall back to nothing, and a document "+
+			"that never teaches a reader how to pass a value containing an apostrophe goes green "+
+			"again (aihub#675).", len(m))
+	}
+	rule := bcQuoteRule{from: m[0][1], to: m[0][2]}
+	if rule.from == rule.to {
+		t.Fatalf("§0h's substitution %q => %q is the identity, so it teaches nothing; a value "+
+			"containing it would still close the quote early", rule.from, rule.to)
+	}
+
+	ex := bcQuoteExampleRe.FindStringSubmatch(doc)
+	if ex == nil {
+		t.Fatal("§0h states a substitution but no worked example of the form " +
+			"\"the value `X` is passed as `--artifact-summary=Y`\". The example is the " +
+			"cross-check: without it a wrong substitution is only detectable by the fixtures " +
+			"failing for a reason nobody can attribute.")
+	}
+	raw, rendered := ex[1], ex[2]
+	if !strings.Contains(raw, rule.from) {
+		t.Errorf("§0h's worked example value %q does not contain %q, so it does not exercise the "+
+			"rule it is an example of", raw, rule.from)
+	}
+	if got := rule.quote(raw); got != rendered {
+		t.Errorf("§0h's substitution and its worked example disagree: applying %q => %q to %q "+
+			"gives %s, but the document tells the reader to type %s. A document with two answers "+
+			"is a document a reader can follow into the wrong one.",
+			rule.from, rule.to, raw, got, rendered)
+	}
+	return rule
 }
 
 // bcRenderCommand builds the command line a B/C loop types for one BracketInput, using ONLY the
@@ -359,8 +435,10 @@ func bcShellQuote(s string) string {
 //
 // An unquoted value flag is emitted verbatim — NOT re-quoted defensively. That is the point: the
 // command line has to be the one a reader would type, so that a doc which stops quoting produces
-// the same split argument here that it would produce in a real session.
-func bcRenderCommand(bin string, flags []bcDocFlag, in engine.BracketInput) string {
+// the same split argument here that it would produce in a real session. For the same reason a
+// QUOTED value is rendered through `rule`, which is §0h's own escaping instruction read out of
+// the markdown (aihub#675), not through this file's bcShellQuote.
+func bcRenderCommand(bin string, rule bcQuoteRule, flags []bcDocFlag, in engine.BracketInput) string {
 	parts := []string{bcShellQuote(bin), "engine", "bracket-plan"}
 	for _, f := range flags {
 		bind, known := bcFlagBinding[f.name]
@@ -377,7 +455,7 @@ func bcRenderCommand(bin string, flags []bcDocFlag, in engine.BracketInput) stri
 		case f.boolean:
 			parts = append(parts, "--"+f.name)
 		case f.quoted:
-			parts = append(parts, "--"+f.name+"="+bcShellQuote(value))
+			parts = append(parts, "--"+f.name+"="+rule.quote(value))
 		default:
 			parts = append(parts, "--"+f.name+"="+value)
 		}
@@ -506,11 +584,11 @@ func bcGoSequence(inputs []engine.BracketInput) []engine.StepCall {
 
 // bcDocumentedSequence is the B/C path: for each step, render the command line §0h documents,
 // run it THROUGH A SHELL, and concatenate what it prints.
-func bcDocumentedSequence(t *testing.T, bin string, flags []bcDocFlag, inputs []engine.BracketInput) []engine.StepCall {
+func bcDocumentedSequence(t *testing.T, bin string, rule bcQuoteRule, flags []bcDocFlag, inputs []engine.BracketInput) []engine.StepCall {
 	t.Helper()
 	out := []engine.StepCall{}
 	for _, in := range inputs {
-		out = append(out, bcRunViaShell(t, bcRenderCommand(bin, flags, in))...)
+		out = append(out, bcRunViaShell(t, bcRenderCommand(bin, rule, flags, in))...)
 	}
 	return out
 }
@@ -686,7 +764,9 @@ func TestEngineBracketPlanDrivesEveryBracketInputField(t *testing.T) {
 // whichever path produced them.
 func TestEngineBCContract(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
-	flags := bcDocumentedFlags(t, readEngineDoc(t, pluginRoot, bcBracketDoc), bcBracketHeading)
+	doc := readEngineDoc(t, pluginRoot, bcBracketDoc)
+	flags := bcDocumentedFlags(t, doc, bcBracketHeading)
+	rule := bcDocumentedQuoteRule(t, doc)
 	bin := bcBuildBinary(t)
 
 	// Branch coverage, accumulated across fixtures and asserted at the end. Agreement on one
@@ -698,7 +778,7 @@ func TestEngineBCContract(t *testing.T) {
 			inputs := bcInputs(seq)
 
 			want := bcGoSequence(inputs)
-			got := bcDocumentedSequence(t, bin, flags, inputs)
+			got := bcDocumentedSequence(t, bin, rule, flags, inputs)
 
 			if !reflect.DeepEqual(want, got) {
 				t.Errorf("the two paths disagree.\nGo  (engine.PlanStepBracket): %s\nB/C (documented "+
@@ -731,6 +811,7 @@ func TestEngineFailPathInvocationIsGated(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
 	doc := readEngineDoc(t, pluginRoot, bcBracketDoc)
 	flags := bcDocumentedFlags(t, doc, bcFailPathHeading)
+	rule := bcDocumentedQuoteRule(t, doc)
 
 	byName := map[string]bcDocFlag{}
 	for _, f := range flags {
@@ -768,7 +849,7 @@ func TestEngineFailPathInvocationIsGated(t *testing.T) {
 	in := engine.BracketInput{
 		StepID: "code_review", StepAttemptID: "sa-A", Status: "failed", ErrorType: "review_fail",
 	}
-	got := bcRunViaShell(t, bcRenderCommand(bin, flags, in))
+	got := bcRunViaShell(t, bcRenderCommand(bin, rule, flags, in))
 	want := engine.PlanStepBracket(in)
 	if !reflect.DeepEqual(want, got) {
 		t.Errorf("§0c's documented command and engine.PlanStepBracket disagree.\nGo:  %s\nB/C: %s",
@@ -828,6 +909,12 @@ func bcRunResolveRoleViaShell(t *testing.T, line string) engineResolveRoleOutput
 func TestEngineResolveRoleBCContract(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
 	bin := bcBuildBinary(t)
+	// aihub#675: §0h's quoting rule is stated "on every verb … the reason is identical for all
+	// five", so resolve-role's fixtures are rendered through the DOCUMENT's rule, exactly as
+	// bracket-plan's are. Rendering them through bcShellQuote instead left this verb's half of the
+	// contract validated by an escaper defined in this file — the same vacuity aihub#675 removed
+	// from bracket-plan, surviving one verb over.
+	quote := bcDocumentedQuoteRule(t, readEngineDoc(t, pluginRoot, bcBracketDoc)).quote
 	catalog, err := roles.LoadRoles()
 	if err != nil {
 		t.Fatalf("roles.LoadRoles: %v", err)
@@ -900,9 +987,9 @@ func TestEngineResolveRoleBCContract(t *testing.T) {
 				t.Fatalf("engine.ResolveRole(%q, declared=%q): %v", fx.stepID, fx.declaredRole, rerr)
 			}
 
-			line := bcShellQuote(bin) + " engine resolve-role --step-id=" + bcShellQuote(fx.stepID)
+			line := bcShellQuote(bin) + " engine resolve-role --step-id=" + quote(fx.stepID)
 			if fx.declaredRole != "" {
-				line += " --declared-role=" + bcShellQuote(fx.declaredRole)
+				line += " --declared-role=" + quote(fx.declaredRole)
 			}
 			got := bcRunResolveRoleViaShell(t, line)
 
@@ -946,7 +1033,7 @@ func TestEngineResolveRoleBCContract(t *testing.T) {
 				"fixture, this is not testing what it claims to", want.Name, want.Capability.ReadOnly)
 		}
 
-		line := bcShellQuote(bin) + " engine resolve-role --step-id=" + bcShellQuote("prepare_context")
+		line := bcShellQuote(bin) + " engine resolve-role --step-id=" + quote("prepare_context")
 		got := bcRunResolveRoleViaShell(t, line)
 		if got.Role != "explorer" {
 			t.Fatalf("B/C (shelled-out binary) resolves prepare_context to role %q, not explorer",
@@ -1008,7 +1095,9 @@ func bcBranchOf(in engine.BracketInput) string {
 // prefix-matching parser turns every one of them into silence rather than an error.
 func TestEngineBCContractDiscriminates(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
-	flags := bcDocumentedFlags(t, readEngineDoc(t, pluginRoot, bcBracketDoc), bcBracketHeading)
+	doc := readEngineDoc(t, pluginRoot, bcBracketDoc)
+	flags := bcDocumentedFlags(t, doc, bcBracketHeading)
+	rule := bcDocumentedQuoteRule(t, doc)
 	bin := bcBuildBinary(t)
 
 	// A two-step fused sequence whose summary contains a space: the one shape on which every
@@ -1024,7 +1113,7 @@ func TestEngineBCContractDiscriminates(t *testing.T) {
 
 	// The shipped doc must AGREE — otherwise the mutants below could all "differ" simply
 	// because the baseline was already broken, and this control would certify nothing.
-	if got := bcDocumentedSequence(t, bin, flags, inputs); !reflect.DeepEqual(want, got) {
+	if got := bcDocumentedSequence(t, bin, rule, flags, inputs); !reflect.DeepEqual(want, got) {
 		t.Fatalf("the shipped §0h flags already disagree with the Go path, so the mutants below "+
 			"prove nothing.\nGo:  %s\nB/C: %s", bcFormat(want), bcFormat(got))
 	}
@@ -1063,7 +1152,7 @@ func TestEngineBCContractDiscriminates(t *testing.T) {
 				t.Fatalf("the mutation changed nothing — it is not exercising the gate. Flags: %v",
 					bcNamesOf(flags))
 			}
-			got := bcDocumentedSequence(t, bin, mutated, inputs)
+			got := bcDocumentedSequence(t, bin, rule, mutated, inputs)
 			if reflect.DeepEqual(want, got) {
 				t.Errorf("the mutated flag set still produced the Go path's sequence, so this "+
 					"contract cannot see the mutation. %s.\nsequence: %s", m.because, bcFormat(got))
@@ -1160,7 +1249,7 @@ func TestEngineBCInvocationParserIsNotBlind(t *testing.T) {
 	})
 
 	t.Run("shell quoting survives a round trip", func(t *testing.T) {
-		// bcShellQuote is what makes the quoted path faithful; if it were wrong, the quoted
+		// bcShellQuote is what makes the BINARY PATH faithful; if it were wrong, the quoted
 		// fixtures would fail for a reason that has nothing to do with the markdown.
 		for _, s := range []string{`plain`, `two words`, `it's`, `$HOME`, `a;b`, `a'b'c`, `*`} {
 			out, err := exec.Command("sh", "-c", "printf %s "+bcShellQuote(s)).Output()
@@ -1172,52 +1261,631 @@ func TestEngineBCInvocationParserIsNotBlind(t *testing.T) {
 			}
 		}
 	})
+
+	// aihub#675: the same round trip for the rule the DOCUMENT states, which is what every
+	// fixture value is now rendered through. This is the assertion the old file could not make,
+	// because until §0h taught the substitution there was no documented rule to round-trip —
+	// the fixtures exercised bcShellQuote above and passed while the instruction a reader
+	// follows would have produced an unterminated string.
+	t.Run("the rule the document states survives the same round trip", func(t *testing.T) {
+		rule := bcDocumentedQuoteRule(t, readEngineDoc(t, pluginRootDir(t), bcBracketDoc))
+		for _, s := range []string{
+			`plain`, `two words`, `it's`, `$HOME`, `a;b`, `a'b'c`, `*`,
+			`'`, `''`, `it's a 'quoted' word`, `pr=GMISWE/aihub#675 base=main; it's done`,
+		} {
+			out, err := exec.Command("sh", "-c", "printf %s "+rule.quote(s)).Output()
+			if err != nil {
+				t.Fatalf("a reader following §0h to pass %q types `printf %%s %s`, and the shell "+
+					"refuses it: %v. The documented rule does not produce a legal shell word.",
+					s, rule.quote(s), err)
+			}
+			if string(out) != s {
+				t.Errorf("§0h's rule renders %q as %s, which the shell delivers as %q. The value "+
+					"the binary receives is not the value the loop meant to send.",
+					s, rule.quote(s), string(out))
+			}
+		}
+	})
 }
 
+// ── aihub#675: the first-step open call, compared by SHAPE ───────────────────────────────────
+
+// bcDocCall is one `pf_update_step(...)` call as a loop document writes it: the argument names in
+// the order they appear, and their literal values.
+type bcDocCall struct {
+	doc    string
+	line   int
+	raw    string
+	names  []string
+	values map[string]string
+}
+
+// bcStepZeroToken is what both pf-execute loops call the first step. It is the ANCHOR the narrow
+// gate locates its subject by: "the pf_update_step call whose arguments mention steps[0]" is a
+// semantic handle, where "the first pf_update_step in the file" is not — engine-native-details.md
+// writes three earlier ones in prose (§0c's `pf_update_step(status="failed")` among them).
+const bcStepZeroToken = "steps[0]"
+
+// bcPositionalArg is the name recorded for an argument written without `name=`. It is recorded
+// rather than dropped: a positional is not an invocation a reader can run (pf_update_step takes
+// named arguments only), and a parser that quietly discarded it would let a call lose a field
+// while still looking well formed. Prose shorthand such as `pf_update_step(failed)` parses to one
+// of these, carries no status, and is therefore selected by no assertion.
+const bcPositionalArg = "<positional>"
+
+// bcScanStepCalls returns every `pf_update_step(...)` call written in one markdown, in order.
+// Anchored on the CALL rather than on a heading or a file list, for the reason aihub#663 gave when
+// it re-anchored the verb scanner: a gate that reads a list somebody maintains stops seeing the
+// document nobody added to the list.
+//
+// The scan is QUOTE-AWARE, and that is a correctness property rather than a nicety. Depth counting
+// alone stops at the first `)` it sees, so one inside a quoted value — `artifact_summary="done :)"`
+// — truncates the argument list, `status` falls out of the parsed call, and the whole call is then
+// skipped by every status-selected assertion. Silently: an unbalanced `(` fails loudly, so the two
+// directions are asymmetric and this is the quiet one. bcParserFixtures pins both.
+func bcScanStepCalls(t *testing.T, rel, body string) []bcDocCall {
+	t.Helper()
+	const marker = "pf_update_step("
+	var out []bcDocCall
+	for i := 0; ; {
+		j := strings.Index(body[i:], marker)
+		if j < 0 {
+			return out
+		}
+		open := i + j + len(marker)
+		depth, closeAt := 1, -1
+		var quote byte
+		for k := open; k < len(body) && closeAt < 0; k++ {
+			c := body[k]
+			if quote != 0 {
+				if c == quote {
+					quote = 0
+				}
+				continue
+			}
+			switch c {
+			case '"', '\'':
+				quote = c
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					closeAt = k
+				}
+			}
+		}
+		if closeAt < 0 {
+			t.Fatalf("%s: a `pf_update_step(` at offset %d never closes its parenthesis; this gate "+
+				"reads the call's argument list, so an unclosed one is unreadable", rel, open)
+		}
+		call := bcDocCall{
+			doc:  rel,
+			line: 1 + strings.Count(body[:open], "\n"),
+			raw:  body[open-len(marker) : closeAt+1],
+		}
+		call.names, call.values = bcParseCallArgs(body[open:closeAt])
+		out = append(out, call)
+		i = closeAt + 1
+	}
+}
+
+// bcFindStepOpenCall returns the one call in body that opens steps[0]. Not finding exactly one is
+// a FAILURE, never a skip: a gate that quietly checks nothing when its subject moves is the shape
+// this whole file exists to remove.
+func bcFindStepOpenCall(t *testing.T, rel, body string) bcDocCall {
+	t.Helper()
+	var found []bcDocCall
+	for _, call := range bcScanStepCalls(t, rel, body) {
+		if strings.Contains(call.raw, bcStepZeroToken) {
+			found = append(found, call)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%s must contain exactly ONE `pf_update_step(...)` call naming %s — the call that "+
+			"opens the first step, which `bracket-plan` does not make — and it has %d. This gate "+
+			"compares that call's shape against the one engine.PlanStepBracket emits, so it cannot "+
+			"run at all without being able to point at its subject.", rel, bcStepZeroToken, len(found))
+	}
+	return found[0]
+}
+
+// bcParseCallArgs splits a documented call's argument list into (names in order, name -> literal
+// value). Commas inside parentheses, brackets or QUOTES do not separate arguments, so
+// `steps[0].id` and `artifact_summary="<one sentence, status only>"` both survive intact — three
+// of the plugin's documented summaries contain a comma, and a quote-blind splitter reports each as
+// a positional argument that is not there.
+//
+// It reports nothing itself. Parsing is not judging: every assertion in this file is made by a
+// test over the parsed result, which is what lets the same parser serve the narrow gate (where a
+// missing `status` is a finding) and the broad one (where it just means this call opens no step).
+func bcParseCallArgs(args string) ([]string, map[string]string) {
+	var parts []string
+	depth, start := 0, 0
+	var quote byte
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, args[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, args[start:])
+
+	names := []string{}
+	values := map[string]string{}
+	for _, raw := range parts {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		eq := strings.Index(p, "=")
+		if eq < 0 {
+			names = append(names, bcPositionalArg)
+			continue
+		}
+		name := strings.TrimSpace(p[:eq])
+		names = append(names, name)
+		values[name] = strings.TrimSpace(p[eq+1:])
+	}
+	return names, values
+}
+
+// bcUnquote strips one layer of matching surrounding quotes, in either spelling.
+//
+// The broad gate SELECTS its population by comparing a call's status against the engine's, so that
+// comparison has to be about the VALUE and not about how a document spells it. Compared literally,
+// `status='in_progress'` and `status=in_progress` are both "not in_progress" — so a document
+// writing either one is dropped from the population and its missing step_attempt_id goes
+// unreported, while the anti-vacuity guard stays quiet because the population is merely short by
+// one rather than empty. Measured on probe documents before this existed: both spellings PASSED.
+func bcUnquote(s string) string {
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// bcEngineCallFields returns the JSON field names one engine.StepCall carries, minus `tool`
+// (which names the call rather than being an argument of it). These are read off the struct's own
+// encoding, so a field added, renamed or retagged in Go moves this set with it.
+func bcEngineCallFields(t *testing.T, call engine.StepCall) []string {
+	t.Helper()
+	raw, err := json.Marshal(call)
+	if err != nil {
+		t.Fatalf("marshal engine.StepCall: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal engine.StepCall: %v", err)
+	}
+	delete(m, "tool")
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bcMintedIDRe matches the documented minting of a step attempt id, `<name> = new_ulid()`.
+var bcMintedIDRe = regexp.MustCompile(`(?m)^[ \t]*(\w+)[ \t]*=[ \t]*new_ulid\(\)`)
+
 // TestEngineNativeLoopOpensTheFirstStepAsTheEngineDoes covers the one pf_update_step call in a
-// sequence that PlanStepBracket does not produce: the in_progress call that opens the FIRST
-// step. The status it must carry is DERIVED from the Go side rather than written here — it is
-// the status PlanStepBracket itself emits when it has to start a step (the degraded form's
-// second call) — so a re-spelling on either side breaks the pair instead of only the copy
-// someone remembered to update.
+// sequence that PlanStepBracket does not produce: the in_progress call that opens the FIRST step.
+// Both loops make it by hand, so nothing on the Go side can be compared against it directly —
+// which is why what it must LOOK like is derived from PlanStepBracket's own step-opening call (the
+// degraded form's second) instead of written here. A field added or re-spelled on either side then
+// breaks the pair rather than only the copy someone remembered to update.
+//
+// WHY IT COMPARES A SHAPE AND NOT TWO SUBSTRINGS (aihub#675). This test used to assert that
+// `status="in_progress"` and `new_ulid()` each appeared SOMEWHERE in each document. Both held
+// throughout the whole period both documents were wrong: they minted sa_id and then opened
+// steps[0] WITHOUT passing it, while path A (internal/drain/runner.go) passed it — the exact
+// direction workflow_identity_constraint forbids.
+//
+// The cost, measured on a real Postgres (pgvector pg18, migrations 0001-0041), is not cosmetic.
+// A missing step_attempt_id leaves wi_step_state.current_step_attempt NULL; if the attempt is then
+// PAUSED during that first step, fnForceTerminateStep files its history row under the literal
+// "unknown", and idx_wsc_attempt (migration 0005) is a GLOBAL unique index written with
+// ON CONFLICT DO NOTHING. So the first such row in the entire database lands and every later one
+// is discarded in silence: two work items paused on their first step produced 1 history row and 2
+// step_failed events, against 2 of 2 for a control arm carrying distinct ids. pf_get_step's
+// completed_steps — the record a resuming agent is told to trust — simply loses the step.
+//
+// MUTANTS (applied to this tree and run 2026-09-14; the verdict is what happened; a green control
+// ran between every pair, and each markdown mutant was grepped and READ before its arm, since
+// `go build` cannot see a markdown edit):
+//
+//	M1 engine.native.md drops step_attempt_id from the opening call
+//	                                       RED  completeness AND cross-doc drift
+//	M2 engine-native-details.md §1 drops it
+//	                                       RED  the same two, the other way round
+//	M3 the opening call's status becomes "running"
+//	                                       RED  the derived-status assertion, alone
+//	M4 step_attempt_id=<sa_id> — a placeholder the document never mints
+//	                                       RED  the minted-binding assertion, alone
+//	M5 engine.StepCall's json tag becomes step_attempt_ref (a GO mutant; it compiled)
+//	                                       RED  both documents — which is what proves the wanted
+//	                                            field set is read off the struct, not written here
+//	M9 BOTH documents revert to origin/main's opening call — the real pre-fix defect
+//	                                       RED  completeness twice; drift silent, as it should be
+//	                                            (the two documents agree with each other)
+//	M9' the same, with the completeness check disabled ALONE
+//	                                       GREEN, exit 0 — so that check is the one carrying it
+//	M10 §1's call gains an extra argument while both stay complete
+//	                                       RED  cross-doc drift, alone
+//
+// The status comparison goes through bcUnquote rather than matching `"in_progress"` literally.
+// Here that is a convenience — this is an ASSERTION, so a re-spelling would go red either way, and
+// M3 above is what pins it. On the broad gate below the same normalisation is load-bearing, because
+// there the status SELECTS the population and a spelling it does not recognise drops a call out of
+// it in silence.
+//
+// And the vacuity of what this replaced, measured rather than asserted: under M9 both documents
+// still contain `status="in_progress"` (1 and 3 occurrences) and `new_ulid()` (3 and 3), so the two
+// strings.Contains checks this test used to be were satisfied by the defective files.
 func TestEngineNativeLoopOpensTheFirstStepAsTheEngineDoes(t *testing.T) {
 	plan := engine.PlanStepBracket(engine.BracketInput{
 		StepID: "spec", StepAttemptID: "sa-A", Status: "completed",
 		NextStepID: "code_change", NextStepAttemptID: "sa-B", SupportsNextStep: false,
 	})
 	if len(plan) != 2 {
-		t.Fatalf("the degraded form no longer emits two calls (%d), so the start-call status "+
+		t.Fatalf("the degraded form no longer emits two calls (%d), so the start call's shape "+
 			"cannot be derived from it: %s", len(plan), bcFormat(plan))
 	}
-	startStatus := plan[1].Status
-	if startStatus == "" {
+	opening := plan[1]
+	if opening.Status == "" {
 		t.Fatal("PlanStepBracket's start call carries no status")
+	}
+	wantFields := bcEngineCallFields(t, opening)
+	if len(wantFields) == 0 {
+		t.Fatal("PlanStepBracket's start call carries no fields at all, so requiring the documents " +
+			"to name them is satisfied for free")
 	}
 
 	pluginRoot := pluginRootDir(t)
+	calls := map[string]bcDocCall{}
 	for _, rel := range []string{bcResidentDoc, bcBracketDoc} {
 		body := readEngineDoc(t, pluginRoot, rel)
-		want := `status="` + startStatus + `"`
-		if !strings.Contains(body, want) {
-			t.Errorf("%s never opens a step with %s. Both loops start the first step themselves "+
-				"— it is the one call bracket-plan does not make — so a document that names a "+
-				"different status leaves the wi with no step open and every later bracket call "+
-				"failing validateStepIdentity.", rel, want)
+		call := bcFindStepOpenCall(t, rel, body)
+		calls[rel] = call
+
+		// (1) COMPLETENESS — every field the engine's own opening call carries.
+		for _, field := range wantFields {
+			if _, ok := call.values[field]; !ok {
+				t.Errorf("%s:%d opens the first step without %s=. engine.PlanStepBracket puts that "+
+					"field on its own step-opening call, so a loop following this document makes a "+
+					"call path A does not — and for step_attempt_id specifically the server stores "+
+					"current_step_attempt=NULL, after which a pause during this step files its "+
+					"history row under the sentinel \"unknown\" against a GLOBAL unique index with "+
+					"ON CONFLICT DO NOTHING: the row is dropped DB-wide and only the event survives "+
+					"(aihub#675, measured).\nCall: %s\nArguments: %v",
+					call.doc, call.line, field, call.raw, call.names)
+			}
+		}
+
+		// (2) work_item_id, which is pf_update_step's own required parameter rather than a field of
+		// engine.StepCall — the one argument the derivation above cannot supply.
+		if _, ok := call.values["work_item_id"]; !ok {
+			t.Errorf("%s:%d opens the first step without work_item_id=; the call names no work item "+
+				"and cannot be made at all.\nCall: %s", call.doc, call.line, call.raw)
+		}
+
+		// (3) THE STATUS VALUE, derived — not merely "the string appears in the file somewhere".
+		if got, want := bcUnquote(call.values["status"]), opening.Status; got != want {
+			t.Errorf("%s:%d opens the first step with status=%q, want %q. A different status leaves "+
+				"the wi with no step open and every later bracket call failing validateStepIdentity.",
+				call.doc, call.line, got, want)
+		}
+
+		// (4) THE ATTEMPT ID IS THE ONE THE DOCUMENT MINTS. Nothing in internal/engine or
+		// internal/cli generates a ulid, so the loop must mint it; passing some other expression
+		// here would satisfy (1) while still threading the wrong value.
+		minted := map[string]bool{}
+		for _, m := range bcMintedIDRe.FindAllStringSubmatch(body, -1) {
+			minted[m[1]] = true
+		}
+		if len(minted) == 0 {
+			t.Errorf("%s never tells the loop to mint a new ulid. `bracket-plan` only threads the "+
+				"attempt id it is given (internal/cli/engine.go's runEngineBracketPlan is pure), so "+
+				"a loop following this document would pass the CURRENT step's attempt id as the "+
+				"next step's — silently, since nothing validates it.", rel)
+		} else if got, ok := call.values["step_attempt_id"]; ok && !minted[got] {
+			t.Errorf("%s:%d opens the first step with step_attempt_id=%s, which this document never "+
+				"binds with new_ulid(). It mints %v. An id that is not the minted one is either a "+
+				"placeholder a reader cannot resolve or a value reused from another step.",
+				call.doc, call.line, got, bcSortedKeys(minted))
 		}
 	}
 
-	// The other half of what bracket-plan does not do: mint ids. Nothing in internal/engine or
-	// internal/cli generates a ulid, so a loop that is not told to mint one reuses the current
-	// step_attempt_id for the next step. Both loops must say so.
-	for _, rel := range []string{bcResidentDoc, bcBracketDoc} {
-		body := readEngineDoc(t, pluginRoot, rel)
-		if !strings.Contains(body, "new_ulid()") {
-			t.Errorf("%s never tells the loop to mint a new ulid. `bracket-plan` only threads the "+
-				"attempt id it is given (internal/cli/engine.go's runEngineBracketPlan is pure), "+
-				"so a loop following this document would pass the CURRENT step's attempt id as "+
-				"the next step's — silently, since nothing validates it.", rel)
-		}
+	// (5) THE TWO LOOPS MUST NOT DRIFT. They are one execution path with one licensed difference
+	// (a human gate at the step boundary, §1) — so the call that opens steps[0] is not a place
+	// they are allowed to differ, and aihub#675 is what a difference here costs.
+	a, b := calls[bcResidentDoc], calls[bcBracketDoc]
+	if !reflect.DeepEqual(a.names, b.names) {
+		t.Errorf("the auto loop and §1's interactive loop open the first step with DIFFERENT "+
+			"arguments.\n%s:%d %v\n%s:%d %v\nworkflow_identity_constraint (aihub#640) allows the "+
+			"two loops exactly one difference, the human gate; the opening call is not it.",
+			a.doc, a.line, a.names, b.doc, b.line, b.names)
 	}
+}
+
+// TestEveryDocumentedStepOpenCarriesItsAttemptID generalises the gate above from the two
+// pf-execute loops to EVERY markdown this plugin ships (aihub#675).
+//
+// The narrow gate was written for the two loops because that is where the review found the defect.
+// Scanning the whole plugin with the same rule found it in four more documents on the same day:
+// _common/lifecycle.md — the RESIDENT fragment every skill is injected with, so the widest blast
+// radius of the six — plus pf-plan, pf-spec and pf-revise, each of which minted an id (or, in
+// pf-revise's case, did not even do that) and then opened its step without passing it. pf-revise
+// went one further: its completing call cited a step_attempt_id "from step 2" that step 2 never
+// produced.
+//
+// Which is the argument for the shape of this test rather than for six copies of the narrow one:
+// the population is "every documented call that opens a step", and the only way to hold a
+// population is to enumerate it from the files instead of from a list.
+//
+// What it does NOT check is the completing call — that one is already covered end-to-end by
+// TestEngineBCContract, which runs the documented bracket-plan invocation through a shell and
+// compares the resulting sequence against engine.PlanStepBracket.
+//
+// MUTANTS (2026-09-14, green control between each pair, every markdown mutant grepped and read
+// first):
+//
+//	N1 _common/lifecycle.md — the RESIDENT fragment — reverts to origin/main's opening call
+//	                                       RED  naming skills/_common/lifecycle.md:14
+//	N2 pf-revise's MULTI-LINE call form reverts
+//	                                       RED  naming skills/pf-revise/SKILL.md:57 — which is what
+//	                                            proves the scanner reads a call spread over five
+//	                                            lines and not only a one-liner
+//	N3 (Go) PlanStepBracket's opening status becomes "starting", so the documents match NO call
+//	                                       RED  the anti-vacuity guard (0 calls checked), rather
+//	                                            than a silent pass over an empty population
+//	N4 a probe document carrying all three shapes a clean-context review found escaping this
+//	   gate BEFORE bcUnquote and the quote-aware scan existed — status='in_progress',
+//	   status=in_progress, and artifact_summary="done :) ok" ahead of status="in_progress",
+//	   none of the three with a step_attempt_id
+//	                                       RED  all three named individually, `checked 9` where
+//	                                            the pre-fix gate reported `checked 6` and PASSED
+//
+// The parser's own three properties — the quote-aware paren scan, the quote-aware comma split and
+// the status normalisation — are NOT asserted here, and deliberately so: a clean-context review
+// measured two of them free against the shipped documents (a document can be defective in a way
+// this gate never sees, rather than a shipped document being wrong). They are pinned instead by
+// TestEngineStepCallParserIsNotBlind, over fixtures that do not depend on what the documents
+// happen to say today. That split is the point: this test holds the POPULATION, that one holds the
+// gate's ability to see it.
+func TestEveryDocumentedStepOpenCarriesItsAttemptID(t *testing.T) {
+	// The status that names an opening call, and the field it must carry, both derived from
+	// PlanStepBracket's own step-opening call rather than written here.
+	plan := engine.PlanStepBracket(engine.BracketInput{
+		StepID: "spec", StepAttemptID: "sa-A", Status: "completed",
+		NextStepID: "code_change", NextStepAttemptID: "sa-B", SupportsNextStep: false,
+	})
+	if len(plan) != 2 {
+		t.Fatalf("the degraded form no longer emits two calls (%d): %s", len(plan), bcFormat(plan))
+	}
+	openStatus := plan[1].Status
+	wantFields := bcEngineCallFields(t, plan[1])
+
+	pluginRoot := pluginRootDir(t)
+	scanned, opens := 0, 0
+	err := filepath.WalkDir(pluginRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(pluginRoot, path)
+		if relErr != nil {
+			rel = path
+		}
+		scanned++
+		for _, call := range bcScanStepCalls(t, filepath.ToSlash(rel), string(raw)) {
+			// Selected by the STATUS the call carries, so a call that opens a step is judged and
+			// one that completes or fails a step is not. A call with no status argument at all is
+			// a prose fragment naming the tool (the agents/*.md files write
+			// `pf_update_step(artifact_summary=...)`), not an invocation a reader can run.
+			if bcUnquote(call.values["status"]) != openStatus {
+				continue
+			}
+			opens++
+			for _, field := range wantFields {
+				if _, ok := call.values[field]; !ok {
+					t.Errorf("%s:%d opens a step with status=%q but without %s=. The server then "+
+						"stores current_step_attempt=NULL, and a pause during that step files its "+
+						"wi_step_completions row under a synthesised sentinel — which before "+
+						"aihub#675 was one shared literal against a GLOBAL unique index with "+
+						"ON CONFLICT DO NOTHING, so the row was dropped DB-wide while step_failed "+
+						"still fired and the call still answered 200.\nCall: %s\nArguments: %v",
+						call.doc, call.line, openStatus, field, call.raw, call.names)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", pluginRoot, err)
+	}
+
+	// Anti-vacuity: a scanner that found no documents, or no opening calls in them, would report
+	// a clean plugin for the same reason a deleted test would.
+	if scanned == 0 {
+		t.Fatalf("no markdown found under %s, so this gate read nothing", pluginRoot)
+	}
+	if opens == 0 {
+		t.Errorf("scanned %d markdown files and found NO call opening a step with status=%q. Either "+
+			"the documents stopped bracketing their steps, or the status spelling moved and this "+
+			"gate is now selecting an empty population.", scanned, openStatus)
+	}
+	t.Logf("scanned %d plugin markdown files, checked %d documented step-opening calls", scanned, opens)
+}
+
+// TestEngineStepCallParserIsNotBlind is the anti-vacuity half of the two gates above: they can
+// only hold a population they can SEE, and every shape below is one a plugin document either
+// already writes or could plausibly be written into tomorrow.
+//
+// It exists because a clean-context review measured the three properties it pins and found two of
+// them free (aihub#675):
+//
+//   - the QUOTE-AWARE PAREN SCAN. Depth counting alone stops at the first `)`, so one inside a
+//     quoted value truncates the argument list, `status` drops out, and the call is skipped by
+//     every status-selected assertion — a defective document passing in silence. The reviewer's
+//     probe: `artifact_summary="done :) ok", status="in_progress"` with no step_attempt_id, and
+//     the broad gate reported `checked 6` unchanged and PASSED.
+//   - the STATUS NORMALISATION. Both `status='in_progress'` and `status=in_progress` were dropped
+//     from the population by a literal comparison against `"in_progress"`, and the opens==0 guard
+//     cannot see it because the population is short by one rather than empty. Both probes PASSED.
+//   - the QUOTE-AWARE COMMA SPLIT. Three documented summaries carry a comma inside quotes; a blind
+//     splitter reads each as a positional argument. That one changed no verdict when it was
+//     measured — the comma-bearing values all sit on COMPLETING calls, which the status filter
+//     discards — so it was described as load-bearing while being defensive. It is asserted here
+//     instead, which is the honest way to keep it.
+//
+// Each arm below goes red under the mutation that removes the property it names; none of them
+// depends on the shipped documents, so this test keeps saying the same thing as they change.
+//
+// MUTANTS (2026-09-14, green control between each pair):
+//
+//	V2 the paren scan goes quote-blind   RED  a_value_containing_a_closing_paren_inside_quotes
+//	                                          _does_not_end_the_call, alone
+//	V3 the comma split goes quote-blind  RED  a_value_containing_a_comma_inside_quotes_is_ONE
+//	                                          _argument (and the paren arm, which shares the shape)
+//	V4 bcUnquote becomes the identity    RED  six arms, including both status-spelling ones
+//
+// Before these arms existed the same three mutations left every gate GREEN with the checked-call
+// count unchanged, which is what "defensive" looked like from the outside.
+func TestEngineStepCallParserIsNotBlind(t *testing.T) {
+	const openStatus = "in_progress"
+
+	for _, fx := range []struct {
+		name     string
+		body     string
+		wantLine int
+		names    []string
+		status   string // after bcUnquote; "" when the call carries none
+		attempt  bool   // whether step_attempt_id is present
+	}{
+		{
+			name:     "a call spread over several lines",
+			body:     "x\npf_update_step(\n  work_item_id=<current>,\n  step_id=s,\n  status=\"in_progress\",\n  step_attempt_id=sa_id\n)\n",
+			wantLine: 2,
+			names:    []string{"work_item_id", "step_id", "status", "step_attempt_id"},
+			status:   openStatus, attempt: true,
+		},
+		{
+			name:     "a value containing a comma inside quotes is ONE argument",
+			body:     "pf_update_step(step_id=s, artifact_summary=\"<one sentence, status only>\", status=\"in_progress\", step_attempt_id=sa_id)\n",
+			wantLine: 1,
+			names:    []string{"step_id", "artifact_summary", "status", "step_attempt_id"},
+			status:   openStatus, attempt: true,
+		},
+		{
+			name:     "a value containing a closing paren inside quotes does not end the call",
+			body:     "pf_update_step(work_item_id=<current>, artifact_summary=\"done :) ok\", status=\"in_progress\")\n",
+			wantLine: 1,
+			names:    []string{"work_item_id", "artifact_summary", "status"},
+			status:   openStatus, attempt: false,
+		},
+		{
+			name:     "brackets do not split, so steps[0].id survives",
+			body:     "pf_update_step(work_item_id=<current>, step_id=steps[0].id, status=\"in_progress\", step_attempt_id=sa_id)\n",
+			wantLine: 1,
+			names:    []string{"work_item_id", "step_id", "status", "step_attempt_id"},
+			status:   openStatus, attempt: true,
+		},
+		{
+			name:     "a single-quoted status is the same status",
+			body:     "pf_update_step(step_id=s, status='in_progress')\n",
+			wantLine: 1,
+			names:    []string{"step_id", "status"},
+			status:   openStatus, attempt: false,
+		},
+		{
+			name:     "an unquoted status is the same status",
+			body:     "pf_update_step(step_id=s, status=in_progress)\n",
+			wantLine: 1,
+			names:    []string{"step_id", "status"},
+			status:   openStatus, attempt: false,
+		},
+		{
+			name:     "a positional argument is recorded, not dropped",
+			body:     "prose about `pf_update_step(failed)` in passing\n",
+			wantLine: 1,
+			names:    []string{bcPositionalArg},
+			status:   "", attempt: false,
+		},
+		{
+			name:     "a completing call is parsed, and carries a status that is not the opening one",
+			body:     "pf_update_step(step_id=s, status=\"completed\", step_attempt_id=sa_id)\n",
+			wantLine: 1,
+			names:    []string{"step_id", "status", "step_attempt_id"},
+			status:   "completed", attempt: true,
+		},
+	} {
+		t.Run(fx.name, func(t *testing.T) {
+			calls := bcScanStepCalls(t, "fixture.md", fx.body)
+			if len(calls) != 1 {
+				t.Fatalf("scanned %d calls, want exactly 1: %#v", len(calls), calls)
+			}
+			got := calls[0]
+			if got.line != fx.wantLine {
+				t.Errorf("line = %d, want %d — a failure message that names the wrong line sends "+
+					"the reader to the wrong call", got.line, fx.wantLine)
+			}
+			if !reflect.DeepEqual(got.names, fx.names) {
+				t.Errorf("argument names = %v, want %v.\nCall: %s", got.names, fx.names, got.raw)
+			}
+			if s := bcUnquote(got.values["status"]); s != fx.status {
+				t.Errorf("status = %q, want %q — this is the value BOTH gates select their "+
+					"population by, so a call it reads wrong is a call they never judge",
+					s, fx.status)
+			}
+			if _, ok := got.values["step_attempt_id"]; ok != fx.attempt {
+				t.Errorf("step_attempt_id present = %v, want %v", ok, fx.attempt)
+			}
+		})
+	}
+
+	// The loud direction, kept as a pair with the silent one above: an unbalanced `(` cannot be
+	// read, and this parser says so rather than guessing where the call ended.
+	t.Run("more than one call in a document is found, in order", func(t *testing.T) {
+		body := "pf_update_step(step_id=a, status=\"in_progress\", step_attempt_id=x)\n" +
+			"text\npf_update_step(step_id=b, status=\"completed\", step_attempt_id=x)\n"
+		calls := bcScanStepCalls(t, "fixture.md", body)
+		if len(calls) != 2 {
+			t.Fatalf("scanned %d calls, want 2 — a scanner that stops after the first leaves every "+
+				"later call in a document unjudged", len(calls))
+		}
+		if calls[0].values["step_id"] != "a" || calls[1].values["step_id"] != "b" {
+			t.Errorf("calls came back as %q then %q, want a then b",
+				calls[0].values["step_id"], calls[1].values["step_id"])
+		}
+		if calls[0].line != 1 || calls[1].line != 3 {
+			t.Errorf("lines = %d, %d; want 1, 3", calls[0].line, calls[1].line)
+		}
+	})
 }
 
 // ── aihub#663: EVERY documented verb invocation, not only the two bracket-plan blocks ────────

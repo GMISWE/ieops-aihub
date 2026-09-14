@@ -79,7 +79,8 @@ actually has to be GROUNDED on a prior artifact's text, that is a separate by-id
 
 ```
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id="spec", status="in_progress")
+pf_update_step(work_item_id=<current>, step_id="spec", status="in_progress",
+               step_attempt_id=sa_id)
 ```
 
 No `pf_get_step` first: the bracket needs no version number, and the `expected_version` it

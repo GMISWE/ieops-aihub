@@ -11,7 +11,8 @@ step, then complete-and-advance:
 
 ```
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=<first step>, status="in_progress")
+pf_update_step(work_item_id=<current>, step_id=<first step>, status="in_progress",
+               step_attempt_id=sa_id)
 # ... engine runs ...
 next_sa = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=<this step>, status="completed",

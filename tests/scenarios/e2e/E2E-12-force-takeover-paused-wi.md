@@ -35,7 +35,7 @@ NOTE: Design requires force_takeover only valid on running wi's.
       If server returns 200 here, this is a server bug.
 
 ## Cleanup
-AS ALICE: re-claim WI_ID mode=resume, then complete wrapped.
+AS ALICE: re-claim WI_ID, then complete wrapped.
 
 ## PASS criteria
 force_takeover on paused wi returns 4xx error; wi remains paused and Alice can resume.

@@ -14,7 +14,7 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-07-claim-1", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-07-claim-1")
 ASSERT: response.ok == true
 
 CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")
@@ -36,7 +36,7 @@ NOTE: Verify WORKSPACE_ROOT/.polyforge/state/WI_ID.json does NOT exist
 
 ## Cleanup
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-07-claim-2", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-07-claim-2")
 CALL: pf_complete_attempt(work_item_id=WI_ID, status="failed", force_terminate_step=true)
 
 ## PASS criteria

@@ -12,8 +12,7 @@ CALL: pf_create_work_item(project="marketplace",
 NOTE: save response.id as WI_ID
 
 ### Initial claim (simulates Agent 1 owning the wi)
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-10-agent1",
-      mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-10-agent1")
 ASSERT: response.ok == true
 NOTE: save response.attempt_id as ATTEMPT_1, response.claim_epoch as EPOCH_1 (==1)
 
@@ -24,8 +23,7 @@ CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progr
 ASSERT: response.status == "in_progress"
 
 ### Agent 2 (same user, different session) re-claims with new idempotency_key
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-10-agent2",
-      mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-10-agent2")
 ASSERT: response.ok == true
 ASSERT: response.attempt_id != ATTEMPT_1
 ASSERT: response.claim_epoch == 2

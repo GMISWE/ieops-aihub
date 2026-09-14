@@ -29,7 +29,7 @@ EXPECTED SKILL BEHAVIOR (from pf-work skill):
      # resolve a project from. Since aihub#662 a payload with any file_scope-deriving
      # entry is 400 without `project`.
   4. pf_create_work_item(project="marketplace", goal="fix: add null check...", wi_type="fix_bug", requires_human_session=false)
-  5. pf_claim_work_item(work_item_id=WI_ID, mode="fresh", ...)
+  5. pf_claim_work_item(work_item_id=WI_ID, ...)
 
 ASSERT MCP CALLS:
   - pf_recall called with project="marketplace"
@@ -108,7 +108,7 @@ EXPECTED SKILL BEHAVIOR:
   1. pf_diff(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", vs_base=true) — review the diff
   2. pf_commit(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        message="fix(auth): add null check for empty user input\n\n...\n\nwi: marketplace#<seq>")
-  3. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace", skip_base_check=false)
+  3. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace")
   4. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID, repo="marketplace",
        title="fix(auth): add null check for empty user input", body="...")
   5. pf_update_step(work_item_id=WI_ID, step_id="commit_and_pr", status="completed",

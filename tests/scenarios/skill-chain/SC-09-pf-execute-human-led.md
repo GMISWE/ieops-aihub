@@ -31,7 +31,7 @@ USER_INTENT: "execute" / "implement this feature"
 EXPECTED SKILL BEHAVIOR — Setup phase:
   1. Load wi info:
      pf_list_work_items(ids=[WI_ID], include_step_state=true)
-     → requires_human_session=true, current_step="spec" (spec), phase_mode="step"
+     → requires_human_session=true, current_step="spec"
 
   2. Memory-First:
      pf_recall(project="marketplace", query=wi.goal,
@@ -234,12 +234,11 @@ EXPECTED SKILL BEHAVIOR (same as SC-05 Steps 5-6):
     pf_recall(query=wi.goal, type="experience.*", top_k=3)
     pf_save_artifact(type="methodology.wrap_summary", work_item_id=WI_ID,
                      content="<1-para summary>")
-    pf_remember(body=<learning>, type="experience.feature", visibility="team")
+    pf_remember(content=<learning>, type="experience.feature", visibility="team")
 
   Wrap (coding scenario):
-    pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
-            attempt_id=ATTEMPT_ID, claim_epoch=CLAIM_EPOCH,
-            session_secret=<from state file>)
+    pf_wrap(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID)
+    (attempt credentials are injected from the state file, not passed)
 
 ASSERT MCP CALLS (retro + wrap):
   - pf_read_events called

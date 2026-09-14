@@ -55,7 +55,7 @@ USER_INTENT: "take over Alice's stalled wi and complete it"
 EXPECTED SKILL BEHAVIOR (pf-work Mode D — force-takeover):
   1. Memory-First recall for context
   2. pf_list_work_items(ids=[WI_ID]) — check expires_at
-  3. pf_force_takeover(id_or_slug=WI_ID, reason="agent stalled; manager rescue")
+  3. pf_force_takeover(work_item_id=WI_ID, reason="agent stalled; manager rescue")
      → terminates Alice's attempt, increments claim_epoch to 2,
        creates a new attempt for Admin (epoch+1),
        calls fnForceTerminateStep internally → resets stale code_change step to idle.
@@ -65,7 +65,7 @@ EXPECTED SKILL BEHAVIOR (pf-work Mode D — force-takeover):
 
   NOTE: pf_force_takeover ALREADY: creates the new attempt (epoch+1), writes the
         state file, and calls fnForceTerminateStep to reset the stale step to idle.
-        No separate pf_claim_work_item(mode="resume") is needed — Admin is immediately
+        No separate pf_claim_work_item is needed — Admin is immediately
         the owner with a valid attempt after force_takeover returns.
 
 ASSERT:

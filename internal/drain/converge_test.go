@@ -1,6 +1,10 @@
 package drain
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+)
 
 // TestDiverging_FiresOnEqualityAndNotOnTheEmptyRound pins BOTH halves of the divergence rule,
 // and it is two assertions rather than one because the two mutants that break it are opposites.
@@ -84,7 +88,7 @@ func TestClassify_PrecedenceIsFailedThenExternalThenIdle(t *testing.T) {
 		{
 			name:      "failed wins over every kind of leftover",
 			anyFailed: true,
-			queue:     QueueState{Executable: 3, ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}, {WorkItemID: "ext1", Blockers: []string{"outsider"}}}, BlockedByMine: 1, Running: 1, Paused: 1},
+			queue:     QueueState{Executable: 3, ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []BlockerRef{{ID: "outsider"}}}, {WorkItemID: "ext1", Blockers: []BlockerRef{{ID: "outsider"}}}}, BlockedByMine: 1, Running: 1, Paused: 1},
 			want:      TerminalFailed,
 		},
 		{
@@ -96,7 +100,7 @@ func TestClassify_PrecedenceIsFailedThenExternalThenIdle(t *testing.T) {
 		{
 			name:      "external block wins over my own leftovers",
 			anyFailed: false,
-			queue:     QueueState{ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}}, BlockedByMine: 5, Executable: 2},
+			queue:     QueueState{ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []BlockerRef{{ID: "outsider"}}}}, BlockedByMine: 5, Executable: 2},
 			want:      TerminalBlockedExternal,
 		},
 		{
@@ -145,7 +149,7 @@ func TestQueueStateEmpty_CountsEveryBucket(t *testing.T) {
 	for name, q := range map[string]QueueState{
 		"executable":        {Executable: 1},
 		"blocked by mine":   {BlockedByMine: 1},
-		"blocked by others": {ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}}},
+		"blocked by others": {ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []BlockerRef{{ID: "outsider"}}}}},
 		"running":           {Running: 1},
 		"paused":            {Paused: 1},
 	} {
@@ -263,5 +267,109 @@ func TestNeedsHuman_OnlyAGenuineFailure(t *testing.T) {
 		if r.NeedsHuman() {
 			t.Errorf("%s must not need a human: it is ordinary control flow", r)
 		}
+	}
+}
+
+// TestQueueState_AQueuedHumanSessionWorkItemIsNotAnEmptyQueue is finding ③(d), at the pure-logic
+// layer where the lie was told.
+//
+// ObserveQueue classified what was left into executable / running / paused / blocked. A queued
+// work item with requires_human_session != false is NONE of those: the server's ready predicate
+// requires `requires_human_session = false`, so it never appears among the executable, and its
+// `queued` status keeps it out of the other three. It fell through every bucket, Empty() reported
+// the scope clear, and Classify returned COMPLETED — exit 0, documented as "every in-scope work
+// item is terminal" — for a project with work still queued. `--plan` printed the same verdict.
+//
+// Mutants watched RED, each applied alone and `go build`-checked first:
+//   - dropping `len(q.NeedsHumanSession) == 0` from Empty()  → the COMPLETED arm
+//   - dropping the NeedsHumanSession clause from Classify()  → the BLOCKED_EXTERNAL arm
+func TestQueueState_AQueuedHumanSessionWorkItemIsNotAnEmptyQueue(t *testing.T) {
+	q := QueueState{NeedsHumanSession: []Candidate{{ID: "wi_1", Slug: "p#1"}}}
+
+	if q.Empty() {
+		t.Fatalf("a queue holding a queued requires_human_session work item reported Empty(). "+
+			"That is how COMPLETED — the one terminal state that says there is nothing left to "+
+			"come back for — was reported for a non-empty queue. state=%+v", q)
+	}
+	got := Classify(false, q)
+	if got == TerminalCompleted {
+		t.Fatalf("terminal = COMPLETED (exit %d) with work still queued", ExitCode(got))
+	}
+	// BLOCKED_EXTERNAL rather than IDLE, by the owner's own criterion for the split — "等下去有
+	// 没有意义". Re-running drain tomorrow does not make a requires_human_session work item
+	// executable; only a person does. IDLE's contract is the opposite ("no person needed;
+	// re-running later is the fix"), so it would be wrong in the same direction as COMPLETED,
+	// just less loudly.
+	if got != TerminalBlockedExternal {
+		t.Errorf("terminal = %s (exit %d), want BLOCKED_EXTERNAL: waiting accomplishes nothing "+
+			"here, and IDLE is the state that deliberately notifies nobody", got, ExitCode(got))
+	}
+	if ExitCode(got) != 11 {
+		t.Errorf("exit code = %d, want 11", ExitCode(got))
+	}
+
+	// Negative control: a genuinely empty queue must still be COMPLETED, exit 0, or
+	// `polyforge drain && …` never chains and the whole exit-code layer is useless.
+	if empty := (QueueState{}); !empty.Empty() || Classify(false, empty) != TerminalCompleted {
+		t.Errorf("an empty queue no longer reports COMPLETED: empty=%v terminal=%s",
+			empty.Empty(), Classify(false, empty))
+	}
+	// And a FAILURE still outranks it: the precedence order is what makes the exit code
+	// actionable.
+	if Classify(true, q) != TerminalFailed {
+		t.Error("a failed run was reported as BLOCKED_EXTERNAL; FAILED must win")
+	}
+}
+
+// TestBlockerRef_ReadsTheShapeAnOlderBinaryWrote is the compatibility half of the Blockers shape
+// change, and it guards a command rather than a cosmetic.
+//
+// An unattended run and its observer meet across versions BY CONSTRUCTION — Snapshot's own doc
+// says drain may have been running for hours when the binary on disk is replaced. ReadSnapshot
+// returns an error on ANY unmarshal failure, and both `polyforge watch` and `polyforge drain
+// --stop` go through it; --stop exits 1 without signalling when it cannot read the snapshot. So a
+// run started by yesterday's binary that hit an external block — `"blockers":["wi_x"]` — would
+// have become unstoppable by today's binary. That is the one command that exists to stop a
+// runaway scheduler.
+//
+// Mutant watched RED: deleting BlockerRef.UnmarshalJSON (the legacy arm fails to parse).
+func TestBlockerRef_ReadsTheShapeAnOlderBinaryWrote(t *testing.T) {
+	// Exactly what a pre-aihub#678 binary wrote.
+	const legacy = `{"externally_blocked":[{"work_item_id":"wi_9","slug":"p#9",
+		"blockers":["wi_x","hidden"]}]}`
+	var q QueueState
+	if err := json.Unmarshal([]byte(legacy), &q); err != nil {
+		t.Fatalf("a snapshot written by an older binary no longer parses: %v.\n"+
+			"ReadSnapshot fails whole, so `polyforge drain --stop` could not read — and so could "+
+			"not stop — a run that binary had started", err)
+	}
+	if len(q.ExternallyBlocked) != 1 || len(q.ExternallyBlocked[0].Blockers) != 2 {
+		t.Fatalf("legacy blockers did not round-trip: %+v", q.ExternallyBlocked)
+	}
+	refs := q.ExternallyBlocked[0].Blockers
+	if refs[0].ID != "wi_x" || !refs[0].Notifiable() {
+		t.Errorf("legacy blocker %+v lost its id", refs[0])
+	}
+	// The sentinel must NOT come back as an address, or reading an old snapshot restores the
+	// 404-per-round target this change removed.
+	if refs[1].Notifiable() || refs[1].Display() != "hidden" {
+		t.Errorf("the legacy \"hidden\" sentinel came back as %+v; it is a display value, never "+
+			"something to emit a note against", refs[1])
+	}
+
+	// The current shape round-trips too, which is the negative control: a tolerant parser that
+	// broke the real one would be worse than no tolerance at all.
+	cur := QueueState{ExternallyBlocked: []BlockedWorkItem{{
+		WorkItemID: "wi_9", Blockers: []BlockerRef{{ID: "wi_x", Slug: "p#1"}, {Slug: "other#7"}}}}}
+	b, err := json.Marshal(cur)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back QueueState
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("the current shape does not round-trip: %v", err)
+	}
+	if !reflect.DeepEqual(cur, back) {
+		t.Errorf("round trip changed the value:\n got %+v\nwant %+v", back, cur)
 	}
 }

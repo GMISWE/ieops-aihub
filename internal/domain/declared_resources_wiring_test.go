@@ -355,7 +355,7 @@ func TestPredictConflicts_RejectsAWrongURISchemeBeforeTouchingDB(t *testing.T) {
 		Project:           "aihub",
 		DeclaredResources: json.RawMessage(`[{"type":"service","uri":"file:tot","intent":"write"}]`),
 	}
-	res, err := PredictConflicts(context.Background(), nil, req, map[string]string{"aihub": "writer"}, "")
+	res, err := PredictConflicts(context.Background(), nil, req, map[string]string{"aihub": "writer"}, "", nil)
 	if err == nil {
 		t.Fatalf("PredictConflicts answered on a wrongly schemed uri instead of refusing: %+v", res)
 	}

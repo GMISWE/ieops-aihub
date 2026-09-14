@@ -336,7 +336,7 @@ func TestReadIntentTakesNoWriteLock(t *testing.T) {
 			Project:           project,
 			DeclaredResources: readDecl,
 			DryRun:            false,
-		}, map[string]string{project: "maintainer"}, "")
+		}, map[string]string{project: "maintainer"}, "", nil)
 		require.Nil(t, aerr, "predict failed: %+v", aerr)
 		assert.NotEqual(t, SeverityHardBlock, pred.Severity,
 			"rule 1 hard-blocked a path declared intent=read; rule 3 in the same function reports the same "+

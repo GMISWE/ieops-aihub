@@ -144,7 +144,7 @@ func TestPredictConflicts_RejectsUnknownTypeBeforeTouchingDB(t *testing.T) {
 		DeclaredResources: json.RawMessage(`[{"type":"file_scope","value":"tether:internal/session/attach.go"}]`),
 		DryRun:            true,
 	}
-	resp, err := PredictConflicts(context.Background(), nil, req, map[string]string{"tether": "writer"}, "")
+	resp, err := PredictConflicts(context.Background(), nil, req, map[string]string{"tether": "writer"}, "", nil)
 	if err == nil {
 		t.Fatalf("PredictConflicts returned no error; resp=%+v — this is the fake all-clear", resp)
 	}

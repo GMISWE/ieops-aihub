@@ -202,7 +202,7 @@ func predictAs(t *testing.T, pool *pgxpool.Pool, project, wiRef, declared string
 	if wiRef != "" {
 		req.WorkItemID = &wiRef
 	}
-	resp, aerr := PredictConflicts(context.Background(), pool, req, map[string]string{project: "owner"}, "")
+	resp, aerr := PredictConflicts(context.Background(), pool, req, map[string]string{project: "owner"}, "", nil)
 	require.Nil(t, aerr, "PredictConflicts failed: %+v", aerr)
 	return resp
 }

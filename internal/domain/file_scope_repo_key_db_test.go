@@ -416,7 +416,7 @@ func TestFileScopeRepoKey_PredictRule1NoHardBlockAcrossRepos(t *testing.T) {
 	// Different repo, same path: no hard block.
 	resp, aerr := PredictConflicts(ctx, pool, &PredictConflictsRequest{
 		Project: proj, DeclaredResources: declaredWithRepo("repo-b", "README.md"), DryRun: false,
-	}, roles, "")
+	}, roles, "", nil)
 	if aerr != nil {
 		t.Fatalf("predict repo-b: %v", aerr)
 	}
@@ -430,7 +430,7 @@ func TestFileScopeRepoKey_PredictRule1NoHardBlockAcrossRepos(t *testing.T) {
 	// Same repo, same path: rule 1 must still fire.
 	resp, aerr = PredictConflicts(ctx, pool, &PredictConflictsRequest{
 		Project: proj, DeclaredResources: declaredWithRepo("repo-a", "README.md"), DryRun: false,
-	}, roles, "")
+	}, roles, "", nil)
 	if aerr != nil {
 		t.Fatalf("predict repo-a: %v", aerr)
 	}
@@ -727,7 +727,7 @@ func TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite(t *testing.T) {
 		// A different repo, inferred the same way, must not hard-block.
 		resp, aerr := PredictConflicts(ctx, pool, &PredictConflictsRequest{
 			Project: proj, DeclaredResources: declaredViaRepoEntry("repo-b", "pf261-pr2", "README.md"), DryRun: false,
-		}, roles, "")
+		}, roles, "", nil)
 		if aerr != nil {
 			t.Fatalf("predict repo-b: %v", aerr)
 		}
@@ -739,7 +739,7 @@ func TestFileScopeRepoKey_InferredRepoReachesEveryDerivationSite(t *testing.T) {
 		// The same repo must still hard-block, or the arm above proves nothing.
 		resp, aerr = PredictConflicts(ctx, pool, &PredictConflictsRequest{
 			Project: proj, DeclaredResources: declaredViaRepoEntry("repo-a", "pf261-pr3", "README.md"), DryRun: false,
-		}, roles, "")
+		}, roles, "", nil)
 		if aerr != nil {
 			t.Fatalf("predict repo-a: %v", aerr)
 		}

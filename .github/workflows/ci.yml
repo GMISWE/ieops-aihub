@@ -5445,6 +5445,55 @@ jobs:
           ! grep -q -- '--- SKIP' note_dedup.log \
             || { echo "::error::an aihub#636 note dedup test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#665: POST /v1/conflicts/predict answered about any project the
+      # caller named. Measured through the real router on 9b4dc40, one
+      # authenticated caller holding no role in the holder's project: GET on the
+      # holder's work item answered the shared 404, and the same credential's
+      # predict answered 200 with the holder's actor_display, work_item_id,
+      # work_item_slug and attempt_id — because `project` was authorized nowhere
+      # and rule 1's hard_block returned before the H7 visibility fold.
+      #
+      # 🔴 THE ALLOW ARMS ARE NAMED TOO, AND THAT IS THE POINT. This endpoint is
+      # pf-work's pre-claim gate; every agent in the workspace calls it before
+      # claiming. "A non-member is refused" is trivially satisfied by refusing
+      # everybody, so the member / admin / in-scope-key arms are what separate an
+      # authorization fix from an outage — an admin arm in particular, because an
+      # admin's ProjectRoles map is EMPTY by design (aihub#227) and a
+      # membership-only gate 404s the whole endpoint for every administrator.
+      #
+      # The fold arm runs as an AUTHORIZED caller on purpose: it is the one that
+      # reaches rule 1 past the new gate and checks the redaction itself, using a
+      # holder in another project that took a cross-namespace key through
+      # requested_locks. Reverting `goto fold` to `return result, nil` reddens it.
+      # The DB-free halves (canSeeProject's table, the refusal before any query,
+      # and the AST arm that no `return result` may precede the fold) run in the
+      # "Unit tests" step and need no step here.
+      - name: aihub#665 predict-conflicts cross-project visibility DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestPredictConflictsVisibilityAcrossProjects$' -count=1 -v 2>&1 | tee predict_visibility.log
+          for want in 'TestPredictConflictsVisibilityAcrossProjects/non_member_predict_is_the_shared_not_found_hard_path' \
+                      'TestPredictConflictsVisibilityAcrossProjects/non_member_predict_is_the_shared_not_found_advisory_path' \
+                      'TestPredictConflictsVisibilityAcrossProjects/both_dry_run_values_answer_identically_to_a_non_member' \
+                      'TestPredictConflictsVisibilityAcrossProjects/a_project_that_does_not_exist_answers_the_same_as_one_that_does' \
+                      'TestPredictConflictsVisibilityAcrossProjects/an_invisible_work_item_id_resolves_like_an_absent_one' \
+                      'TestPredictConflictsVisibilityAcrossProjects/a_scoped_key_cannot_reach_outside_its_scope_even_where_it_is_a_member' \
+                      'TestPredictConflictsVisibilityAcrossProjects/rule_1_hard_block_is_redacted_when_the_holder_is_in_another_project'; do
+            grep -q -- "--- PASS: $want (" predict_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#665 cross-project disclosure is not actually verified against a database"; exit 1; }
+          done
+          for want in 'TestPredictConflictsVisibilityAcrossProjects/fixture_the_stranger_is_blind_to_the_victim_project_by_an_honest_route' \
+                      'TestPredictConflictsVisibilityAcrossProjects/negative_control_the_member_still_gets_the_whole_answer' \
+                      'TestPredictConflictsVisibilityAcrossProjects/negative_control_the_admin_still_gets_the_whole_answer' \
+                      'TestPredictConflictsVisibilityAcrossProjects/negative_control_a_scoped_key_inside_its_own_scope_is_not_refused'; do
+            grep -q -- "--- PASS: $want (" predict_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the fixture check and the allow arms, every deny arm above is also satisfied by an endpoint that refuses everyone — which would be a worse outcome than the disclosure being fixed"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' predict_visibility.log \
+            || { echo "::error::an aihub#665 visibility arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

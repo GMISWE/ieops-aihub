@@ -108,9 +108,31 @@ still stops on the first hit and still suppresses every rule after it —
 `internal/domain/predict_rule_shape_test.go`
 (`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) pins that as a
 property of the ladder — but it now leaves through the H7 fold instead of around
-it, so a holder in a project the (authorized) caller cannot see comes back as
-`[conflict in project X, no visibility]` on the hard rule exactly as it already
-did on rule 3.
+it, so a holder in a project the (authorized) caller cannot see comes back
+redacted on the hard rule exactly as it already did on rule 3.
+
+⚠️ **THAT REDACTION NO LONGER NAMES THE PROJECT** (`aihub#679`). Until then the
+folded description was `[conflict in project X, no visibility]`, and this card
+published that string as the contract — a refusal whose whole subject is "you may
+not see that project" answered by naming it. Since this endpoint is the pre-claim
+gate every caller may reach with an arbitrary path, that made it an enumeration
+oracle for the project list, and project names here are frequently customer
+names. The label is now the constant `domain.FoldedConflictDescription`:
+
+    [conflict in another project, no visibility]
+
+`severity`, `rule`, `resource_type` and `resource_key` still survive the fold, so
+a blocked caller still learns that it is blocked, by which rule, and on which of
+its OWN declared resources. What the fold clears is exactly `actor_display`,
+`work_item_id`, `work_item_slug`, `attempt_id` and the description.
+
+📎 One field short of "everything about the counterparty", stated here rather
+than left for someone to rediscover: `last_active_age_seconds` is NOT cleared, so
+a folded prediction from rule 2, 4 or 6 still carries the invisible holder's
+heartbeat age. It is a liveness signal with no identity in it, it predates
+`aihub#665`, and widening the redaction is a behaviour change no work item has
+asked for — but it IS a residue, and "only the counterparty is withheld" would be
+too strong a reading of the paragraph above.
 
 ✅ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 now sends `project`**
 (`aihub#666`), and the carve-out this card invoked for deferring it never

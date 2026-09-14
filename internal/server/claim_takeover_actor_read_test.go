@@ -141,7 +141,7 @@ func TestClaimPathForceTakeoverActorReadIsNotDiscarded(t *testing.T) {
 		idx := strings.Index(body, discarded)
 		if idx >= 0 {
 			prefix := body[:idx]
-			if !strings.Contains(prefix[max0(len(prefix)-220):], ":=") {
+			if !strings.Contains(prefix[max(0, len(prefix)-220):], ":=") {
 				t.Errorf("handleClaimWorkItem still discards the result of the actor_user_id " +
 					"Scan. domain.FnClaimWorkItem does not re-check the maintainer/admin rule " +
 					"— its signature has no callerRole or callerProjectRoles and its takeover " +
@@ -279,6 +279,22 @@ func TestClaimPathCrossUserForceTakeoverRequiresMaintainer(t *testing.T) {
 	ts := httptest.NewServer(NewRouter(pool, []byte("claim-takeover-test-cookie-secret")))
 	t.Cleanup(ts.Close)
 
+	// claimAs issues one POST /claim and returns the status and raw body.
+	//
+	// ⚠️ IT RETRIES 40001 FOR THE SAME REASON seedClaimed DOES, and the omission
+	// was measured rather than imagined: with only the seeding retried, the
+	// self-retake arm failed 2/2 full-suite runs with 409
+	// CONFLICT_SERIALIZATION_FAILURE while passing alone every time. The whole
+	// package shares one database and FnClaimWorkItem runs at SERIALIZABLE, so
+	// every claim in this file races every other test that claims anything.
+	//
+	// 🔴 THE PREDICATE IS NARROW ON PURPOSE. Only a 409 whose body carries
+	// CONFLICT_SERIALIZATION_FAILURE is retried — the one code the server
+	// publishes as retryable, returned INSTEAD of doing the work with the
+	// transaction rolled back. A 403, a 409 CONFLICT_WI_ALREADY_CLAIMED and a 200
+	// are all ANSWERS, and this test exists to assert which one came back;
+	// retrying on status alone would let a genuine refusal be retried into a
+	// success and quietly invert the arm it is supposed to prove.
 	claimAs := func(t *testing.T, key, wiID, idem, machine, secret string, force bool) (int, string) {
 		t.Helper()
 		b, err := json.Marshal(map[string]any{
@@ -287,18 +303,28 @@ func TestClaimPathCrossUserForceTakeoverRequiresMaintainer(t *testing.T) {
 			"session_info":    map[string]any{"machine_id": machine, "session_secret": secret},
 		})
 		require.NoError(t, err)
-		r, err := http.NewRequest(http.MethodPost,
-			ts.URL+"/v1/work_items/"+wiID+"/claim", bytes.NewReader(b))
-		require.NoError(t, err)
-		r.Header.Set("Authorization", "Bearer "+key)
-		r.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(r)
-		require.NoError(t, err)
-		defer resp.Body.Close() //nolint:errcheck
-		var buf bytes.Buffer
-		_, err = buf.ReadFrom(resp.Body)
-		require.NoError(t, err)
-		return resp.StatusCode, buf.String()
+		var status int
+		var body string
+		for attempt := range 5 {
+			r, err := http.NewRequest(http.MethodPost,
+				ts.URL+"/v1/work_items/"+wiID+"/claim", bytes.NewReader(b))
+			require.NoError(t, err)
+			r.Header.Set("Authorization", "Bearer "+key)
+			r.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(r)
+			require.NoError(t, err)
+			var buf bytes.Buffer
+			_, err = buf.ReadFrom(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			status, body = resp.StatusCode, buf.String()
+			if status != http.StatusConflict ||
+				!strings.Contains(body, string(domain.ErrConflictSerializationFailure)) {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
+		return status, body
 	}
 
 	const secretA = "s3cr3t-0123456789abcdef0123456789abcdef0123456789abcdef01234570"
@@ -341,12 +367,4 @@ func TestClaimPathCrossUserForceTakeoverRequiresMaintainer(t *testing.T) {
 				"%d %s", status, body)
 		}
 	})
-}
-
-// max0 clamps a negative index to zero for the bounded look-back above.
-func max0(i int) int {
-	if i < 0 {
-		return 0
-	}
-	return i
 }

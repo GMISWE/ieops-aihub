@@ -967,10 +967,25 @@ fold:
 // What the caller is still told is deliberately everything that is theirs:
 // severity, rule number, resource_type and resource_key all survive the fold, so
 // a blocked caller still learns it is blocked, by which rule, and on which of
-// ITS OWN declared resources. Only the counterparty is withheld. A "fix" that
-// dropped the prediction instead would have satisfied every absence assertion in
+// ITS OWN declared resources. A "fix" that dropped the prediction instead would
+// have satisfied every absence assertion in
 // predict_conflicts_visibility_db_test.go while removing the hard gate pf-work
 // branches on.
+//
+// 📎 THE FOLD CLEARS FIVE FIELDS AND NOT SIX, and the sixth is worth naming
+// because "only the counterparty is withheld" is the obvious reading of the
+// paragraph above and it is not true. ActorDisplay, WIID, WISlug, AttemptID and
+// Description are cleared; LastActiveAgeSeconds is NOT, and rules 2, 4 and 6 set
+// it on the same predictions that set WIID — so a folded prediction still
+// publishes the invisible holder's heartbeat age.
+//
+// Left alone deliberately, not overlooked. It carries no identity, it predates
+// aihub#665, and the field's own doc says it exists so a human can judge
+// wait-versus-takeover; clearing it is a behaviour change no work item has asked
+// for, and aihub#679's brief was the project name. It is a residue, recorded
+// here so the next person reading this constant does not conclude the fold is
+// total. If it is ever closed, close it here and in
+// docs/mcp-cards/pf_predict_conflicts.md, which now says the same thing.
 //
 // ⚠️ THE `, no visibility]` TAIL IS LOAD-BEARING TEXT, not decoration: the
 // every_rule_is_folded arm counts occurrences of it to prove all three rules

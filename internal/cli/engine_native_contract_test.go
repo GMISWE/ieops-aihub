@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/engine"
 )
 
 // Contract gate for the native engine's step-progress and pause instructions.
@@ -756,4 +759,399 @@ func subAgentPromptTemplate(body string) (string, bool) {
 		return "", false
 	}
 	return rest[:close], true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// aihub#672: engine.IsReviewStep has hand-written re-implementations OUTSIDE this repository,
+// and the guard that retired the in-tree ones is structurally unable to see them.
+//
+// EngineReviewPredicateMatchesTheGoImplementation (above) enforces aihub#664's discipline by
+// asserting that no hand-written copy of the predicate REAPPEARS in aihub's own engine
+// documents. An absence check can only hold over the tree it scans, so it is silent about every
+// other repository — and silence is indistinguishable from agreement.
+//
+// polyforge-coding's .ci/pf_contract_lint.py carries exactly such a copy: `_is_review_step`, a
+// hand-written Python re-implementation of engine.IsReviewStep, used by its Rule H to flag a
+// review-shaped step that declares a write-capable role. When THIS repository WIDENS the
+// predicate — a fourth exact name, or a second suffix — that copy does not move and nothing
+// anywhere goes red. A step whose id matches only the new shape then passes Rule H while
+// declaring `role: executor`; an explicit `role:` is tier 1 of ResolveRole's fallback and wins
+// outright, so a raised-tier READ-ONLY reviewer is replaced by a default-tier WRITE-CAPABLE
+// executor. That is the aihub#664 defect class, reopened in the one repository that guard
+// cannot reach.
+//
+// NOTHING FALSE-GREENS TODAY. When this was written every live `role:` declaration in that repo
+// agreed with the role catalog. This is a missed-DETECTION gap; it is filed high because the
+// failure direction is silent capability widening, not because it is burning.
+//
+// WHY THE GUARD LIVES HERE AND NOT THERE. Two candidate homes, both measured 2026-09-14:
+//
+//   - A pin inside polyforge-coding's own .ci/, isomorphic to its `vocabulary_pin` for
+//     _KNOWN_ROLES, cannot DETECT this. Widening IsReviewStep leaves both the Python copy and
+//     any pin beside it untouched, so that repository stays green. Such a pin is anti-cheat — it
+//     forces the eventual repair to be a deliberate two-place edit — not anti-drift. Worth
+//     having; not a substitute for this.
+//   - Reconciling against a live polyforge-coding checkout, the mechanism
+//     PinnedVocabularyMatchesLiveScenarioRepo already uses, DOES NOT RUN IN AIHUB CI:
+//     PF_SCENARIO_REPO appears in no workflow and no job checks that repository out.
+//     findScenarioRepo's fallback does find the checkout a polyforge workspace keeps under
+//     .repo/, so it runs for developers — but that is whatever the developer last pulled.
+//     Measured on the workspace this was written in: the discoverable checkout predated the
+//     commit that introduced `_is_review_step` and contained ZERO occurrences of it. A stale
+//     checkout reconciles CLEAN against a copy that exists.
+//
+// So the load-bearing assertion has to be one that runs unconditionally, in aihub CI, on the
+// pull request that widens the predicate. That is what this test is: a change detector, and
+// deliberately so. It does not verify the out-of-tree copies are in sync — from here it cannot.
+// It makes widening the predicate impossible to do SILENTLY and hands the author the list of
+// copies to update. ReconcilesAgainstLiveScenarioRepo adds the verification half wherever a
+// checkout happens to be reachable, and says so loudly when it is not.
+//
+// MEASURED BEFORE WRITING IT (copy-based backup of internal/engine/role.go, restored after):
+// with `arch_audit` appended to the exact-name arm, and separately with a second `_audit`
+// suffix added — each grep-proven present in the tree — `go test ./internal/cli/...
+// ./internal/engine/... ./internal/roles/... ./internal/drain/...` exited 0 BOTH times. Nothing
+// in this repository caught either widening. internal/engine's TestIsReviewStep is a table of
+// cases that all still pass, and TheCatalogAndTheReviewPredicateAgreeOnWhichStepsAreReviews
+// iterates the role catalog's step ids, so a newly accepted name that is absent from the catalog
+// is never probed.
+
+// reviewPredicateSourceRel is engine.IsReviewStep's home, relative to this package's directory
+// (a Go test runs with its own package directory as the working directory).
+const reviewPredicateSourceRel = "../engine/role.go"
+
+// reviewPredicateCopies names every hand-written re-implementation of engine.IsReviewStep known
+// to live outside this repository, so the failure below can tell an author WHAT TO GO UPDATE
+// rather than merely that something changed. Surveyed 2026-09-14 with
+// `git grep -nE '_is_review|IsReviewStep|_review' -- '.ci/' 'scripts/'` in both repositories:
+// aihub's own scripts/pf_contract_lint.py has none, and polyforge-coding's
+// .ci/pf_contract_lint_vendored.py — vendored wholesale from GMI-marketplace — has none either.
+// Add to this list rather than to a comment: it is what the failure message prints.
+var reviewPredicateCopies = []string{
+	"polyforge-coding .ci/pf_contract_lint.py::_is_review_step " +
+		"(Rule H's review-shape-vs-declared-role check), plus its self-test pin if one exists",
+}
+
+// The pinned decision surface of engine.IsReviewStep: the suffixes it accepts and the exact
+// names it accepts. Widening either set is a real decision with out-of-tree consequences; this
+// pin makes it a VISIBLE one. Update this pin and every entry in reviewPredicateCopies in the
+// same reviewable change.
+var (
+	pinnedReviewSuffixes   = map[string]bool{"_review": true}
+	pinnedReviewExactNames = map[string]bool{
+		"review": true, "code_review": true, "release_review": true,
+	}
+)
+
+var (
+	// The Go function's body, from its signature to the closing brace in column 0. Inner blocks
+	// are indented, so `\n}` cannot terminate early on one of them.
+	goReviewPredicateRe = regexp.MustCompile(`(?s)func IsReviewStep\(stepID string\) bool \{\n(.*?)\n\}`)
+	goSuffixCallRe      = regexp.MustCompile(`strings\.HasSuffix\(stepID, "([^"]*)"\)`)
+	goCaseArmRe         = regexp.MustCompile(`(?m)^[ \t]*case[ \t]+(.+):[ \t]*$`)
+	stringLiteralRe     = regexp.MustCompile(`"([^"]*)"`)
+
+	pySuffixCallRe = regexp.MustCompile(`endswith\("([^"]*)"\)`)
+	pyMembershipRe = regexp.MustCompile(`(?s)step_id in \(([^)]*)\)`)
+)
+
+// goReviewPredicateSurface extracts the literal decision surface of engine.IsReviewStep out of
+// the Go SOURCE of internal/engine/role.go.
+//
+// Reading the source rather than probing the compiled function is deliberate. Probing can only
+// answer for the step ids it happens to ask about, so a fourth accepted name outside the probe
+// corpus would be invisible — and "a name nobody thought to probe" is precisely the change this
+// gate exists to catch. ThePinAgreesWithTheRunningPredicate binds the text back to behaviour so
+// that reading the wrong text cannot pass as agreement.
+//
+// ok is false when the function could not be located at all. That must be a FAILURE and never an
+// empty (and therefore trivially agreeing) surface.
+func goReviewPredicateSurface(src string) (suffixes, names map[string]bool, ok bool) {
+	m := goReviewPredicateRe.FindStringSubmatch(src)
+	if m == nil {
+		return nil, nil, false
+	}
+	suffixes, names = map[string]bool{}, map[string]bool{}
+	for _, s := range goSuffixCallRe.FindAllStringSubmatch(m[1], -1) {
+		suffixes[s[1]] = true
+	}
+	for _, arm := range goCaseArmRe.FindAllStringSubmatch(m[1], -1) {
+		for _, lit := range stringLiteralRe.FindAllStringSubmatch(arm[1], -1) {
+			names[lit[1]] = true
+		}
+	}
+	return suffixes, names, true
+}
+
+// pythonDefBody returns the body of a top-level `def <name>(` in Python source: the signature
+// line and every line after it up to the next line that starts in column 0 and is not blank.
+// ok is false when the def is absent, which the caller must not read as "the body is empty".
+func pythonDefBody(src, name string) (body string, ok bool) {
+	idx := strings.Index(src, "\ndef "+name+"(")
+	if idx < 0 {
+		return "", false
+	}
+	var out []string
+	for i, ln := range strings.Split(src[idx+1:], "\n") {
+		if i > 0 && ln != "" && !strings.HasPrefix(ln, " ") && !strings.HasPrefix(ln, "\t") {
+			break
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n"), true
+}
+
+// pythonReviewPredicateSurface extracts the same two sets out of a hand-written Python copy of
+// the predicate. Same ok contract as goReviewPredicateSurface.
+func pythonReviewPredicateSurface(src string) (suffixes, names map[string]bool, ok bool) {
+	body, found := pythonDefBody(src, "_is_review_step")
+	if !found {
+		return nil, nil, false
+	}
+	suffixes, names = map[string]bool{}, map[string]bool{}
+	for _, s := range pySuffixCallRe.FindAllStringSubmatch(body, -1) {
+		suffixes[s[1]] = true
+	}
+	if m := pyMembershipRe.FindStringSubmatch(body); m != nil {
+		for _, lit := range stringLiteralRe.FindAllStringSubmatch(m[1], -1) {
+			names[lit[1]] = true
+		}
+	}
+	return suffixes, names, true
+}
+
+// diffSets reports what got has that want does not, and vice versa, sorted.
+func diffSets(got, want map[string]bool) (added, removed []string) {
+	for k := range got {
+		if !want[k] {
+			added = append(added, k)
+		}
+	}
+	for k := range want {
+		if !got[k] {
+			removed = append(removed, k)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
+func TestReviewPredicateSurfaceIsPinnedForOutOfTreeCopies(t *testing.T) {
+	// ── Anti-vacuity, and it runs FIRST, on FIXTURES rather than on the live files. ──────────
+	// Every assertion below compares an extracted set against a pin, and an extractor that finds
+	// nothing agrees with nothing — which reads as "the predicate is unchanged" no matter what
+	// the source actually says. Both fixtures deliberately carry a WIDER surface than the pin (a
+	// fourth name AND a second suffix): an extractor hard-wired to today's three names would
+	// satisfy a fixture built from today's source while staying blind to the exact change this
+	// gate exists to catch.
+	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
+		goFixture := "func IsReviewStep(stepID string) bool {\n" +
+			"\tif strings.HasSuffix(stepID, \"_review\") {\n\t\treturn true\n\t}\n" +
+			"\tif strings.HasSuffix(stepID, \"_audit\") {\n\t\treturn true\n\t}\n" +
+			"\tswitch stepID {\n" +
+			"\tcase \"review\", \"code_review\", \"release_review\", \"arch_audit\":\n" +
+			"\t\treturn true\n\t}\n\treturn false\n}\n"
+		sfx, names, ok := goReviewPredicateSurface(goFixture)
+		if !ok {
+			t.Fatalf("goReviewPredicateSurface could not locate IsReviewStep in its own reference " +
+				"fixture, so every 'the surface matches the pin' check below compares two empty " +
+				"sets and passes for free")
+		}
+		if !sfx["_review"] || !sfx["_audit"] || len(sfx) != 2 {
+			t.Errorf("goReviewPredicateSurface read suffixes %v from a fixture declaring two "+
+				"(_review, _audit) — it cannot see a second suffix being added", keysOf(sfx))
+		}
+		if !names["arch_audit"] || len(names) != 4 {
+			t.Errorf("goReviewPredicateSurface read names %v from a fixture declaring four — it "+
+				"cannot see a fourth exact name being added", keysOf(names))
+		}
+		if _, _, ok := goReviewPredicateSurface("func SomethingElse() {}\n"); ok {
+			t.Errorf("goReviewPredicateSurface claims success on source that does not define " +
+				"IsReviewStep. A renamed or moved predicate would then read as an empty surface " +
+				"and agree with any pin")
+		}
+
+		// The Python fixture is the upstream copy's shape, widened the same two ways. Proving it
+		// here rather than against the live file matters: the scenario checkout may be stale or
+		// absent, so an extractor only ever exercised there could be blind and never say so.
+		pyFixture := "\ndef _is_review_step(step_id: str) -> bool:\n" +
+			"    \"\"\"engine.IsReviewStep, verbatim: an `_review` suffix or one of three names.\"\"\"\n" +
+			"    return step_id.endswith(\"_review\") or step_id.endswith(\"_audit\") or step_id in (\n" +
+			"        \"review\", \"code_review\", \"release_review\", \"arch_audit\")\n" +
+			"\n\ndef _next_function():\n    return 1\n"
+		psfx, pnames, pok := pythonReviewPredicateSurface(pyFixture)
+		if !pok {
+			t.Fatalf("pythonReviewPredicateSurface could not locate _is_review_step in its own " +
+				"reference fixture")
+		}
+		if !psfx["_review"] || !psfx["_audit"] || len(psfx) != 2 {
+			t.Errorf("pythonReviewPredicateSurface read suffixes %v from a fixture declaring two",
+				keysOf(psfx))
+		}
+		if !pnames["arch_audit"] || len(pnames) != 4 {
+			t.Errorf("pythonReviewPredicateSurface read names %v from a fixture declaring four",
+				keysOf(pnames))
+		}
+		if got, _, ok := pythonReviewPredicateSurface("def other(x):\n    return x\n"); ok {
+			t.Errorf("pythonReviewPredicateSurface claims success (%v) on source with no "+
+				"_is_review_step, so a deleted copy and a mis-parsed one would look the same",
+				keysOf(got))
+		}
+		// It must also not bleed past the def it was asked for: the next function's own literals
+		// would otherwise be reported as part of the predicate's surface.
+		if body, _ := pythonDefBody(pyFixture, "_is_review_step"); strings.Contains(body, "_next_function") {
+			t.Errorf("pythonDefBody ran past the end of _is_review_step into the following "+
+				"definition; extracted body was %q", body)
+		}
+	})
+
+	// ── The gate. Unconditional: no environment variable, no second checkout, no network. ────
+	t.Run("SurfaceMatchesThePin", func(t *testing.T) {
+		b, err := os.ReadFile(reviewPredicateSourceRel)
+		if err != nil {
+			t.Fatalf("%s: cannot read it (%v). This gate pins what that file declares; if it "+
+				"moved, the gate must stop covering it loudly rather than go green.",
+				reviewPredicateSourceRel, err)
+		}
+		sfx, names, ok := goReviewPredicateSurface(string(b))
+		if !ok {
+			t.Fatalf("%s no longer defines `func IsReviewStep(stepID string) bool`. Either it was "+
+				"renamed or moved — in which case this pin and every copy in %v needs revisiting "+
+				"— or this extractor's shape assumption broke. Both are red, neither is green.",
+				reviewPredicateSourceRel, reviewPredicateCopies)
+		}
+		if len(sfx) == 0 || len(names) == 0 {
+			t.Fatalf("%s: extracted suffixes %v and names %v from the LIVE predicate. An empty "+
+				"side agrees with a pin it never read; the predicate has both today.",
+				reviewPredicateSourceRel, keysOf(sfx), keysOf(names))
+		}
+
+		for _, c := range []struct {
+			what       string
+			got, want  map[string]bool
+			pinnedName string
+		}{
+			{"suffix", sfx, pinnedReviewSuffixes, "pinnedReviewSuffixes"},
+			{"exact name", names, pinnedReviewExactNames, "pinnedReviewExactNames"},
+		} {
+			added, removed := diffSets(c.got, c.want)
+			if len(added) == 0 && len(removed) == 0 {
+				continue
+			}
+			t.Errorf("engine.IsReviewStep's %s surface changed: %s now reads %v, the pin %s says "+
+				"%v (added %v, removed %v).\n\n"+
+				"THIS IS NOT A TEST TO SILENCE BY EDITING THE PIN ALONE. The predicate has "+
+				"hand-written re-implementations outside this repository, and nothing in either "+
+				"tree compares them:\n  %s\n\n"+
+				"Widening the surface without updating those copies is the aihub#664 defect "+
+				"class. A step id matching only the NEW shape stays unknown to the copy, so a "+
+				"lint that keys on it lets `role: executor` through — and an explicit `role:` is "+
+				"tier 1 of ResolveRole and wins outright, replacing a read-only reviewer with a "+
+				"write-capable executor. Update every copy above, then update the pin, in one "+
+				"reviewable change.",
+				c.what, reviewPredicateSourceRel, keysOf(c.got), c.pinnedName, keysOf(c.want),
+				added, removed, strings.Join(reviewPredicateCopies, "\n  "))
+		}
+	})
+
+	// ── Bind the pinned TEXT to the predicate that actually runs. ────────────────────────────
+	// SurfaceMatchesThePin reads source; on its own it would also pass if the regexes had latched
+	// onto some other function's literals. Checking both directions closes that: a predicate that
+	// returned true for everything would satisfy the first loop and fail the second.
+	t.Run("ThePinAgreesWithTheRunningPredicate", func(t *testing.T) {
+		for s := range pinnedReviewSuffixes {
+			if id := "some_step" + s; !engine.IsReviewStep(id) {
+				t.Errorf("pinnedReviewSuffixes lists %q, but engine.IsReviewStep(%q) is false — "+
+					"the pin describes text that is not this predicate", s, id)
+			}
+		}
+		for n := range pinnedReviewExactNames {
+			if !engine.IsReviewStep(n) {
+				t.Errorf("pinnedReviewExactNames lists %q, but engine.IsReviewStep(%q) is false — "+
+					"the pin describes text that is not this predicate", n, n)
+			}
+		}
+		for _, id := range []string{"code_change", "commit_and_pr", "prepare_context", "build", "test"} {
+			if engine.IsReviewStep(id) {
+				t.Errorf("engine.IsReviewStep(%q) is true, yet %q is neither a pinned exact name "+
+					"nor carries a pinned suffix %v. The pin no longer bounds the predicate's "+
+					"surface, so agreement with it proves nothing.",
+					id, id, keysOf(pinnedReviewSuffixes))
+			}
+		}
+	})
+
+	// ── The verification half: real where a checkout is reachable, honest where it is not. ────
+	t.Run("ReconcilesAgainstLiveScenarioRepo", func(t *testing.T) {
+		notReconciled := func(why string) {
+			// Never t.Skip and never silent: the gate above is what protects this property, and
+			// a quiet pass here would be read as "the copy was checked". Say which it was.
+			t.Logf("NOT RECONCILED (%s). engine.IsReviewStep's surface was NOT compared against "+
+				"any out-of-tree copy. This is the expected state in aihub CI, which checks no "+
+				"other repository out; SurfaceMatchesThePin above is the assertion that runs "+
+				"there. To reconcile, run with PF_SCENARIO_REPO=<path to a polyforge-coding "+
+				"checkout>. Pinned surface: suffixes %v, names %v.",
+				why, keysOf(pinnedReviewSuffixes), keysOf(pinnedReviewExactNames))
+		}
+
+		dir := findScenarioRepo()
+		if dir == "" {
+			notReconciled("no polyforge-coding checkout found")
+			return
+		}
+		lintRel := filepath.Join(".ci", "pf_contract_lint.py")
+		b, err := os.ReadFile(filepath.Join(dir, lintRel))
+		if err != nil {
+			notReconciled(fmt.Sprintf("%s has no readable %s: %v", dir, lintRel, err))
+			return
+		}
+		sfx, names, ok := pythonReviewPredicateSurface(string(b))
+		if !ok {
+			// Deliberately not a failure. Deleting that copy in favour of calling
+			// `polyforge engine resolve-role` is the GOAL state, and it looks identical from
+			// here to a checkout that predates the copy. ExtractorsAreNotBlind is what rules out
+			// the third reading, a broken extractor.
+			notReconciled(fmt.Sprintf("%s/%s defines no _is_review_step — either that copy is "+
+				"gone (the goal state) or this checkout predates it, and this gate cannot tell "+
+				"those apart", dir, lintRel))
+			return
+		}
+		if len(sfx) == 0 && len(names) == 0 {
+			// Distinguish "the copy accepts nothing" from "this gate can no longer read it".
+			// Without this the diff below would report the copy as missing all three names,
+			// which is a true statement of the extracted sets and a false account of the file —
+			// and it would send the reader to fix the wrong thing. The realistic trigger is the
+			// copy being refactored to hold its surface in constants
+			// (`endswith(_REVIEW_SUFFIXES)`), which is exactly what adding a pin on that side
+			// would tempt someone to do.
+			t.Errorf("%s/%s defines _is_review_step, but neither a suffix test nor an exact-name "+
+				"membership test could be read out of it. Treat that as THIS gate's shape "+
+				"assumption breaking, not as the copy being empty: it currently reads the "+
+				"literal forms `endswith(\"...\")` and `step_id in (...)`. Teach "+
+				"pythonReviewPredicateSurface the new shape rather than reading this as drift.",
+				dir, lintRel)
+			return
+		}
+		t.Logf("reconciling engine.IsReviewStep against %s/%s", dir, lintRel)
+
+		for _, c := range []struct {
+			what      string
+			got, want map[string]bool
+		}{
+			{"suffix", sfx, pinnedReviewSuffixes},
+			{"exact name", names, pinnedReviewExactNames},
+		} {
+			added, removed := diffSets(c.got, c.want)
+			if len(added) == 0 && len(removed) == 0 {
+				continue
+			}
+			t.Errorf("%s/%s::_is_review_step has DRIFTED from engine.IsReviewStep on the %s "+
+				"surface: the copy accepts %v, this repository's predicate accepts %v (copy has "+
+				"extra %v, copy is missing %v). One of the two is wrong. A copy that accepts "+
+				"LESS lets a review-shaped step declare a write-capable role past Rule H; a copy "+
+				"that accepts MORE red-flags steps this engine treats as ordinary work.",
+				dir, lintRel, c.what, keysOf(c.got), keysOf(c.want), added, removed)
+		}
+	})
 }

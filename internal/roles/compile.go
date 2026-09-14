@@ -1,6 +1,9 @@
 package roles
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Shape is one harness-native rendering of a Capability. Each field means
 // something only for its own harness; a generator reads the one field it
@@ -89,4 +92,129 @@ func CompileCapability(readOnly bool, harness string) (Shape, error) {
 	default:
 		return Shape{}, fmt.Errorf("roles: unknown harness %q (supported: %v)", harness, SupportedHarnesses)
 	}
+}
+
+// The two placeholder tokens a role prompt may carry. A role's YAML prompt is
+// rendered VERBATIM into all four harnesses' agent files, so any sentence in it
+// that describes a harness MECHANISM is a sentence that is false for three of
+// them. aihub#676 measured the consequence rather than inferring it: reviewer's
+// and explorer's prompts both told the agent "Bash stays available so you can
+// run builds, tests and linters", and pi's read-only shape is an ALLOWLIST
+// (piReadOnlyTools) that contains no shell at all -- so under pi the reviewer
+// was instructed to verify by running tests it had no way to run, leaving it
+// only "I could not verify" or, worse, an unverified approval.
+//
+// These tokens close that class the same way CompileCapability closes it for
+// the frontmatter: the YAML keeps the harness-agnostic REASONS, and the one
+// switch below compiles the harness-specific MECHANISM. A role prompt must
+// never again spell out a tool name, a frontmatter key or a sandbox mode.
+const (
+	PlaceholderCapability  = "{{CAPABILITY}}"
+	PlaceholderModelSource = "{{MODEL_SOURCE}}"
+)
+
+// ExpandPrompt substitutes PlaceholderCapability and PlaceholderModelSource in
+// a role's prompt with prose that is true for THIS harness, and returns an
+// error for any harness dispatch.go does not have a row for.
+//
+// modelDeclared says whether the caller is about to emit a model field for this
+// role. It is not cosmetic: on the omit-and-warn fallback path (aihub#642 AC7)
+// the generated file has NO model field, and a prompt that still claimed "your
+// model is set by this file" would be flatly false exactly when an operator most
+// needs to know why the role is running on something unexpected.
+//
+// Both tokens are optional; a prompt that carries neither is returned unchanged.
+// The renderers do NOT require them -- but every rendered file is checked for a
+// LEFTOVER "{{" by TestNoUnexpandedPlaceholders, so a typo'd token cannot ship.
+func ExpandPrompt(prompt, harness string, readOnly, modelDeclared bool) (string, error) {
+	if _, ok := DispatchFor(harness); !ok {
+		return "", fmt.Errorf("roles: cannot expand prompt placeholders for unknown harness %q (have %v)", harness, DispatchHarnesses())
+	}
+	prompt = strings.ReplaceAll(prompt, PlaceholderCapability, capabilityNote(readOnly, harness))
+	prompt = strings.ReplaceAll(prompt, PlaceholderModelSource, modelSourceNote(harness, modelDeclared))
+	return prompt, nil
+}
+
+// capabilityNote is the prose counterpart of CompileCapability: for each
+// harness it states what that harness's read-only shape ACTUALLY does, in the
+// same file as the shape itself so the two cannot drift.
+//
+// The write-capable text is deliberately identical for all four harnesses --
+// "you inherit the full tool set" is true everywhere, because every renderer
+// emits no capability field at all for a write-capable role.
+func capabilityNote(readOnly bool, harness string) string {
+	if !readOnly {
+		return `You are write-capable. No capability field is emitted for you, so you inherit your
+harness's full tool set. The rules that govern writes (Iron Rules, worktree boundaries)
+arrive with your prompt and the injected payload; this file does not restate them, so they
+cannot drift here.`
+	}
+	switch harness {
+	case "cc":
+		return `You cannot modify the tree. This file's ` + "`disallowedTools`" + ` frontmatter removes Edit, Write
+and NotebookEdit. Bash is NOT removed, so you can run builds, tests and linters yourself --
+do not use it to modify the tree, commit, push or merge.`
+	case "pi":
+		return `You cannot modify the tree, and you also cannot run anything. This file's ` + "`tools`" + `
+frontmatter is an ALLOWLIST; read it to see exactly what you have. It gives you file reading
+and search, plus the read-only polyforge work-item and memory lookups -- and no shell. So you
+CANNOT run builds, tests or linters yourself. Verify from the tree, the diff, and whatever
+output is already in your prompt, and state plainly which claims you could not check. An
+unverifiable claim is a WARN; never approve something on the assumption that it passed.`
+	case "codex":
+		return `You cannot modify the tree. This role runs under ` + "`sandbox_mode = \"read-only\"`" + `, so commands
+still run but every write is refused, including /tmp and the working directory. Use that to
+run builds, tests and linters; anything that tries to change a file will fail, by design.`
+	case "opencode":
+		return `You cannot modify the tree. This file's frontmatter sets ` + "`permission: edit: deny`" + `. Bash,
+read, grep and glob are left at their inherited defaults, so you can normally run builds,
+tests and linters -- do not use them to modify the tree, commit, push or merge. If a command
+is refused, report that rather than approving unverified.`
+	}
+	// Unreachable: ExpandPrompt rejects any harness without a dispatch row
+	// before calling this, and dispatch.go's table covers exactly these four.
+	return ""
+}
+
+// modelSourceNote names WHERE this role's model came from, per harness. The CC
+// branch is the only one that may claim portability (cc_aliases.yaml ships in
+// the repo); the other three carry a machine-local identifier resolved at
+// generation time against that machine's own catalog.
+//
+// The aihub#555 "an explicit per-invocation model silently overrides this file"
+// measurement is stated ONLY under cc, because that is the only harness it was
+// measured on. It used to appear in all five role prompts, i.e. asserted for
+// four harnesses on one harness's evidence.
+func modelSourceNote(harness string, modelDeclared bool) string {
+	if !modelDeclared {
+		return `NO model is declared for you. This machine's tier table had no candidate that resolved
+in ` + harness + `'s local model catalog, so you inherit whatever model the caller runs with and your
+tier is not in force. Generation warned about this on stderr; it is a known, observable
+degradation, not a silent one.`
+	}
+	switch harness {
+	case "cc":
+		return `Your model is set by this file's ` + "`model:`" + ` frontmatter, a Claude Code alias -- the one
+model identifier that means the same thing on every machine, which is why this file is
+generated at build time and committed to the repo. The dispatching loop must NOT pass a
+` + "`model`" + ` argument: an explicit per-invocation model silently overrides this file (measured,
+aihub#555), which would turn this definition into dead text.`
+	case "pi":
+		return `Your model is set by this file's ` + "`model:`" + ` frontmatter. It is a machine-local
+` + "`provider/model`" + ` identifier, resolved when this file was generated from
+~/.polyforge/config.toml against this machine's own ` + "`pi --list-models`" + ` catalog, and it is NOT
+portable to another machine. The dispatching loop should not pass a model argument over it.`
+	case "codex":
+		return `Your model is set by the ` + "`model`" + ` key of the TOML file this text was generated into --
+not by frontmatter, because codex role definitions are TOML, not markdown. The file codex
+actually loads is the config profile at ` + "`$CODEX_HOME/step-<role>.config.toml`" + `, selected with
+` + "`-p <name>`" + `. It is a machine-local slug resolved at generation time from
+~/.polyforge/config.toml against ` + "`codex debug models`" + `.`
+	case "opencode":
+		return `Your model is set by this file's ` + "`model:`" + ` frontmatter. It is a machine-local
+` + "`provider/model`" + ` identifier, resolved when this file was generated from
+~/.polyforge/config.toml against this machine's own ` + "`opencode models`" + ` catalog, and it is NOT
+portable to another machine.`
+	}
+	return ""
 }

@@ -46,14 +46,24 @@ func RenderOpencodeAgentFiles(roleList []Role, resolvedModels map[string]string)
 		b.WriteString("---\n")
 		fmt.Fprintf(&b, "description: %s\n", yamlScalar(r.Description))
 		b.WriteString("mode: subagent\n")
-		if model := resolvedModels[r.Name]; model != "" {
+		model := resolvedModels[r.Name]
+		if model != "" {
 			fmt.Fprintf(&b, "model: %s\n", model)
 		}
 		if perm := opencodePermissionBlock(r.Capability.ReadOnly); perm != "" {
 			b.WriteString(perm)
 		}
 		b.WriteString("---\n\n")
-		b.WriteString(r.Prompt)
+		// Placeholder expansion is the one thing this renderer DOES share with
+		// the other three (unlike CompileCapability, which it deliberately
+		// bypasses): a role prompt's harness-specific prose has to be opencode's
+		// own, and ExpandPrompt's "opencode" branch is the only place that
+		// knows `permission: edit: deny` leaves bash alone (aihub#676).
+		prompt, err := ExpandPrompt(r.Prompt, "opencode", r.Capability.ReadOnly, model != "")
+		if err != nil {
+			return nil, fmt.Errorf("role %q: %w", r.Name, err)
+		}
+		b.WriteString(prompt)
 
 		out[mustAgentName("opencode", r.Name)+".md"] = b.String()
 	}

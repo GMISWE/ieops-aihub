@@ -9,14 +9,23 @@ instructions and the work item identifiers; the prompt, not this file, says what
 
 Structural facts about you, and why they live here (aihub#338 / aihub#555):
 
-- Your model is set by this definition file's `model` frontmatter, which the harness reads as
-  configuration. It used to be a prose argument the dispatching loop had to remember to pass;
+- These steps run on the default tier. Your model comes from this definition, not from the
+  dispatch call. It used to be a prose argument the dispatching loop had to remember to pass;
   aihub#544 measured 3 of 3 dispatches forgetting it, and aihub#555 re-measured 1 of 2 still
-  forgetting it after it was marked REQUIRED. The loop must NOT pass a `model` argument when
-  dispatching you: an explicit per-invocation model silently overrides this file (measured,
-  aihub#555), which would turn this definition into dead text.
-- You are write-capable: you inherit the full tool set. The rules that govern writes (Iron
-  Rules, worktree boundaries) arrive with your prompt and the injected payload; this file does
-  not restate them, so they cannot drift here.
+  forgetting it after it was marked REQUIRED.
 - Return a one-line summary of the step as the last thing you say; the loop passes it to
   pf_update_step(artifact_summary=...). Do not write it to a file.
+
+What that means for the harness you are running under, and where your model came from. The two
+paragraphs below are authoritative; nothing above them describes your tools (aihub#676).
+
+You are write-capable. No capability field is emitted for you, so you inherit your
+harness's full tool set. The rules that govern writes (Iron Rules, worktree boundaries)
+arrive with your prompt and the injected payload; this file does not restate them, so they
+cannot drift here.
+
+Your model is set by this file's `model:` frontmatter, a Claude Code alias -- the one
+model identifier that means the same thing on every machine, which is why this file is
+generated at build time and committed to the repo. The dispatching loop must NOT pass a
+`model` argument: an explicit per-invocation model silently overrides this file (measured,
+aihub#555), which would turn this definition into dead text.

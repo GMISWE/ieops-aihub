@@ -121,12 +121,23 @@ TARGETS = {
         # both engine branches together. The explicit `model` steering below stays correct for
         # THIS branch only: superpowers' subagent-driven-development dispatches generic
         # subagents, not the polyforge agent files, so there is no file to override here.
-        "**Model policy for dispatched subagents.** subagent-driven-development selects a model per role by "
-        "relative tier (cheap / standard / most-capable); resolve those tiers to concrete models and pass "
+        "**Model policy for dispatched subagents.** subagent-driven-development picks a model per role by "
+        "relative tier; resolve each tier to the concrete model below and pass "
         "`model` explicitly on every Task dispatch:\n"
-        "- explore/search code, mechanical or trivial edits, coding/implementation, multi-file integration, debugging -> model: @@DEFAULT_TIER@@\n"
+        # aihub#676: these four rows are the role catalog's four tiers, in the same assignment
+        # internal/roles/definitions/*.yaml makes. They used to be TWO rows, and the missing pair
+        # was not cosmetic: "explore/search code" was steered to @@DEFAULT_TIER@@ while explorer.yaml
+        # declares `tier: low`, so the hook derived four tiers (_TIER_SOURCE_FILES) and then told the
+        # model to use two of them. Steering prose that contradicts the declaration of record is the
+        # same defect class as a stale copy of the mapping, which is what aihub#557 removed from here.
+        # The rows replace the one-line "In short:" restatement that used to follow them: with only two
+        # rows a summary added something, with all four it was the same table said twice, and this
+        # payload is gated two-sided on length (internal/cli/skill_router_payload_test.go).
+        "- delivery: commit, open a PR, wait on CI, bump a version, publish -> model: @@LOWEST_TIER@@\n"
+        "- explore/search code, read-only investigation, context gathering -> model: @@LOW_TIER@@\n"
+        "- coding/implementation, mechanical or trivial edits, multi-file integration, debugging -> model: @@DEFAULT_TIER@@\n"
         "- spec-compliance review, code-quality review, architecture/design judgement -> model: @@RAISED_TIER@@\n"
-        "In short: @@DEFAULT_TIER@@ for everything except review/architecture, which use @@RAISED_TIER@@. Steering, not a hard "
+        "Steering, not a hard "
         "guarantee: a coding task that genuinely needs architectural reasoning may use @@RAISED_TIER@@; a BLOCKED re-dispatch may escalate.\n\n"
         "Parallel dispatch is only for independent investigation; parallel implementation must be split into child work items.",
     ),

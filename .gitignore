@@ -251,11 +251,20 @@ __marimo__/
 /bin/aihub
 /bin/polyforge
 
-# aihub#642: codex's step-<role>.toml agent files are generated at MCP server
-# boot (cmd/polyforge/main.go, via internal/cli.GenerateRoles) from
-# internal/roles/definitions/*.yaml + the machine's config.toml [roles.tiers]
-# candidates -- never hand-authored, never committed. Claude Code's
-# step-<role>.md counterparts ARE committed (go:generate, not boot-time), and
-# pi's pf-<role>.md counterparts are written straight into $PI_DIR/agents (out
-# of tree) by pi/install.sh, so neither needs an entry here.
+# codex's step-<role>.toml agent files, when `polyforge roles generate codex
+# --out plugins/polyforge/.codex-plugin/agents` is run by hand -- never
+# hand-authored, never committed.
+#
+# CORRECTED aihub#676: this comment used to say these files were generated "at
+# MCP server boot ... via internal/cli.GenerateRoles". Neither half is true any
+# more. aihub#655 moved the boot path to generateCodexProfiles, which writes
+# step-<role>.config.toml into $CODEX_HOME (out of tree entirely, so nothing
+# here covers it), and established that codex has no agent-file auto-discovery
+# in any directory -- so the files this line ignores are for inspection only and
+# nothing loads them. The entry stays because the subcommand still writes here.
+#
+# Claude Code's step-<role>.md counterparts ARE committed (go:generate, not
+# boot-time); pi's pf-<role>.md and opencode's step-<role>.md counterparts are
+# written out of tree by their own install scripts. None of the three needs an
+# entry here.
 /plugins/polyforge/.codex-plugin/agents/

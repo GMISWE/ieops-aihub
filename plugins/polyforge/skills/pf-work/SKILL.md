@@ -176,8 +176,19 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 
 3. **Conflict preview** (before creating):
    ```
-   pf_predict_conflicts(declared_resources=<new wi's resources>, dry_run=true)
+   pf_predict_conflicts(project=<from .polyforge.yaml>,
+                        declared_resources=<new wi's resources>,
+                        dry_run=true)
    ```
+   `project` is REQUIRED here, not decorative. The wi does not exist yet, so there is no
+   `work_item_id` for the server to resolve a project from, and since aihub#662 a payload
+   naming any `path`/`document`/`section` entry is refused **400** without one - the error
+   names the offending paths in `paths_needing_project`. It is not a formality: `file_scope`
+   keys are `<project>:<repo>:<path>`, so an empty project builds every probe key as
+   `:<repo>:<path>`, matches no lock, and the answer used to be an empty prediction list
+   indistinguishable from a real all-clear. A payload of only `repo`/`service`/`external_ref`
+   entries needs neither field and is unaffected. A `project` you hold no role in answers
+   404, not 403 (aihub#665).
    Show impact. If hard conflict -> stop and explain. Severity ceiling (aihub#416): repo and
    service entries derive no lock, so a repo/service-only declaration can never report
    `hard_block` - a repo overlap reports `soft_block`, a service overlap `info`, both from a
@@ -266,6 +277,11 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` -> conflict preview. Since aihub#564
    the preview excludes this wi's own locks and declarations, so any soft_block/hard_block it
    shows is held by somebody else - do not dismiss one as "probably my own earlier attempt".
+   No `project` here, and that is correct rather than an omission: the slug resolves to an
+   existing wi and that wi's own project wins, which is the carve-out aihub#662's refusal
+   names. Send the parameter as `work_item_id` - `wi_id` is not a published parameter, so it
+   is dropped on the way in and the call degrades to the anonymous shape that aihub#662
+   refuses.
 2. `pf_claim_work_item(work_item_id=<slug>, ...)`
 3. After successful claim - recall wi-linked memories:
    ```python

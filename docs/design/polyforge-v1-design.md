@@ -32,6 +32,10 @@
 
 ## Changelog
 
+- v1.28（aihub#662 + aihub#665，2026-09-14）：**`pf_predict_conflicts` 在 6 条规则之前多了两道闸，且本文档的已发布签名（§附录 API）此前整个没有 `project`**。
+  ① 解析不出 project 而 payload 含 path/document/section ⇒ **400**（aihub#662）：file_scope 锁键是 `<project>:<repo>:<path>`，空 project 让每个探针键变成 `:<repo>:<path>`，零行匹配，而零行与「没人持有」逐字符不可分辨 —— 同一份 declared_resources 带 project 答 hard_block、不带答 `{"predictions":[],"severity":"info"}`，2026-09-14 在生产上被读成「锁已经放了」。解析顺序：可见的 `work_item_id` 所属 project 优先，否则退到 `project` 参数；只含 repo/service/external_ref 的 payload 两个字段都不需要。
+  ② 解析出的 project 在任何规则读它之前先鉴权 ⇒ 看不见就 **404**（aihub#665，与「project 不存在」同一份字节，刻意不是 403）；看不见的 `work_item_id` 与「没传」解析结果逐字相同；`will_unlock` 改按可见的那次解析取值；规则 1 的 hard_block 也开始走 H7 折叠，规则 4/5 不再漏 `actor_display` 与 `<project>#<seq>`。
+  本次同时回改了正文三处示例调用（§21.2 模式 A 步 3、模式 B 步 1，后者的参数名原先写成不存在的 `wi_id`）与 §10.1 那句已过期的「两个方向都不可信」。
 - v1.27（aihub#564，2026-09-10）：**`pf_predict_conflicts` 读锁表的两条规则（1/3）补上 aihub#510 刻意没动的那一半——不再把调用方自己的锁行报成冲突**。
   已认领的 wi 重预测自己的 path 声明，拿回的曾是规则 1 的 hard_block「Resource lock is already held by another attempt」——`work_item_slug` 就是它自己；dry_run=true 时规则 1 被跳过，规则 3 报 soft_block 同样点名自己。且规则 1 命中即 `return`，自持锁行还能压掉同一 payload 里真正的外部冲突（修复自带的混合 payload 测项 2026-09-10 在修前实测到）。
   谓词就是 claim 路径自己的答案：`probeForeignLockHolders` 走 `foreignLockHolderSQL`（aihub#207）本就排除调用方的 wi——resume/takeover 要重取自己上个 attempt 还持有的锁。predict 存在的意义是回答「claim 会怎样」，不排除调用方，预测的就是一场它所预演的 claim 根本不会发生的碰撞。
@@ -1718,7 +1722,21 @@ pf_read_events(work_item_id?, project?, user_id?, types?, since?, limit?, pinned
   --   reporter（那是 pf_list_work_items.user_id）、不是 attempt owner、也不是 watcher。
   → {events:[...]}
 
-pf_predict_conflicts(work_item_id?, declared_resources, dry_run?)
+pf_predict_conflicts(work_item_id?, project?, declared_resources, dry_run?)
+  -- ⚠️ 勘误（aihub#662 + aihub#665，2026-09-14）：`project` 原本整个不在这行里。
+  --   它是**条件必填**，不是可选装饰：payload 只要含一条 path / document / section
+  --   条目，就必须能解析出 project —— 要么直接传 `project`，要么传一个能解析到
+  --   **且调用方可见**的 `work_item_id`（wi 自己的 project 优先）。两者皆无 ⇒ 400，
+  --   error details 带 `paths_needing_project` 逐条点名（internal/domain/conflicts.go
+  --   (`PredictConflicts`) 的 effectiveProject=="" 分支）。
+  --   原因不是校验洁癖：file_scope 锁键是 `<project>:<repo>:<path>`，空 project 让每个
+  --   探针键变成 `:<repo>:<path>`，匹配不到任何锁 —— 于是返回一份与「真的没冲突」
+  --   逐字符不可分辨的空 predictions（aihub#238 修过的同款假放行，出现在**硬**规则上）。
+  --   只含 repo / service / external_ref 的 payload 两个字段都不需要：规则 2/4/5/6 匹配
+  --   的是声明而不是按 project 命名空间化的锁键。
+  -- ⚠️ aihub#665：解析出来的 project **先鉴权，再进任何规则**。调用方看不见的 project
+  --   答 404（与「project 不存在」同一份字节，刻意不是 403）；看不见的 work_item_id
+  --   与「压根没传」解析结果逐字相同；will_unlock 只按**可见**的那次解析取值。
   -- M-R3-4: will_unlock 语义：若 claim 成功，将解锁哪些 blocked wi
   -- 计算：SELECT wi FROM wi_dependencies WHERE blocking_wi_id IN (work_item_id 的 wi)
   --       且 status=blocked 且 所有其他 blocker 均 terminal
@@ -1726,6 +1744,11 @@ pf_predict_conflicts(work_item_id?, declared_resources, dry_run?)
   --   caller 有 viewer+：返回完整 {attempt_id, actor_display, work_item_slug, rule}
   --   caller 无权限：折叠为 {project:"<project_name>", rule, severity}（不返回 slug/actor）
   --   403 details 不返回任何 target wi 标识（防探测信道）
+  --   ⚠️ 这三行**直到 aihub#665 才对每条规则都成立**：规则 1（hard_block）命中即
+  --     `return`，走的是折叠**外面**那条路；规则 4/5 选了 `wi.id` 又丢掉，而 H7 折叠的
+  --     守卫是「这条 prediction 点名了一个 wi」——于是三条规则把 actor_display 与
+  --     `<project>#<seq>` 直接发给了在该 project 无任何角色的调用方，就在规则 2 被正常
+  --     折叠的同一份响应里。#665 之后每条 prediction 都带 work_item_id 且都过折叠。
   → {severity, predictions:[...], will_unlock:[{id,slug,goal}]}
 
 -- B4: pf_update_artifact 已删除
@@ -3000,6 +3023,14 @@ declared_resources 预测，还是按已持有的 resource_locks？），而本�
 两个方向都不可信（认领后把自己的锁报成冲突；read intent 上假阴性），照它实现只会造出第二个
 不可信的判据。要不要这个能力由 aihub#186 决定 —— 该设计的第三条正是写在这个空开关上的。
 
+> ⚠️ **勘误（2026-09-14）：上一段那句「两个方向都不可信」记的是 2026-09-07 裁决当天的
+> 读数，今天只剩一个方向。** 自报那一半已经修完：aihub#510（声明规则 2/4/5/6）与
+> aihub#564（读锁表的规则 1/3）之后，调用方自己的锁行与声明不再报回给自己。read intent
+> 上的假阴性仍然成立，aihub#416 / #510 / #564 / #662 / #665 都没动它。
+> **裁决本身不受影响**：只要还剩一个方向不可信，在这个判据上再造一个判据就仍会继承那个
+> 假阴性 —— 这正是 `docs/mcp-cards/pf_predict_conflicts.md` 写下的同一句更正。
+> 别把这段原样当成「两个方向」的现行证据引用。
+
 ### 10.2 Stalled Queue
 
 **定义（C4-2/Carol WALL-D 修正）**：`status=blocked` AND EXISTS(`wi_stalled` event)。
@@ -4007,8 +4038,13 @@ review/代码审查          → /pf-review
    → 409 DUPLICATE：展示已有 wi，询问"继续新建 / 直接认领已有 / 取消"
    → 409 CANDIDATES：展示候选列表，询问选择
 
-3. 用户确认后 pf_predict_conflicts(declared_resources, dry_run=true)
+3. 用户确认后 pf_predict_conflicts(work_item_id=<步 2 新建的 wi>, declared_resources, dry_run=true)
    → 展示 impact preview（会抢哪些锁、解锁哪些下游）
+   ⚠️ 勘误（aihub#662，2026-09-14）：本行原先两个都不带。wi 在步 2 已建，所以这里
+      `work_item_id` 就够了（它解析到的 wi 自己的 project 优先），顺带还拿到 aihub#510
+      / aihub#564 的自排除。若把预演挪到**建 wi 之前**（`plugins/polyforge/skills/
+      pf-work/SKILL.md` 模式 A 就是这个顺序），则没有 wi 可解析 ⇒ 必须改传 `project`，
+      否则含 path/document/section 的 payload 直接 400。
 
 4. pf_claim_work_item(
      id_or_slug=<新建的 wi>,
@@ -4027,7 +4063,13 @@ review/代码审查          → /pf-review
 
 ── 模式 B：认领已有 wi（/pf-work <slug>） ──
 
-1. pf_predict_conflicts(wi_id=<slug>, dry_run=true) → impact preview
+1. pf_predict_conflicts(work_item_id=<slug>, dry_run=true) → impact preview
+   ⚠️ 勘误（aihub#662，2026-09-14）：参数名原先写的是 `wi_id`，而已发布的参数名是
+      `work_item_id`。MCP 那层把整个参数 map 原样转发，但 `handlePredictConflicts` 的
+      `c.Bind(&req)` 按 `domain.PredictConflictsRequest` 解，`wi_id` 不是它的字段 ⇒
+      被 echo 静默丢弃，`req.WorkItemID` 仍是 nil。于是这次调用退化成匿名形状，含
+      path/document/section 的 payload 按新规则直接 400。写对名字之后本行**不需要**
+      另传 `project`：slug 能解析到 wi，wi 自己的 project 优先。
 2. pf_claim_work_item(id_or_slug=<slug>, mode="fresh", ...)
 3. 输出三段式
 
@@ -4535,6 +4577,31 @@ type Step struct {
 > slug 皆可），不报身份的 create-preview 逐字不变；规则 1 命中即 `return`
 > 的性质不变，变的只是「自己的行不算命中」。
 
+> 🔴 **v1.28（aihub#662 + aihub#665，2026-09-14）：这 6 条规则之前先有两道闸，都不是规则。**
+>
+> **① `project` 解析不出来 ⇒ 400，而不是一份空答案（aihub#662）。** 解析顺序是：能解析
+> **且可见**的 `work_item_id` 所属的 project 优先，否则退到调用方传的 `project`。两者皆无
+> 而 payload 里又有 path / document / section 条目时，这一整次调用被拒 400，details 带
+> `paths_needing_project`。这不是加校验，是拆掉一个假放行：file_scope 锁键是
+> `<project>:<repo>:<path>`，空 project 把每个探针键建成 `:<repo>:<path>`，**零行匹配**，
+> 而零行与「没人持有」逐字符不可分辨 —— 出现在规则 1 这条**职责就是拦**的硬规则上。
+> 同一份 declared_resources 曾经带 project 答 hard_block、不带 project 答
+> `{"predictions":[],"severity":"info"}`，2026-09-14 在生产上被当成「锁已经放了」读了一次。
+> ⚠️ 闸只对**派生 file_scope 的类型**生效：规则 2/4/5/6 匹配的是声明容器，从不碰 project，
+> 所以只含 repo / service / external_ref 的 payload 不带 project 一样答得准，必须继续放行。
+> 判据取 `resourceToLock` 而不是 `derivedLock`，因为规则 3 对 `intent=read` 也跑（报 info），
+> 一个悄悄变成空列表的 info 是同一个缺陷换个安静的声部。
+>
+> **② project 在任何规则读它之前先鉴权（aihub#665）。** 此前进来的路上**没有任何一层**授权
+> 过它：路由（`POST /v1/conflicts/predict` 除 BearerAuth 外无中间件）、handler（只转发角色）、
+> domain 函数（拿角色只为折叠**答案**）都没有 —— 于是 `project` 是调用方随口写的哪个就是哪个，
+> 规则 1 就在那个命名空间里读锁表。看不见的 project 现在答 404（与「project 不存在」同一份
+> 字节，刻意不是 403：403 会向没资格的人确认这个 project 存在）；看不见的 `work_item_id`
+> 与「没传」解析结果逐字相同（否则 `<project>#<seq>` 每猜一次就多一个可区分比特）；
+> `will_unlock` 改按**可见**的那次解析取值。
+> ⚠️ 连带：规则 1 的 hard_block 也开始走 H7 折叠了（此前命中即 `return`，绕过折叠），
+> 每条 prediction 都带 `work_item_id`，规则 4/5 不再漏 actor_display 与 slug。
+
 `pf_predict_conflicts` 按以下顺序应用 6 条规则，任一 hard_block 即停止：
 
 ```
@@ -4581,6 +4648,11 @@ type Step struct {
     服务不再是要被阻止的事，只是人可能想知道的事实。部署与观测的互斥归
     runbook，不归本谓词。
   → 不受 dry_run 门控（只有规则 1 受）
+
+前置（v1.28，不是规则，跑在规则 1 之前）：
+  ① project 解析不出来 且 payload 含 path/document/section → 400（aihub#662）
+  ② 解析出的 project 调用方看不见 → 404（aihub#665，与「不存在」同一份字节）
+  只含 repo/service/external_ref 的 payload 两道闸都不碰，逐字照旧。
 
 dry_run=true 时跳过规则 1 的 lock 检查，仅做资源预测。
 predict_conflicts 是 advisory，claim 时仍在事务内原子执行规则 1。

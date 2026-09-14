@@ -28,7 +28,7 @@ EXPECTED SKILL BEHAVIOR:
   4. Because requires_human_session=true: surface wi in needs_human_session[] queue;
      notify user "This wi requires a human-led session."
      Auto-agents will NOT see this in items[].
-  5. Human explicitly claims: pf_claim_work_item(work_item_id=WI_ID, mode="fresh", ...)
+  5. Human explicitly claims: pf_claim_work_item(work_item_id=WI_ID, ...)
      → returns {attempt_id, claim_epoch, expires_at}
   6. Worktree created at WORKSPACE_ROOT/pf.<shortid>/marketplace/
      Save WT_PATH

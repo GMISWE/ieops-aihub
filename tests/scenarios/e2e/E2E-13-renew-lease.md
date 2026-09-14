@@ -13,7 +13,7 @@ was removed in aihub#36: claim is now static ownership, no heartbeat required.
 AS ADMIN: pf_create_work_item(project="marketplace", goal="[test] E2E-13 renew lease removed", wi_type="chore")
 Save WI_ID
 
-AS ALICE: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e13-alice", mode="fresh")
+AS ALICE: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e13-alice")
 ASSERT: ok==true
 
 ### Verify endpoint returns 410

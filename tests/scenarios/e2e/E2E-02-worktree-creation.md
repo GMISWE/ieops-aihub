@@ -29,7 +29,6 @@ NOTE: save response.id as WI_ID, response.seq as SEQ
 
 ### Claim with explicit requested_locks (different format from declared_resources)
 CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-02-claim",
-      mode="fresh",
       requested_locks=[{
         "resource_type": "git_branch",
         "resource_key": "marketplace/polyforge/e2e-02-test"
@@ -60,8 +59,7 @@ ASSERT: dirname matches regex pf\.\d+\.[A-Za-z0-9]{8}
 ASSERT: dirname starts with "pf." + SEQ + "."
 
 ### Re-claim (simulate crash recovery) — must reuse existing worktree
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-02-reclaim",
-      mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-02-reclaim")
 ASSERT: response.ok == true
 NOTE: Worktree directory already exists — MCP should skip git worktree add and reuse it
 NOTE: Read updated state file

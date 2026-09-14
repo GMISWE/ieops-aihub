@@ -13,7 +13,7 @@ Reference: FnCompleteWorkItem sets expires_at on linked memories.
 AS ADMIN: pf_create_work_item(project="marketplace", goal="[test] L3-04 wrap expires memory", wi_type="chore")
 Save WI_ID
 
-AS ADMIN: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l304-claim", mode="fresh")
+AS ADMIN: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l304-claim")
 
 AS ADMIN: pf_save_artifact(type="methodology.spec", work_item_id=WI_ID,
   content="L3-04 test spec — will expire after wrap", visibility="project")

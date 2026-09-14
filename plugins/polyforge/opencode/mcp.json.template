@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "polyforge": {
+      "type": "local",
+      "command": ["__POLYFORGE_PLUGIN_ROOT__/bin/polyforge-mcp.sh"],
+      "enabled": true
+    }
+  }
+}

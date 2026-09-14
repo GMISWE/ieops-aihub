@@ -160,16 +160,70 @@ func parsePiModelCatalog(out []byte) map[string]bool {
 	return models
 }
 
+// opencodeCatalogProbe shells out to `opencode models` (best-effort, at most
+// once per process — the result cannot change mid-generation). Unlike
+// codex's single-line JSON blob or pi's aligned header+data-row table,
+// opencode's real output is the simplest of the three: one bare
+// "provider/model-id" slug per line, no header row, no other stdout noise
+// (aihub#653 measurement, opencode 1.18.30: `opencode models` produced 122
+// clean lines with nothing but a slug on each). If the opencode CLI is
+// missing, not authenticated, or the command fails for any reason, every
+// model is conservatively treated as unavailable: never guess.
+type opencodeCatalogProbe struct {
+	once   sync.Once
+	models map[string]bool
+	err    error
+}
+
+func (p *opencodeCatalogProbe) load() {
+	p.once.Do(func() {
+		out, err := exec.Command("opencode", "models").Output()
+		if err != nil {
+			p.err = fmt.Errorf("opencode models: %w", err)
+			return
+		}
+		p.models = parseOpencodeModelCatalog(out)
+	})
+}
+
+func (p *opencodeCatalogProbe) HasModel(model string) (bool, error) {
+	p.load()
+	if p.err != nil {
+		return false, p.err
+	}
+	return p.models[model], nil
+}
+
+// parseOpencodeModelCatalog parses `opencode models`' real output shape: one
+// bare "provider/model-id" slug per line, no header row and no other stdout
+// noise (aihub#653 measurement). Blank lines are skipped; every non-blank
+// line is trusted as a complete slug verbatim -- unlike pi's table there is
+// no column structure to split on, and unlike codex's blob there is no JSON
+// to unmarshal.
+func parseOpencodeModelCatalog(out []byte) map[string]bool {
+	models := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		models[line] = true
+	}
+	return models
+}
+
 // probeForHarness returns the real CatalogProbe generation uses in
 // production for the given harness: a live codex probe for "codex", a live
-// pi probe for "pi", and nil for anything else (there is no third harness
-// this package generates for today).
+// pi probe for "pi", a live opencode probe for "opencode", and nil for
+// anything else.
 func probeForHarness(harness string) CatalogProbe {
 	switch harness {
 	case "codex":
 		return &codexCatalogProbe{}
 	case "pi":
 		return &piCatalogProbe{}
+	case "opencode":
+		return &opencodeCatalogProbe{}
 	default:
 		return nil
 	}
@@ -203,8 +257,8 @@ func ResolveModel(candidates []config.RoleCandidate, harness string, probe Catal
 	return "", false
 }
 
-// GenerateRoles renders and writes one harness's ("pi" or "codex") agent
-// files into outDir, resolving each role's tier against mc.Roles.Tiers
+// GenerateRoles renders and writes one harness's ("pi", "codex", or
+// "opencode") agent files into outDir, resolving each role's tier against mc.Roles.Tiers
 // (aihub#642 design decision #5). It returns an error rather than exiting the
 // process on any failure -- this is deliberately reusable from a context that
 // must never crash the host (cmd/polyforge/main.go's serve startup path,
@@ -222,8 +276,8 @@ func GenerateRoles(mc *config.MachineConfig, harness, outDir string) error {
 }
 
 func generateRoles(mc *config.MachineConfig, harness, outDir string, probe CatalogProbe) error {
-	if harness != "pi" && harness != "codex" {
-		return fmt.Errorf("unsupported harness %q for roles generate (must be \"pi\" or \"codex\")", harness)
+	if harness != "pi" && harness != "codex" && harness != "opencode" {
+		return fmt.Errorf("unsupported harness %q for roles generate (must be \"pi\", \"codex\", or \"opencode\")", harness)
 	}
 
 	roleList, err := roles.LoadRoles()
@@ -258,6 +312,8 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 		rendered, err = roles.RenderPiAgentFiles(roleList, resolved)
 	case "codex":
 		rendered, err = roles.RenderCodexAgentFiles(roleList, resolved)
+	case "opencode":
+		rendered, err = roles.RenderOpencodeAgentFiles(roleList, resolved)
 	}
 	if err != nil {
 		return fmt.Errorf("render %s agent files: %w", harness, err)
@@ -280,14 +336,24 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 	return nil
 }
 
-// RunRolesGenerate is the `polyforge roles generate <pi|codex> --out <dir>`
-// CLI subcommand (aihub#642 plan steps 10/11), dispatched from
-// cmd/polyforge/main.go's runCLI. Unlike GenerateRoles, this DOES exit the
-// process on error -- matching every other Run* subcommand in this package --
-// because a human or install script invoking this directly wants a non-zero
-// exit code on failure, not a silently-degraded install.
+// RunRolesGenerate is the `polyforge roles generate <pi|codex|opencode> --out
+// <dir>` CLI subcommand (aihub#642 plan steps 10/11; opencode added by
+// aihub#653), dispatched from cmd/polyforge/main.go's runCLI. Unlike
+// GenerateRoles, this DOES exit the process on error -- matching every other
+// Run* subcommand in this package -- because a human or install script
+// invoking this directly wants a non-zero exit code on failure, not a
+// silently-degraded install.
+//
+// opencode generation is deliberately install-script-invoked ONLY: unlike
+// codex (see DefaultCodexAgentsDir below), there is no auto-regeneration hook
+// for opencode in cmd/polyforge/main.go's serve startup path -- that call
+// site is aihub#654's locked territory, and opencode's install script
+// (plugins/polyforge/opencode/install.sh) computes its own --out target
+// directly in shell rather than through a Go-side Default*Dir helper, so no
+// such helper is added here. Wiring an auto-regen hook into serve startup, if
+// ever wanted, is left to a follow-up work item.
 func RunRolesGenerate(mc *config.MachineConfig, args []string) {
-	usage := "usage: polyforge roles generate <pi|codex> --out <dir>"
+	usage := "usage: polyforge roles generate <pi|codex|opencode> --out <dir>"
 	if len(args) < 1 || args[0] != "generate" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
@@ -298,8 +364,8 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 		os.Exit(1)
 	}
 	harness := args[0]
-	if harness != "pi" && harness != "codex" {
-		fmt.Fprintf(os.Stderr, "roles generate: unsupported harness %q (must be \"pi\" or \"codex\")\n%s\n", harness, usage)
+	if harness != "pi" && harness != "codex" && harness != "opencode" {
+		fmt.Fprintf(os.Stderr, "roles generate: unsupported harness %q (must be \"pi\", \"codex\", or \"opencode\")\n%s\n", harness, usage)
 		os.Exit(1)
 	}
 

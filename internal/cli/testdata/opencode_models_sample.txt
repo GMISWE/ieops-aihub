@@ -1,0 +1,9 @@
+opencode/big-pickle
+opencode/ling-3.0-flash-fin-free
+opencode/mimo-v2.5-free
+google-vertex/claude-opus-5@default
+google-vertex/claude-sonnet-4-5@20250929
+google-vertex/gemini-2.5-flash
+google-vertex/meta/llama-4-maverick-17b-128e-instruct-maas
+google-vertex/xai/grok-4.6
+google-vertex-anthropic/claude-sonnet-5@default

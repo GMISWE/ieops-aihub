@@ -583,6 +583,17 @@ def bash_attribution_fields(cmd, payload):
 # tool name after the last "__" so the guard fires identically under both runtimes (Bash has
 # no "__", so it falls through to the Bash branch unchanged).
 base_tool = tool.rsplit("__", 1)[-1]
+# aihub#659 review_fix (MEASURED_2026_09_14_renamed_server_key_fails_open, round 2):
+# capture whether "polyforge" appears in base_tool BEFORE the two literal-prefix strips
+# below get a chance to consume it. A rename that keeps the literal `polyforge_`/
+# `polyforge-` prefix but appends extra text (e.g. `polyforge_v2_pf_commit`) has that
+# prefix eaten by the strip immediately below, leaving a non-verb remainder like
+# `v2_pf_commit` — if the recovery further down only ran as an `elif` (mutually
+# exclusive with these two strips), it could never see that case, reproducing the exact
+# fail-OPEN bug this fix exists to close, just one layer deeper. Capturing presence
+# FIRST and running the recovery as an unconditional post-pass (not an elif) closes
+# that too.
+_had_polyforge = "polyforge" in base_tool
 # Copilot CLI names MCP tools `<server>-<tool>` (e.g. polyforge-pf_commit) with no "__";
 # strip that server prefix so the guard fires identically under all three harnesses.
 if base_tool.startswith("polyforge-"):
@@ -594,6 +605,28 @@ if base_tool.startswith("polyforge-"):
 # runtimes reach exactly the code they reached before.
 elif base_tool.startswith("polyforge_"):
     base_tool = base_tool[len("polyforge_"):]
+# aihub#659 (MEASURED_2026_09_14_renamed_server_key_fails_open): the two literal checks
+# above only recognize an UNCHANGED `mcp.polyforge` server key. Rename that key to any
+# other shape — prefix (`my_polyforge_x`), infix (`x_polyforge_y`), a kept-prefix with an
+# appended suffix (`polyforge_v2`, `polyforge-mirror`), or anything else that does not
+# begin with the literal `polyforge-`/`polyforge_` — and the checks above either don't
+# fire at all or fire but leave stray text behind, base_tool is left non-matching, no
+# field below ever matches, and the guard falls through to fail-OPEN (no fields ->
+# sys.exit(0)), silently, with no error. Once we know "polyforge" appeared ANYWHERE in
+# the original (pre-strip) name and the strips above didn't already leave a recognized
+# verb, the real tool name is recovered from its known trailing verb (pf_commit/pr/wrap/
+# ship) instead of assuming where the server-key portion ends — a renamed key can put
+# arbitrary text on either side of "polyforge", and can also keep the literal prefix and
+# still append more after it. This is deliberately NOT an elif of the two branches above:
+# it is a fallback that also covers the case where those branches fire but leave stray
+# text after them. A key that never contained "polyforge" at all (e.g. a genuinely
+# different MCP server such as "github") leaves _had_polyforge False and this block
+# never touches it: matching only kicks in once "polyforge" was actually present, so
+# this cannot widen into "any tool ending in pf_commit is polyforge's".
+if _had_polyforge and base_tool not in ("pf_commit", "pf_pr", "pf_wrap", "pf_ship"):
+    _m = re.search(r"pf_(?:commit|pr|wrap|ship)$", base_tool)
+    if _m:
+        base_tool = _m.group(0)
 fields = []
 bash_cmd = None
 # aihub#536 — the per-tool field scope below is DELIBERATELY asymmetric: each entry

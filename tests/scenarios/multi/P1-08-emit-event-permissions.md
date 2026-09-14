@@ -10,7 +10,7 @@
 
 ### Setup: Admin creates wi, Alice claims
 AS ADMIN: pf_create_work_item(goal="[test] P1-08 emit event p108a", chore) -> WI_ID
-AS ALICE: pf_claim_work_item(WI_ID, idempotency_key="p1-08-alice", mode="fresh")
+AS ALICE: pf_claim_work_item(WI_ID, idempotency_key="p1-08-alice")
 AS ALICE: pf_update_step(WI_ID, code_change, in_progress)
 
 ### Bob (writer, not owner) emits note — succeeds

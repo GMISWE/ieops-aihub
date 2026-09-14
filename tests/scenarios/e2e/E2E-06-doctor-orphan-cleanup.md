@@ -21,11 +21,11 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_B
 
-CALL: pf_claim_work_item(work_item_id=WI_A, idempotency_key="e2e-06-claim-a", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_A, idempotency_key="e2e-06-claim-a")
 ASSERT: response.worktrees != null
 NOTE: save WT_A = response.worktrees["marketplace"]
 
-CALL: pf_claim_work_item(work_item_id=WI_B, idempotency_key="e2e-06-claim-b", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_B, idempotency_key="e2e-06-claim-b")
 ASSERT: response.worktrees != null
 NOTE: save WT_B = response.worktrees["marketplace"]
 

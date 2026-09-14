@@ -10,7 +10,7 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-08-claim-1", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-08-claim-1")
 ASSERT: response.ok == true
 
 ## Steps
@@ -36,7 +36,7 @@ NOTE: version incremented by force_terminate (in_progress→failed transition)
 NOTE: Verify WORKSPACE_ROOT/.polyforge/state/WI_ID.json still exists
 
 ### Resume and verify step can be restarted
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-08-claim-2", mode="resume")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-08-claim-2")
 ASSERT: response.ok == true
 
 CALL: pf_update_step(work_item_id=WI_ID, step_id="code_change", status="in_progress")

@@ -11,7 +11,7 @@ ASSERT: response.status == "queued"
 ASSERT: response.wi_type == "fix_bug"
 NOTE: save response.id as WI_ID, response.slug as SLUG
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-01-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-01-claim")
 ASSERT: response.ok == true
 ASSERT: response.slug == SLUG
 ASSERT: response.project == "marketplace"

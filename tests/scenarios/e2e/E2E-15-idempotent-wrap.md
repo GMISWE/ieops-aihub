@@ -14,7 +14,7 @@ Reference: FnCompleteAttempt idempotency via attempt status check.
 AS ADMIN: pf_create_work_item(project="marketplace", goal="[test] E2E-15 idempotent wrap", wi_type="chore")
 Save WI_ID
 
-AS ADMIN: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e15-claim", mode="fresh")
+AS ADMIN: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e15-claim")
 ASSERT: ok==true; Save ATTEMPT_ID, CLAIM_EPOCH, SESSION_SECRET from state file
 
 ### Complete all steps

@@ -106,7 +106,7 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 	}
 	probe := &fakeProbe{available: map[string]bool{"claude-sonnet-4-5": true}}
 
-	if err := generateRoles(mc, "pi", dir, probe); err != nil {
+	if err := generateRoles(mc, "pi", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestGenerateRoles_CodexValidatesAgainstProbe(t *testing.T) {
 	}
 	probe := &fakeProbe{available: map[string]bool{"gpt-5-codex": true}}
 
-	if err := generateRoles(mc, "codex", dir, probe); err != nil {
+	if err := generateRoles(mc, "codex", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(codex) error: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 	}
 	probe := &fakeProbe{available: map[string]bool{"claude-sonnet-4-5": true}}
 
-	if err := generateRoles(mc, "pi", dir, probe); err != nil {
+	if err := generateRoles(mc, "pi", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestGenerateRoles_OpencodeWritesAllFiles(t *testing.T) {
 	}
 	probe := &fakeProbe{available: map[string]bool{"anthropic/claude-sonnet-4-5": true}}
 
-	if err := generateRoles(mc, "opencode", dir, probe); err != nil {
+	if err := generateRoles(mc, "opencode", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(opencode) error: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestGenerateRoles_OpencodeValidatesAgainstProbe(t *testing.T) {
 	}
 	probe := &fakeProbe{available: map[string]bool{"anthropic/claude-sonnet-4-5": true}}
 
-	if err := generateRoles(mc, "opencode", dir, probe); err != nil {
+	if err := generateRoles(mc, "opencode", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(opencode) error: %v", err)
 	}
 
@@ -331,7 +331,7 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 			probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
 
 			stderr := captureStderr(t, func() {
-				if err := generateRoles(mc, harness, dir, probe); err != nil {
+				if err := generateRoles(mc, harness, dir, probe, ""); err != nil {
 					t.Fatalf("generateRoles(%s) error: %v", harness, err)
 				}
 			})

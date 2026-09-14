@@ -43,7 +43,6 @@ NOTE: save response.id as WI_B
 
 ### WI_A acquires lock
 CALL: pf_claim_work_item(work_item_id=WI_A, idempotency_key="e2e-04-claim-a",
-      mode="fresh",
       requested_locks=[{
         "resource_type": "git_branch",
         "resource_key": "marketplace/polyforge/e2e-04-conflict-branch"
@@ -54,7 +53,6 @@ ASSERT: response.acquired_locks[0].resource_key == "marketplace/polyforge/e2e-04
 
 ### WI_B claim blocked
 CALL: pf_claim_work_item(work_item_id=WI_B, idempotency_key="e2e-04-claim-b",
-      mode="fresh",
       requested_locks=[{
         "resource_type": "git_branch",
         "resource_key": "marketplace/polyforge/e2e-04-conflict-branch"
@@ -71,7 +69,6 @@ ASSERT: response.ok == true
 
 ### WI_B claim now succeeds
 CALL: pf_claim_work_item(work_item_id=WI_B, idempotency_key="e2e-04-claim-b-retry",
-      mode="fresh",
       requested_locks=[{
         "resource_type": "git_branch",
         "resource_key": "marketplace/polyforge/e2e-04-conflict-branch"

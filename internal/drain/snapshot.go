@@ -52,6 +52,19 @@ type Snapshot struct {
 
 	// Channel is the harness/model route this run settled on at preflight.
 	Channel Channel `json:"channel"`
+	// Preset records which tier table this run resolved its per-step models
+	// from — the `--preset` name, the machine's configured preset, or the
+	// bare [roles.tiers] table. It is provenance, not configuration: two runs
+	// on the same machine can legitimately use different presets, and "which
+	// models was it actually using" is otherwise unanswerable after the fact.
+	//
+	// Added with `omitempty` and WITHOUT bumping SnapshotVersion, deliberately.
+	// That constant is documented as marking shape changes that are
+	// INCOMPATIBLE; an added optional field is not one. An older `polyforge
+	// watch` ignores it, and a newer one reads "" from an older snapshot —
+	// both correct. Bumping here would make every in-flight run print a
+	// version-mismatch warning for a field that cannot mislead anyone.
+	Preset string `json:"preset,omitempty"`
 	// PreflightRejected records the candidates that failed preflight and why. Kept rather than
 	// discarded: "drain is using pi" is a much less useful thing to read at 3am than "drain is
 	// using pi because claude's credential expired".

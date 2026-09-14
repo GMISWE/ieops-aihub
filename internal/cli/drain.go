@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
@@ -30,12 +32,41 @@ Layer 3 continuous scheduler: repeatedly select the work items that are executab
 right now, run them, and stop with a terminal state that says why.
 
 Options:
-  --project=<name>        Project to drain (required).
+  --project=<name>        Project to drain (required, except with --stop).
   --all                   Drain every work item in the project, not just mine.
                           Not the default: two people draining the same project
                           under --all do little but take turns losing lock races.
   --plan                  Plan only. List and order what WOULD run, report the
                           terminal classification, claim nothing, execute nothing.
+  --detach                Start the run in the background and return immediately,
+                          printing the run id, the pid and the log path. The
+                          process is setsid'd, so it survives this terminal (this
+                          box is a compose container: there is no systemd to hand
+                          it to). Follow it with "polyforge watch".
+  --stop                  Stop the running drain on this machine (the most recent
+                          run, or --run=<id>) and return. Sends SIGTERM, which is
+                          exactly what Ctrl-C sends, so the run takes its normal
+                          graceful-cancellation path and ends with a proper
+                          terminal state in its snapshot.
+                          WARNING: work items whose step was in flight are left
+                          CLAIMED and still holding their locks. That is the same
+                          disposition Ctrl-C has always had. --stop names them so
+                          you can recover them; it does not recover them for you.
+                          It is a drain flag and not a top-level "polyforge halt"
+                          on purpose: /pf-stop is the WORK-ITEM lifecycle verb
+                          (--pause/--wrap/--fail), and one verb meaning two things
+                          is how somebody ends a work item when they meant to end
+                          a scheduler.
+  --run=<id>              With --stop: which run to stop (default: the most
+                          recent). Ignored otherwise.
+  --preset=<name>         Resolve this run's per-step models from the named tier
+                          table in this machine's config.toml
+                          ([roles.presets.<name>.tiers]) instead of its
+                          configured selection. A preset is a named snapshot of
+                          the whole tier->model table; selecting one swaps the
+                          table outright. An unknown name is refused, never
+                          silently ignored.
+                          --channel=<h/model> still wins where it names a model.
   --max-parallel=<n>      Work items in flight at once (default 8).
   --max-rounds=<n>        Stop after n scheduling rounds (default unlimited).
   --max-work-items=<n>    Stop after executing n work items (default unlimited).
@@ -64,9 +95,35 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		fmt.Println(DrainUsage)
 		return
 	}
+
+	home, err := polyforgeHome()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: %v\n", err)
+		os.Exit(2)
+	}
+
+	// --stop is resolved BEFORE the --project check and before anything touches
+	// the network. It names a run that already exists, so it needs no project,
+	// no user id and no aihub client -- and requiring any of them would make the
+	// one command that ends a runaway scheduler unavailable in exactly the
+	// situations that produce one.
+	if opts.Stop {
+		runDrainStop(home, opts)
+		return
+	}
+
 	if opts.Project == "" {
 		fmt.Fprintf(os.Stderr, "drain: --project is required\n\n%s\n", DrainUsage)
 		os.Exit(1)
+	}
+
+	// --detach re-execs this binary without --detach and returns. It is checked
+	// after the flag validation above so that `--detach --project=` still fails
+	// in the foreground with a readable message, rather than spawning a child
+	// that fails the same way into a log file.
+	if opts.Detach {
+		runDrainDetach(home, args, opts)
+		return
 	}
 
 	me, err := resolveSelfUserID(ctx, c)
@@ -77,12 +134,10 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 	}
 	scope := drain.Scope{All: opts.All, UserID: me}
 
-	home, err := polyforgeHome()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "drain: %v\n", err)
-		os.Exit(2)
+	runID := detachedRunID()
+	if runID == "" {
+		runID = drain.NewRunID(time.Now(), os.Getpid())
 	}
-	runID := drain.NewRunID(time.Now(), os.Getpid())
 	runDir := drain.RunDir(home, runID)
 
 	q := &drainQueries{c: c, project: opts.Project, scope: scope}
@@ -118,6 +173,29 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		os.Exit(2)
 	}
 
+	// The tier table is resolved AFTER preflight so the catalog probes only run
+	// for harnesses that actually answered, and BEFORE the first claim so a
+	// misspelled --preset costs nothing. An unresolvable preset is fatal here
+	// rather than a warning: the operator asked for a specific set of models,
+	// and running the wrong ones unattended is the failure this flag exists to
+	// prevent.
+	mc, mcErr := config.LoadMachineConfig()
+	if mc == nil {
+		// Same tolerance runCLI already applies to an unparseable config.toml:
+		// continue as if it were empty rather than taking the whole command
+		// down. A --preset that then cannot resolve is refused a line later,
+		// which is the loud outcome; a run with no preset is unaffected.
+		fmt.Fprintf(os.Stderr, "drain: %s could not be loaded (%v); continuing as if it were empty\n",
+			config.MachineConfigPath(), mcErr)
+		mc = &config.MachineConfig{}
+	}
+	tierModels, presetLabel, err := resolvePresetModels(mc, opts.Preset, channels, probeForHarness)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "drain: models from %s\n", presetLabel)
+
 	r := &drain.Runner{
 		Project:  opts.Project,
 		Scope:    scope,
@@ -139,12 +217,13 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 
 		Startup:     drainStartup(ctx, wsRoot, opts.Project),
 		ResolveRole: drainResolveRole,
-		Dispatch:    dispatchStepAgent,
+		Dispatch:    dispatchWithPresetModel(tierModels),
 		Cleanup:     drainCleanup(ctx, wsRoot),
 
 		Logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) },
 		Publish: func(s *drain.Snapshot) {
 			s.RunID, s.PID, s.PreflightRejected = runID, os.Getpid(), rejected
+			s.Preset = presetLabel
 			if err := drain.WriteSnapshot(runDir, s); err != nil {
 				fmt.Fprintf(os.Stderr, "drain: warning: snapshot write failed: %v\n", err)
 			}
@@ -239,11 +318,22 @@ func scopeLabel(all bool) string {
 // ─── options ──────────────────────────────────────────────────────────────────
 
 type drainOptions struct {
-	Project  string
-	All      bool
-	Plan     bool
-	JSON     bool
-	Help     bool
+	Project string
+	All     bool
+	Plan    bool
+	JSON    bool
+	Help    bool
+	// Detach spawns the run as an independent background process and returns.
+	Detach bool
+	// Stop signals a running drain instead of starting one.
+	Stop bool
+	// RunID qualifies Stop. It is deliberately read ONLY with --stop: a flag
+	// that silently did nothing on a normal run would be worse than one that
+	// does not exist.
+	RunID string
+	// Preset names a tier table in ~/.polyforge/config.toml to resolve this
+	// run's per-step models from. "" means the machine's configured selection.
+	Preset   string
 	Budget   drain.Budget
 	Channels []drain.Channel
 }
@@ -260,6 +350,21 @@ func parseDrainArgs(args []string) (drainOptions, error) {
 			o.Plan = true
 		case a == "--json":
 			o.JSON = true
+		case a == "--detach":
+			o.Detach = true
+		case a == "--stop":
+			o.Stop = true
+		case strings.HasPrefix(a, "--run="):
+			o.RunID = strings.TrimPrefix(a, "--run=")
+		case strings.HasPrefix(a, "--preset="):
+			o.Preset = strings.TrimPrefix(a, "--preset=")
+			if o.Preset == "" {
+				// An empty value means "the machine's configured selection",
+				// which is what passing no flag at all already means. Accepting
+				// it would make `--preset=` (a shell variable that expanded to
+				// nothing) look like it selected something.
+				return o, fmt.Errorf("--preset: needs a preset name, e.g. --preset=frugal")
+			}
 		case strings.HasPrefix(a, "--max-parallel="):
 			n, err := positiveInt(a, "--max-parallel")
 			if err != nil {
@@ -297,6 +402,35 @@ func parseDrainArgs(args []string) (drainOptions, error) {
 			// drop, and the whole point of the budgets is that they hold.
 			return o, fmt.Errorf("unknown flag %q", a)
 		}
+	}
+
+	// Mode conflicts are REFUSED, not resolved by precedence. Each of these
+	// pairs has two defensible readings, and a scheduler that claims and
+	// executes real work items should never pick one silently.
+	if o.Stop && o.Detach {
+		return o, fmt.Errorf("--stop and --detach are opposites: one ends a run, the other starts one")
+	}
+	if o.Stop && o.Plan {
+		return o, fmt.Errorf("--stop and --plan cannot be combined: --plan describes a run that would start, " +
+			"--stop ends one that is already going")
+	}
+	if o.Detach && o.Plan {
+		// --plan's whole output is a report meant to be read. Detaching it
+		// would write that report to a log file nobody asked for and print a
+		// pid for a process that exits before you can watch it.
+		return o, fmt.Errorf("--detach and --plan cannot be combined: --plan prints a report and claims nothing, " +
+			"so there is nothing to run in the background")
+	}
+	if o.RunID != "" && !o.Stop {
+		// Refused rather than ignored, for the same reason the parser refuses
+		// unknown flags: on this command a silently-inert flag reads as a
+		// budget or target that was honoured when it was not.
+		return o, fmt.Errorf("--run=%s only applies to --stop; to watch a particular run use "+
+			"`polyforge watch --run=%s`", o.RunID, o.RunID)
+	}
+	if o.Stop && o.Preset != "" {
+		return o, fmt.Errorf("--preset does not apply to --stop: it selects the models a run uses, " +
+			"and --stop ends a run that already chose them")
 	}
 	return o, nil
 }
@@ -357,6 +491,708 @@ func knownHarness(h drain.Harness) bool {
 		}
 	}
 	return false
+}
+
+// ─── --detach ─────────────────────────────────────────────────────────────────
+
+// detachRunIDEnv hands a parent-minted run id down to the detached child.
+//
+// The child could mint its own — RunDrain does exactly that when this is unset —
+// but then the PARENT cannot name the run it just started without polling
+// `latest` and hoping. drain.NewRunID's timestamp has one-second resolution, so
+// a parent that recomputed the id independently would disagree with the child
+// across a second boundary: rare, silent, and it would point `--stop` and
+// `polyforge watch` at a directory that does not exist.
+const detachRunIDEnv = "POLYFORGE_DRAIN_RUN_ID"
+
+// detachedRunID returns the run id a --detach parent minted for this process,
+// and REMOVES it from the environment.
+//
+// The removal is not tidiness. Step agents are spawned with this process's
+// environment, so a `polyforge drain` run from inside a step (a scheduler
+// draining a project whose work item drains another) would inherit the variable
+// and adopt its parent's run id — two processes writing one snapshot.json,
+// each overwriting the other's view of a different run. Unsetting it here means
+// only the process the parent actually spawned can use it.
+func detachedRunID() string {
+	id := os.Getenv(detachRunIDEnv)
+	if id == "" {
+		return ""
+	}
+	_ = os.Unsetenv(detachRunIDEnv)
+	// The value is interpolated straight into a filesystem path (RunDir,
+	// WriteLatest), so its SHAPE is checked rather than trusted. No privilege
+	// boundary is crossed — only the invoking user can set this — but
+	// POLYFORGE_DRAIN_RUN_ID=../../x would otherwise write outside the drain
+	// directory, and a run id has one fixed shape from NewRunID, so requiring
+	// it costs nothing. A malformed value is DISCARDED rather than refused:
+	// RunDrain then mints its own and the run proceeds, which beats failing a
+	// scheduler over an environment variable.
+	if !validRunID(id) {
+		fmt.Fprintf(os.Stderr, "drain: ignoring malformed %s=%q; minting a fresh run id\n",
+			detachRunIDEnv, id)
+		return ""
+	}
+	return id
+}
+
+// runIDShape is drain.NewRunID's output: "20060102T150405Z-<pid>".
+var runIDShape = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9]+$`)
+
+func validRunID(id string) bool { return runIDShape.MatchString(id) }
+
+// detachLogFile is where a detached run's own stdout and stderr land, inside its
+// run directory next to the per-step logs.
+const detachLogFile = "drain.log"
+
+// runDrainDetach starts this same command as an independent background process
+// and returns immediately, printing the run id, the pid and the log path.
+//
+// That output contract is fixed by aihub#640 `entrypoint_not_a_session`, which
+// says a convenience entry point's job "只能是 spawn 后台进程后立即返回 pid+日志
+// 路径". The same ruling records that this box is a compose container with NO
+// systemd, so residency comes from setsid rather than from a unit file: the
+// child gets its own session and process group, and therefore survives both the
+// parent exiting and the terminal going away.
+//
+// The child is NOT waited on. Its exit code is the run's terminal state and is
+// recorded in the snapshot, which `polyforge watch` reads; blocking here to
+// collect it would be the one thing --detach exists not to do.
+func runDrainDetach(home string, args []string, opts drainOptions) {
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: cannot find this binary to re-exec: %v\n", err)
+		os.Exit(2)
+	}
+
+	// The run id is minted HERE, from this process's pid, and handed down. See
+	// detachRunIDEnv for why the child is not left to mint its own.
+	runID := drain.NewRunID(time.Now(), os.Getpid())
+	runDir := drain.RunDir(home, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: create run dir %s: %v\n", runDir, err)
+		os.Exit(2)
+	}
+	logPath := filepath.Join(runDir, detachLogFile)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: open %s: %v\n", logPath, err)
+		os.Exit(2)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: open %s: %v\n", os.DevNull, err)
+		os.Exit(2)
+	}
+	defer func() { _ = devnull.Close() }()
+
+	pid, err := startDetached(self, detachChildArgs(args), append(os.Environ(), detachRunIDEnv+"="+runID),
+		devnull, logFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: could not start the background run: %v\n", err)
+		os.Exit(2)
+	}
+
+	// 🔴 REGISTER THE RUN HERE, in the parent, before returning.
+	//
+	// The child writes its own snapshot and `latest` pointer too, but not for a
+	// while: it must first resolve the caller's user id, read the project's
+	// scenario URL, and PREFLIGHT EVERY CHANNEL CANDIDATE — which spawns a real
+	// harness process per candidate. That is seconds to tens of seconds.
+	//
+	// Leaving the window unregistered made `polyforge drain --stop` act on the
+	// PREVIOUS run for its whole duration, which is the runaway-scheduler
+	// failure --stop exists to prevent, in two flavours: if the previous run had
+	// finished, --stop printed "already finished. Nothing to stop." and exited
+	// 0 while the new run went on claiming and executing work items unattended;
+	// if it had not, --stop SIGTERMed the wrong run and stranded ITS in-flight
+	// work items. The pid-reuse guard cannot catch either, because it asks "is
+	// this pid a drain" and not "is it THIS run". It also made `polyforge watch
+	// --run=<the id just printed>` fail with "cannot read run".
+	//
+	// Both writes are idempotent against the child's later ones: the id is the
+	// same, and the child's Publish sets PID to its own pid, which is the pid
+	// written here. Non-fatal on failure — the run is already started, and
+	// refusing to report it would be strictly worse than reporting it with a
+	// missing pointer.
+	if werr := drain.WriteSnapshot(runDir, &drain.Snapshot{
+		RunID:     runID,
+		Project:   opts.Project,
+		PID:       pid,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		ScopeAll:  opts.All,
+		Preset:    opts.Preset,
+	}); werr != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: warning: could not record the run's initial state (%v); "+
+			"`drain --stop` with no --run may act on an older run until this one publishes\n", werr)
+	}
+	if werr := drain.WriteLatest(home, runID); werr != nil {
+		fmt.Fprintf(os.Stderr, "drain: --detach: warning: could not record this as the latest run (%v); "+
+			"use `drain --stop --run=%s` rather than the bare form\n", werr, runID)
+	}
+
+	if opts.JSON {
+		b, _ := json.MarshalIndent(map[string]any{
+			"run_id": runID, "pid": pid, "log": logPath, "run_dir": runDir,
+		}, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+	fmt.Printf("run_id: %s\n", runID)
+	fmt.Printf("pid:    %d\n", pid)
+	fmt.Printf("log:    %s\n", logPath)
+	fmt.Printf("\nwatch it:  polyforge watch --run=%s --follow\n", runID)
+	fmt.Printf("stop it:   polyforge drain --stop --run=%s\n", runID)
+}
+
+// startDetached spawns path in its own session and returns the child's pid,
+// having released it rather than reaped it.
+//
+// 🔴 The pid is READ BEFORE Release, and that ordering is the whole reason this
+// is a separate function. os.Process.Release sets Pid to -1 on Unix, so reading
+// cmd.Process.Pid afterwards yields -1 — which is exactly what the first version
+// of --detach printed, breaking the one output contract aihub#640 fixes for it
+// ("立即返回 pid+日志路径"). It was invisible to every unit test and turned up on
+// the first live run, so the ordering is now stated here once and asserted by
+// TestStartDetached_ReturnsAUsablePid.
+//
+// Setsid, not merely "started in the background": without a new session the child
+// stays in this process group and takes the terminal's SIGHUP with it. Build
+// targets are linux and darwin only (publish-bins.yml, ci.yml) and both have the
+// field.
+func startDetached(path string, args, env []string, stdin, out *os.File) (int, error) {
+	cmd := exec.Command(path, args...) //nolint:gosec // path is os.Executable()
+	cmd.Stdin = stdin
+	cmd.Stdout = out
+	cmd.Stderr = out
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid // BEFORE Release; see above.
+	// Release rather than Wait: this process is about to exit and the run is
+	// reparented to init (pid 1 in this container — there is no systemd).
+	_ = cmd.Process.Release()
+	return pid, nil
+}
+
+// detachChildArgs rebuilds the child's argument vector: the `drain` subcommand
+// plus this invocation's own flags, minus --detach.
+//
+// Dropping --detach is what stops the child from detaching again, forever. It is
+// removed by value rather than by reconstructing the flags from drainOptions,
+// so a flag this function has never heard of still reaches the child.
+func detachChildArgs(args []string) []string {
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "drain")
+	for _, a := range args {
+		if a == "--detach" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// ─── --stop ───────────────────────────────────────────────────────────────────
+
+// stopGraceDeadline bounds how long --stop waits for the run to exit on its own.
+// A drain that is mid-step has to unwind a killed child process and write a final
+// snapshot; that is fast, but it is not instant.
+const stopGraceDeadline = 30 * time.Second
+
+// stopPollInterval is how often --stop rechecks whether the process is gone.
+const stopPollInterval = 250 * time.Millisecond
+
+// runDrainStop stops a running drain by sending it SIGTERM, and reports what that
+// left behind.
+//
+// # Why SIGTERM and nothing else
+//
+// The graceful path already exists and this hooks into it rather than inventing a
+// second one. cmd/polyforge/main.go wraps every command in
+// `signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)`, so SIGTERM cancels
+// the run context — the same cancellation Ctrl-C causes. It is NOT the same
+// delivery: Ctrl-C signals the whole foreground process group, so see
+// signalTarget for what this signals and what it cannot reach.
+// internal/drain/runner.go
+// then unwinds through the cancellation path it already has: the round loop
+// breaks with StopCancelled, in-flight step agents die with their
+// exec.CommandContext, bailOut() converts a mid-call context.Canceled into an
+// ending rather than an error, and finish() writes a snapshot with Finished=true
+// and a real terminal state. `polyforge watch` renders that correctly today.
+//
+// # What it leaves behind, and why this says so out loud
+//
+// A work item whose step was in flight is left CLAIMED — status `running`, locks
+// still held. That is runner.go's deliberate, pre-existing disposition, in its
+// own words "the attempt is left claimed so it can be resumed", and it is what
+// Ctrl-C has always done. Giving --stop a DIFFERENT disposition would be worse
+// than this one: two shutdown paths that disagree about whether an interrupted
+// attempt is `running` or `paused` is a far harder thing to reason about at 3am
+// than one path that is merely imperfect.
+//
+// So this does not quietly inherit that behaviour: it reads the snapshot BEFORE
+// signalling and names the work items it is about to strand, with the recovery
+// step. An unattended scheduler's stop command that left a pile of `running` work
+// items without saying so would be worse than not having the flag at all.
+//
+// ⚠️ That list is Snapshot.Active, which is a LOWER BOUND, not the complete set.
+// runner.go's executeWorkItem claims a work item and then runs engine startup and
+// opens the first step before it calls setActive, so a work item can be claimed
+// and holding locks while absent from Active for that whole stretch — and with
+// --max-parallel=8, eight of them can be. Publishing an entry at claim time
+// instead would close the gap, but that is runner.go, outside this work item's
+// declared files. The printed text therefore says "had a step in flight", which
+// is exactly what is known, and adds a line about the ones that may not appear.
+//
+// # Why it never escalates to SIGKILL
+//
+// SIGKILL cannot be caught, so the run would never reach finish(). The snapshot
+// would keep Finished=false with a pid that no longer exists — precisely the
+// shape `polyforge watch` reports as "DIED (process gone, run never finished)".
+// Escalating would manufacture that state deliberately. If the process does not
+// exit within the deadline this says so and stops, leaving the decision with the
+// person who can make it.
+func runDrainStop(home string, opts drainOptions) {
+	runID := opts.RunID
+	if runID == "" {
+		runID = drain.ReadLatest(home)
+		if runID == "" {
+			fmt.Fprintln(os.Stderr, "drain --stop: no drain run recorded on this machine.")
+			os.Exit(1)
+		}
+	}
+	dir := drain.RunDir(home, runID)
+	s, err := drain.ReadSnapshot(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain --stop: cannot read run %s (%v).\n"+
+			"`polyforge watch --list` shows the runs on this machine.\n", runID, err)
+		os.Exit(1)
+	}
+
+	// Guards, in order. Every one is a refusal rather than a warning: this
+	// command sends a signal, and "probably the right process" is not a standard
+	// a signal should be sent on.
+	if s.Finished {
+		fmt.Printf("drain --stop: run %s already finished: %s (stopped: %s, exit %d). Nothing to stop.\n",
+			runID, s.Terminal, s.StopReason, s.ExitCode)
+		return
+	}
+	if s.PID <= 0 {
+		fmt.Fprintf(os.Stderr, "drain --stop: run %s records no pid, so there is nothing to signal.\n", runID)
+		os.Exit(1)
+	}
+	if !processAlive(s.PID) {
+		fmt.Fprintf(os.Stderr, "drain --stop: run %s is not running: pid %d is gone but the run never "+
+			"finished, so it DIED rather than ended.\n"+
+			"Any work item it had claimed is still claimed; `polyforge watch --run=%s` lists them.\n",
+			runID, s.PID, runID)
+		os.Exit(1)
+	}
+	if ok, checked := pidLooksLikeDrain(s.PID); checked && !ok {
+		// Pid reuse is the one way this command can do real damage: the pid in a
+		// snapshot from days ago may belong to something else entirely by now,
+		// and SIGTERM to an unrelated process is not recoverable by apologising.
+		fmt.Fprintf(os.Stderr, "drain --stop: REFUSING to signal pid %d: it is alive but is not a polyforge "+
+			"drain run, so run %s's pid has been reused by something else.\n"+
+			"Nothing was signalled.\n", s.PID, runID)
+		os.Exit(1)
+	} else if !checked {
+		fmt.Fprintf(os.Stderr, "drain --stop: note: cannot verify pid %d is still polyforge on this platform; "+
+			"proceeding on the snapshot's word.\n", s.PID)
+	}
+
+	// Read the casualty list BEFORE signalling: once the run unwinds, finish()
+	// clears Snapshot.Active, so afterwards there is nothing left to report.
+	inFlight := append([]drain.ActiveWI(nil), s.Active...)
+
+	target, whole := signalTarget(s.PID)
+	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stderr, "drain --stop: could not signal pid %d: %v\n", s.PID, err)
+		os.Exit(2)
+	}
+	if whole {
+		fmt.Printf("drain --stop: sent SIGTERM to run %s (process group %d); waiting up to %s for it "+
+			"to finish unwinding.\n", runID, s.PID, stopGraceDeadline)
+	} else {
+		// Disclosed rather than glossed: on this path the step agents' own
+		// children are not in the signal's target set. See signalTarget.
+		fmt.Printf("drain --stop: sent SIGTERM to run %s (pid %d only, not its process group); "+
+			"waiting up to %s for it to finish unwinding.\n", runID, s.PID, stopGraceDeadline)
+	}
+
+	stopped := waitForRunToStop(s.PID)
+
+	if len(inFlight) > 0 {
+		fmt.Printf("\nWARNING: %d work item(s) had a step in flight. Cancelling does NOT complete their attempts:\n",
+			len(inFlight))
+		for _, a := range inFlight {
+			fmt.Printf("    %-14s step %s (%d/%d)\n", a.Candidate.Slug, a.StepID, a.StepIndex, a.StepCount)
+		}
+		fmt.Printf("  Each is left CLAIMED, status \"running\", still holding its locks. That is the same\n" +
+			"  thing Ctrl-C has always done. To release one, resume it, or call pf_complete_attempt on\n" +
+			"  it; if its credentials are gone you will need pf_force_takeover.\n")
+	}
+	if len(inFlight) > 0 || !stopped {
+		// A lower bound, and said so. A work item that was claimed but had not
+		// yet opened its first step does not appear above, so the list can
+		// under-report. Better to name the uncertainty than to let the count be
+		// read as exhaustive.
+		fmt.Printf("  This list can UNDER-REPORT: a work item claimed moments before the stop, whose\n" +
+			"  first step had not opened yet, is held but not listed. Check `/pf-status` for the\n" +
+			"  project's own view of what is still running.\n")
+	}
+
+	if !stopped {
+		fmt.Fprintf(os.Stderr, "\ndrain --stop: pid %d has not exited after %s. It was NOT killed: SIGKILL "+
+			"would skip the run's final snapshot write and leave it looking like a crash.\n"+
+			"Check \"polyforge watch --run=%s\"; it may still be unwinding a long step.\n",
+			s.PID, stopGraceDeadline, runID)
+		os.Exit(1)
+	}
+	if final, ferr := drain.ReadSnapshot(dir); ferr == nil && final.Finished {
+		fmt.Printf("\ndrain --stop: run %s ended: %s (stopped: %s, exit %d).\n",
+			runID, final.Terminal, final.StopReason, final.ExitCode)
+	} else {
+		fmt.Printf("\ndrain --stop: run %s stopped.\n", runID)
+	}
+}
+
+// signalTarget decides what to signal for a run whose leader is pid: the whole
+// process group (a negative pid, whole=true) when pid is its own group leader,
+// or just pid otherwise.
+//
+// # Why this is not simply pid
+//
+// SIGTERM to a single pid is NOT what Ctrl-C does, and the difference reaches the
+// machine. Ctrl-C is delivered by the tty to the entire foreground process GROUP,
+// so a step agent and everything it spawned all get it. runHarness uses
+// exec.CommandContext with no Cancel, so Go's cancellation sends SIGKILL to the
+// harness process ONLY — uncatchable, giving it no chance to reap its own
+// children, which are then orphaned onto init.
+//
+// That is not a theoretical cost on this box. A subagent once left load
+// generators running after its session ended and they burned 7.5 of 12 cores for
+// eleven days, with nothing but the load average to show for it.
+//
+// A --detach'ed run is always its own group leader (startDetached sets Setsid, so
+// pgid == pid) and its step agents inherit that group, so the group signal
+// reaches the whole tree. A FOREGROUND drain is normally not a leader — the shell
+// owns the pipeline's group — and signalling -pid there would either fail or hit
+// an unrelated group, so that case falls back to the single pid and runDrainStop
+// says so.
+//
+// The remaining gap is a foreground run stopped with --stop rather than Ctrl-C:
+// its step agents' grandchildren can still be orphaned. Closing that needs
+// Setpgid plus a Cancel on runHarness itself, which changes how every run
+// (foreground, detached and preflight) signals its children; it is recorded as a
+// follow-up rather than smuggled in here.
+func signalTarget(pid int) (target int, whole bool) {
+	pgid, err := syscall.Getpgid(pid)
+	if err == nil && pgid == pid {
+		return -pid, true
+	}
+	return pid, false
+}
+
+// waitForRunToStop polls until the run's process is gone or the deadline passes,
+// reporting whether it stopped.
+//
+// It watches the PROCESS, not the snapshot's Finished flag, because those answer
+// different questions: finish() writes the flag and then Run returns, so a
+// snapshot can say Finished while the process is still tearing down, and a
+// process that died without writing one never sets it at all. "Has it exited" is
+// the question --stop actually needs answered.
+func waitForRunToStop(pid int) bool {
+	deadline := time.Now().Add(stopGraceDeadline)
+	for {
+		if !processAlive(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(stopPollInterval)
+	}
+}
+
+// pidLooksLikeDrain reports whether pid's command line belongs to a polyforge
+// drain run, and whether the check could be performed at all.
+//
+// checked=false is a real and distinct answer, not a failure: it means this
+// platform has no /proc to ask (darwin is a build target), so the caller must
+// proceed on weaker evidence AND SAY SO. Collapsing "not a drain" and "could not
+// tell" into one boolean would either refuse to stop anything on darwin or
+// silently drop the guard on Linux, and both are worse than reporting which
+// happened.
+func pidLooksLikeDrain(pid int) (ok, checked bool) {
+	// The binary this process is running as. A --detach'ed run is literally a
+	// re-exec of it (startDetached takes os.Executable()), so its name is the
+	// most reliable thing to compare against — more so than the string
+	// "polyforge", which a renamed or locally-built binary does not carry.
+	self, _ := os.Executable()
+
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		// /proc/<pid>/cmdline is NUL-separated; argv[0] and the subcommand run
+		// together into one token unless the separators are replaced.
+		return cmdlineIsDrainRun(strings.ReplaceAll(string(b), "\x00", " "), self), true
+	}
+	// No /proc: darwin, which is half of what gets published
+	// (publish-bins.yml ships darwin/amd64 and darwin/arm64). `ps` answers the
+	// same question there, and the guard this function exists to provide would
+	// otherwise be silently absent on those binaries while the comments read as
+	// though it applied everywhere.
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false, false
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		return false, false
+	}
+	return cmdlineIsDrainRun(line, self), true
+}
+
+// cmdlineIsDrainRun decides whether a process command line is a polyforge drain
+// run. Split from the /proc read so the decision can be asserted on directly.
+//
+// # Why both clauses
+//
+// The hazard is pid REUSE: a snapshot written hours ago names a pid that the
+// kernel has since handed to something else, and SIGTERM to a stranger is not
+// undone by apologising. "Is it polyforge" alone is not enough, because the
+// commonest polyforge process on any of these machines is the long-lived MCP
+// server every editor session starts — killing the team's `polyforge serve`
+// because a drain pid got recycled would be a worse outcome than the one this
+// guard exists to prevent. So the command line must name the binary AND be a
+// drain invocation.
+//
+// # Why the binary is matched on argv[0] against self, not on the whole string
+//
+// An earlier version asked only `strings.Contains(cmdline, "polyforge")`, which
+// is wrong in BOTH directions and a live run caught the worse one:
+//
+//   - Too strict. The published binaries are named polyforge-linux-amd64 and so
+//     on, but a locally built or renamed one is not, and the first live test of
+//     --stop refused to stop a perfectly real run because the binary under test
+//     was /tmp/pf673. A stop command that will not stop things is worse than no
+//     stop command. selfBinary fixes that: --detach re-execs os.Executable(), so
+//     the run and the process stopping it are the same file by construction.
+//   - Too loose. Searching the WHOLE command line let any process mentioning
+//     "polyforge" anywhere — a log path, a working directory — satisfy the
+//     binary half. Only argv[0] identifies the program.
+//
+// The `drain` token is still required, and is still the clause that matters most
+// for pid reuse: the commonest polyforge process on these machines is the
+// long-lived `polyforge serve` MCP server, and killing the team's MCP server
+// because a drain pid got recycled would be worse than the failure being
+// prevented.
+//
+// Deliberately a token test rather than a flag parse: one element of the vector
+// is literally "drain" (detachChildArgs puts it there), and a parser here would
+// be a second, drifting copy of the dispatch in cmd/polyforge/main.go.
+func cmdlineIsDrainRun(cmdline, selfBinary string) bool {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return false
+	}
+	argv0 := fields[0]
+	named := strings.Contains(filepath.Base(argv0), "polyforge")
+	if !named && selfBinary != "" {
+		named = filepath.Base(argv0) == filepath.Base(selfBinary)
+	}
+	if !named {
+		return false
+	}
+	for _, f := range fields[1:] {
+		if f == "drain" {
+			return true
+		}
+	}
+	return false
+}
+
+// ─── --preset ─────────────────────────────────────────────────────────────────
+
+// resolvePresetModels builds the tier→model table this run dispatches with, one
+// entry per (harness, tier), and returns a label naming where the table came
+// from.
+//
+// # Why drain resolves this at all
+//
+// Before aihub#673, `polyforge roles generate` and the serve-startup codex
+// profile generation read [roles.tiers] and drain did not read it at all. That is
+// already two 口径 on one machine: the same tier resolved to one model in a
+// generated agent file and to whatever the harness defaulted to under drain.
+// Adding --preset to drain alone would have deepened that rather than fixed it,
+// which is why config.MachineConfig.ResolveTiers is the single resolver all three
+// now share.
+//
+// # Why once per run rather than once per step
+//
+// The candidates are validated against each harness's live model catalog
+// (probeForHarness), and a catalog probe shells out. Doing that per step would
+// cost a process per dispatch; doing it never would let a model ID that is not in
+// the local catalog through, and the resulting "model not found" would be
+// classified by ClassifyStepDispatch as an ordinary step failure — blaming the
+// work item for a configuration error. Once per run is the only placement that is
+// both cheap and honest.
+//
+// Only harnesses that survived preflight are probed: the others cannot be
+// dispatched to, so resolving models for them would emit warnings about
+// configuration that could not have mattered.
+// probeFor is injected so this can be exercised without a live harness: the
+// production value is probeForHarness, which shells out to each CLI's model
+// catalog. It returns nil for a harness with no catalog (claude), and that nil
+// is load-bearing — see the loop below.
+func resolvePresetModels(mc *config.MachineConfig, preset string, channels []drain.Channel,
+	probeFor func(string) CatalogProbe) (map[drain.Harness]map[string]string, string, error) {
+
+	tiers, source, err := mc.ResolveTiers(preset)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(tiers) == 0 {
+		// No table configured. Every channel keeps Model=="" and each harness
+		// picks its own default, which is drain's behaviour to date.
+		return nil, source, nil
+	}
+
+	harnesses := make([]drain.Harness, 0, len(channels))
+	seen := map[drain.Harness]bool{}
+	for _, ch := range channels {
+		if !seen[ch.Harness] {
+			seen[ch.Harness] = true
+			harnesses = append(harnesses, ch.Harness)
+		}
+	}
+
+	tierNames := make([]string, 0, len(tiers))
+	for t := range tiers {
+		tierNames = append(tierNames, t)
+	}
+	sort.Strings(tierNames)
+
+	out := make(map[drain.Harness]map[string]string, len(harnesses))
+	for _, h := range harnesses {
+		// probeForHarness returns nil for claude, and that is the right answer
+		// rather than a gap: a RoleCandidate's harness is pi/codex/opencode by
+		// contract (config.RoleCandidate), so no tier can name claude, and
+		// ResolveModel below finds nothing for it. Leaving Claude Code's model
+		// empty is also what it wants — aihub#555 measured that passing --model
+		// silently OVERRIDES the agent file's own frontmatter.
+		probe := probeFor(string(h))
+		if probe == nil {
+			continue
+		}
+		for _, tier := range tierNames {
+			model, ok := ResolveModel(tiers[tier], string(h), probe)
+			if ok {
+				if out[h] == nil {
+					out[h] = map[string]string{}
+				}
+				out[h][tier] = model
+				continue
+			}
+			if !tierNamesHarness(tiers[tier], string(h)) {
+				// The tier simply does not mention this harness. That is an
+				// ordinary configuration — a pi-only preset need say nothing
+				// about codex — not something to warn about.
+				continue
+			}
+			// Declared but unresolvable: the operator wrote candidates for this
+			// harness and none of them are in its catalog. Loud, matching the
+			// AC7 warning `roles generate` prints for the same condition.
+			fmt.Fprintf(os.Stderr, "drain: WARNING: tier %q names %s candidates but none resolve in %s's "+
+				"local model catalog; steps at that tier will use %s's default model instead of a "+
+				"configured one.\n", tier, h, h, h)
+		}
+	}
+	return out, source, nil
+}
+
+func tierNamesHarness(candidates []config.RoleCandidate, harness string) bool {
+	for _, c := range candidates {
+		if c.Harness == harness {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchWithPresetModel wraps dispatchStepAgent so each step runs on the model
+// its ROLE's tier selects, per the resolved preset.
+//
+// This is where drain honours the preset per STEP rather than per run, and it
+// lives here — in the dispatch seam — for a structural reason. The obvious place
+// would be internal/drain's Runner, but Runner.ResolveRole returns only
+// (role, readOnly): the tier never reaches the loop. DispatchRequest, on the
+// other hand, already carries .Role and .Channel, so the whole mapping resolves
+// on this side of the seam with no change to the scheduler.
+//
+// An explicitly requested model is never overwritten: --channel=pi/some-model
+// arrives with Channel.Model already set, and explicit beats configured.
+//
+// With no preset models resolved this returns dispatchStepAgent unchanged, so a
+// machine that configures nothing pays nothing and behaves exactly as before.
+func dispatchWithPresetModel(tierModels map[drain.Harness]map[string]string) func(context.Context, drain.DispatchRequest) (drain.DispatchResult, error) {
+	if len(tierModels) == 0 {
+		return dispatchStepAgent
+	}
+	tierOf, err := roleTiers()
+	if err != nil || len(tierOf) == 0 {
+		// The role catalog is embedded, so this is close to impossible; if it
+		// ever happens, dispatching on each harness's default model is a far
+		// better failure than refusing to run.
+		fmt.Fprintf(os.Stderr, "drain: warning: could not index role tiers (%v); "+
+			"steps will use each harness's default model\n", err)
+		return dispatchStepAgent
+	}
+	return wrapDispatchWithPresetModel(tierModels, tierOf, dispatchStepAgent)
+}
+
+// wrapDispatchWithPresetModel is dispatchWithPresetModel's pure half: the model
+// substitution, with the catalog lookup and the process spawn both injected.
+//
+// Split out so the mapping can be asserted on directly. The rule under test is
+// "which model does a step of this role, on this harness, run with" — a question
+// about a struct field, not about a child process — and a test that had to spawn
+// a harness to ask it would be testing the harness.
+func wrapDispatchWithPresetModel(
+	tierModels map[drain.Harness]map[string]string,
+	tierOf map[string]string,
+	next func(context.Context, drain.DispatchRequest) (drain.DispatchResult, error),
+) func(context.Context, drain.DispatchRequest) (drain.DispatchResult, error) {
+	return func(ctx context.Context, req drain.DispatchRequest) (drain.DispatchResult, error) {
+		// Only an EMPTY model is filled in. A non-empty one came from
+		// --channel=<harness>/<model>, and explicit beats configured.
+		if req.Channel.Model == "" {
+			if tier, ok := tierOf[req.Role]; ok {
+				if model := tierModels[req.Channel.Harness][tier]; model != "" {
+					req.Channel.Model = model
+				}
+			}
+		}
+		return next(ctx, req)
+	}
+}
+
+// roleTiers indexes the embedded role catalog as role name → tier.
+func roleTiers() (map[string]string, error) {
+	catalog, err := roles.LoadRoles()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(catalog))
+	for _, r := range catalog {
+		out[r.Name] = r.Tier
+	}
+	return out, nil
 }
 
 // ─── preflight ────────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="fix_bug", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-03-claim-1", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-03-claim-1")
 ASSERT: response.ok == true
 NOTE: save response.attempt_id as ATTEMPT_1, response.claim_epoch as EPOCH_1
 
@@ -32,8 +32,7 @@ NOTE: Verify state file still exists at WORKSPACE/.polyforge/state/WI_ID.json
 NOTE: Verify wi status == "paused" via pf_get_work_item
 
 ### Resume (re-claim)
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-03-claim-2",
-      mode="resume")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-03-claim-2")
 ASSERT: response.ok == true
 ASSERT: response.claim_epoch > EPOCH_1
 

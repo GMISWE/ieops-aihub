@@ -35,7 +35,7 @@ ASSERT: response.current_attempt_epoch == 1
 
 ### Admin CAN force-takeover via claim (admin overrides permission check)
 AS ADMIN: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e17-admin-force",
-  mode="fresh", force_takeover=true)
+  force_takeover=true)
 ASSERT: response.ok == true
 ASSERT: response.claim_epoch == 2
 

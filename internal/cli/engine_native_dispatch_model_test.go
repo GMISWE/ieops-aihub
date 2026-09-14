@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -53,20 +54,113 @@ import (
 // this gate follows), and whether a given harness honours the frontmatter — that was
 // aihub#555's live probe (measured, Claude Code 2.1.258), a runtime fact no static gate can
 // pin.
+//
+// aihub#663: THE FILE NAMES ARE NO LONGER HARDCODED HERE
+// ------------------------------------------------------
+// Until aihub#663 this file opened with two literal constants — "agents/step-executor.md" and
+// "agents/step-reviewer.md" — and every assertion below hung off them. That pinned a TWO-agent
+// world at a moment when internal/roles/definitions/ held FIVE roles (executor, operator,
+// explorer, reviewer, designer), each with a generated agent file. Adding, removing or renaming
+// a role moved nothing here, because nothing here read the catalog.
+//
+// The two names are now DERIVED: the engine document's own constants are parsed first, resolved
+// against roles.LoadRoles(), and the agent file path is computed from the role name by the same
+// rule internal/roles/render_cc.go renders it with. The catalog directory is therefore the
+// contract — a renamed role breaks the resolution, and TestEngineDispatchIsRootedInTheRoleCatalog
+// below closes the other three directions (a role with no agent file, an agent file with no role,
+// and a role the documented dispatch routes nowhere).
 
 const (
 	dispatchEngineDoc = "skills/pf-execute/engine.native.md"
 	dispatchDetailDoc = "skills/pf-execute/references/engine-native-details.md"
 
-	stepAgentFile   = "agents/step-executor.md"
-	reviewAgentFile = "agents/step-reviewer.md"
+	// dispatchAgentDir is where the plugin ships the generated CC agent definitions.
+	dispatchAgentDir = "agents"
 
 	// The plugin-name prefix the harness prepends to plugin-shipped agents. Measured
 	// (aihub#555): subagent_type for a plugin agent is "<plugin.json name>:<agent name>",
 	// and the namespaced id keeps resolving to the plugin file even when a same-named
 	// user/project agent exists — only the bare name resolves to the shadow.
 	agentIdPrefix = "polyforge:"
+
+	// agentNamePrefix is the "step-" in "step-executor": internal/roles/render_cc.go writes
+	// `name: step-<role>` and emits the file as `step-<role>.md`, for EVERY role, and
+	// internal/roles' staleness gate byte-diffs the result. So the rule below is a derivation
+	// of that renderer, not a second copy of a file list that could go stale against it.
+	agentNamePrefix = "step-"
 )
+
+// dispatchDeferredRoles names the catalog roles the DOCUMENTED dispatch does not route to, each
+// with the reason it does not.
+//
+// This map is the point of the gate, not an exemption from it. The documented loop dispatches
+// `REVIEW_AGENT if is_review(step_id) else STEP_AGENT` — two agents — while `polyforge engine
+// resolve-role` resolves a step id against all five roles. A `commit_and_pr` step therefore
+// resolves to `operator` in Go and is dispatched to `step-executor` by a session following the
+// markdown. That divergence is real and is NOT fixed here; what is fixed here is that it can no
+// longer happen SILENTLY. A sixth role added to internal/roles/definitions/ is routed by nothing
+// and named by nothing, so this gate goes red and whoever added it must either wire the dispatch
+// or write down, here, why it stays unrouted.
+//
+// Measured 2026-09-14 (aihub#663, origin/main @56803a1): three of five roles are unrouted.
+var dispatchDeferredRoles = map[string]string{
+	"operator": "aihub#642 added the role and its agent file; the documented loop still selects " +
+		"by is_review only, so mechanical delivery steps dispatch to step-executor",
+	"explorer": "same as operator — read-only investigation steps dispatch to the write-capable " +
+		"step-executor, which is a capability WIDENING, not a narrowing",
+	"designer": "same as operator — design-judgment steps lose the raised tier they are defined " +
+		"with and run on the executor's default tier",
+}
+
+// dispatchAgentFile is the ONE place this file states the role -> agent-file mapping, and it
+// states it as a rule rather than as an enumeration.
+func dispatchAgentFile(roleName string) string {
+	return dispatchAgentDir + "/" + agentNamePrefix + roleName + ".md"
+}
+
+// dispatchRoleOfAgentID turns a documented subagent_type ("polyforge:step-reviewer") into the
+// role name it claims to dispatch ("reviewer"). ok is false for an id that is not plugin-
+// namespaced or not a step agent at all — both of which are dispatches this gate must reject
+// rather than silently read a role name out of.
+func dispatchRoleOfAgentID(id string) (string, bool) {
+	rest, ok := strings.CutPrefix(id, agentIdPrefix+agentNamePrefix)
+	if !ok || rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// dispatchCatalogRole resolves a documented agent id against the real catalog. A miss is fatal:
+// every assertion downstream compares something against the role this returns, so continuing with
+// a zero Role would check a file nobody ships against a capability nobody declared.
+func dispatchCatalogRole(t *testing.T, catalog []roles.Role, agentID, constName string) roles.Role {
+	t.Helper()
+	roleName, ok := dispatchRoleOfAgentID(agentID)
+	if !ok {
+		t.Fatalf("%s declares %s = %q, which is not a %q-namespaced %q agent id. The bare name "+
+			"resolves to a same-named user/project agent when one exists (measured, aihub#555), "+
+			"and a non-step id corresponds to no role at all.",
+			dispatchEngineDoc, constName, agentID, agentIdPrefix, agentNamePrefix)
+	}
+	r, ok := roles.RoleByName(catalog, roleName)
+	if !ok {
+		t.Fatalf("%s declares %s = %q, i.e. the role %q, which internal/roles/definitions/ does "+
+			"NOT define (it defines %v). The loop would dispatch an agent generated from no role "+
+			"— or, if the file was left behind by a rename, one whose definition no longer exists. "+
+			"Rename the constant with the role.",
+			dispatchEngineDoc, constName, agentID, roleName, dispatchRoleNames(catalog))
+	}
+	return r
+}
+
+func dispatchRoleNames(catalog []roles.Role) []string {
+	out := make([]string, 0, len(catalog))
+	for _, r := range catalog {
+		out = append(out, r.Name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 var (
 	// The agent-name constants as the resident loop declares them, e.g.
@@ -150,8 +244,32 @@ func readAgentDoc(t *testing.T, pluginRoot, rel string) string {
 
 func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
-	engine := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
+	engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
 	details := readEngineDoc(t, pluginRoot, dispatchDetailDoc)
+
+	catalog, err := roles.LoadRoles()
+	if err != nil {
+		t.Fatalf("roles.LoadRoles: %v — the role catalog is the source of truth for which agent "+
+			"files exist; without it this gate has nothing to derive the file names from", err)
+	}
+
+	// ── The engine constants bind to the catalog, and the catalog names the files ──────────
+	// This block used to sit BELOW the agent-file assertions, reading two hardcoded paths.
+	// aihub#663 moved it up: the documented constants now decide which roles — and therefore
+	// which files — the rest of this test is about.
+	consts := agentConstantsRe.FindStringSubmatch(engineDoc)
+	if consts == nil {
+		t.Fatalf("%s no longer declares the agent constants (`STEP_AGENT, REVIEW_AGENT = ...`). "+
+			"Every assertion below compares the dispatch template against them, so without the "+
+			"declaration nothing here checks anything. If the mapping moved, move this regex "+
+			"with it.", dispatchEngineDoc)
+	}
+	stepAgent, reviewAgent := consts[1], consts[2]
+
+	stepRole := dispatchCatalogRole(t, catalog, stepAgent, "STEP_AGENT")
+	reviewRole := dispatchCatalogRole(t, catalog, reviewAgent, "REVIEW_AGENT")
+	stepAgentFile := dispatchAgentFile(stepRole.Name)
+	reviewAgentFile := dispatchAgentFile(reviewRole.Name)
 
 	// ── The agent files: the mapping's single copy ─────────────────────────────────────────
 	stepFM, ok1 := agentFrontmatter(readAgentDoc(t, pluginRoot, stepAgentFile))
@@ -161,6 +279,27 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 			"The harness reads name/model from that block; without it nothing below is checked.",
 			ok1, ok2)
 	}
+
+	t.Run("TheTwoDispatchedRolesCarryTheCapabilitiesTheDispatchAssumes", func(t *testing.T) {
+		// Derived from the catalog, not asserted literally: swapping `read_only` between
+		// executor.yaml and reviewer.yaml would otherwise leave every check below green while
+		// the loop dispatched review steps to a write-capable agent.
+		if reviewRole.Capability.ReadOnly != true {
+			t.Errorf("REVIEW_AGENT resolves to role %q, whose definition declares read_only=%v. "+
+				"The review agent's whole purpose is to be read-only BY CONSTRUCTION; a "+
+				"write-capable one is the aihub#338 state with a new name.",
+				reviewRole.Name, reviewRole.Capability.ReadOnly)
+		}
+		if stepRole.Capability.ReadOnly != false {
+			t.Errorf("STEP_AGENT resolves to role %q, whose definition declares read_only=%v — "+
+				"every non-review step would then dispatch to an agent that cannot edit, and "+
+				"fail at its first write", stepRole.Name, stepRole.Capability.ReadOnly)
+		}
+		if stepRole.Tier == reviewRole.Tier {
+			t.Errorf("both dispatched roles declare tier %q — the step-kind tier that is the "+
+				"entire reason this dispatch selects an agent raises nothing", stepRole.Tier)
+		}
+	})
 
 	t.Run("AgentFilesCarryTheModels", func(t *testing.T) {
 		for rel, fm := range map[string]map[string]string{stepAgentFile: stepFM, reviewAgentFile: reviewFM} {
@@ -202,16 +341,6 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		}
 	})
 
-	// ── The engine constants bind to the files ─────────────────────────────────────────────
-	consts := agentConstantsRe.FindStringSubmatch(engine)
-	if consts == nil {
-		t.Fatalf("%s no longer declares the agent constants (`STEP_AGENT, REVIEW_AGENT = ...`). "+
-			"Every assertion below compares the dispatch template against them, so without the "+
-			"declaration nothing here checks anything. If the mapping moved, move this regex "+
-			"with it.", dispatchEngineDoc)
-	}
-	stepAgent, reviewAgent := consts[1], consts[2]
-
 	t.Run("ConstantsAreTheFilesNamespacedIds", func(t *testing.T) {
 		if want := agentIdPrefix + stepFM["name"]; stepAgent != want {
 			t.Errorf("%s declares STEP_AGENT = %q but %s names itself %q, so the dispatchable id "+
@@ -236,13 +365,13 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 	})
 
 	t.Run("EngineLoopDispatchesByAgentWithNoModel", func(t *testing.T) {
-		if !engineDispatchAgentRe.MatchString(engine) {
+		if !engineDispatchAgentRe.MatchString(engineDoc) {
 			t.Errorf("%s: the auto loop's dispatch line no longer passes "+
 				"`subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT` explicitly. "+
 				"Without it the agent choice is narrative, which is the aihub#544 state.",
 				dispatchEngineDoc)
 		}
-		if regexp.MustCompile(`dispatch Agent\([^)]*\bmodel\s*=`).MatchString(engine) {
+		if regexp.MustCompile(`dispatch Agent\([^)]*\bmodel\s*=`).MatchString(engineDoc) {
 			t.Errorf("%s: the auto loop's dispatch passes a model argument again. An explicit "+
 				"per-invocation model silently OVERRIDES the agent file (measured, aihub#555), "+
 				"so this single line kills the whole mechanism.", dispatchEngineDoc)
@@ -380,14 +509,14 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 			t.Errorf("tableReviewAgentRe did not extract a swapped §0f table value (got %v) — "+
 				"the table-agreement assertion could not have caught a swap", m)
 		}
-		noDispatchAgent := strings.Replace(engine,
+		noDispatchAgent := strings.Replace(engineDoc,
 			"dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT",
 			"dispatch Agent(", 1)
 		if engineDispatchAgentRe.MatchString(noDispatchAgent) {
 			t.Error("engineDispatchAgentRe still matches an engine whose dispatch line lost its " +
 				"subagent_type argument")
 		}
-		remodelled := strings.Replace(engine,
+		remodelled := strings.Replace(engineDoc,
 			"dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT",
 			"dispatch Agent(model=RAISED if is_review(step_id) else DEFAULT", 1)
 		if !regexp.MustCompile(`dispatch Agent\([^)]*\bmodel\s*=`).MatchString(remodelled) {
@@ -501,4 +630,246 @@ func TestEngineResolveRoleNeverBottomsOutAtExecutor(t *testing.T) {
 				mappedStepID, declaredRole, source, engine.RoleSourceDeclared)
 		}
 	})
+}
+
+// TestEngineDispatchIsRootedInTheRoleCatalog is aihub#663's half: it makes
+// internal/roles/definitions/ the CONTRACT for this dispatch rather than a directory the gate
+// above happened not to read.
+//
+// WHAT WENT WRONG
+// ---------------
+// aihub#642 grew the role catalog from two roles to five and generated the three new CC agent
+// files. Nothing in internal/cli noticed, because the gate above named two files as string
+// literals. A role could be added, renamed or deleted and every assertion in this package stayed
+// green — the definition of a gate that looks like protection and is not.
+//
+// WHAT IS ASSERTED, and which direction each closes
+//  1. role -> file: every catalog role ships an agent file whose `name:`, `model:` and
+//     `disallowedTools:` agree with the role's own definition, capability included. Adding a role
+//     without generating its file goes red here.
+//  2. file -> role: every agents/step-*.md corresponds to a catalog role. DELETING or RENAMING a
+//     role goes red here, where a role->file loop alone would simply stop looking at the orphan.
+//  3. constant -> role: the documented STEP_AGENT / REVIEW_AGENT resolve to catalog roles
+//     (dispatchCatalogRole, used by the gate above — a rename is fatal there).
+//  4. role -> dispatch: every catalog role is either ROUTED by the documented dispatch or named in
+//     dispatchDeferredRoles with a reason. This is the one that fires on a SIXTH role: a new role
+//     is routed by nothing and excused by nothing.
+//  5. catalog -> predicate: the step ids the catalog binds to the review role are exactly the ids
+//     engine.IsReviewStep accepts. A review-shaped step id bound to a write-capable role would
+//     otherwise make `polyforge engine resolve-role` and the documented is_review predicate
+//     dispatch the same step to different agents.
+//
+// Deliberately NOT asserted: that the documented dispatch SHOULD be five-way. Whether to route
+// operator/explorer/designer is a design decision this gate has no standing to make; what it
+// removes is the possibility of the question going unasked.
+func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	catalog, err := roles.LoadRoles()
+	if err != nil {
+		t.Fatalf("roles.LoadRoles: %v", err)
+	}
+	// Anti-vacuity, before anything else: every loop below is "for each role", and an empty
+	// catalog satisfies all of them without examining one file.
+	if len(catalog) < 2 {
+		t.Fatalf("the role catalog holds %d role(s). Every assertion in this test iterates it, so "+
+			"a catalog this small makes them vacuous rather than satisfied.", len(catalog))
+	}
+
+	t.Run("EveryCatalogRoleShipsADispatchableAgentFile", func(t *testing.T) {
+		for _, r := range catalog {
+			rel := dispatchAgentFile(r.Name)
+			body, readErr := os.ReadFile(filepath.Join(pluginRoot, rel))
+			if readErr != nil {
+				t.Errorf("role %q is defined in internal/roles/definitions/ but ships no %s (%v). "+
+					"`polyforge engine resolve-role` can resolve a step to this role, and the "+
+					"harness would then be asked to dispatch an agent id that resolves to nothing. "+
+					"Run `go generate ./internal/roles/...` and commit the result.",
+					r.Name, rel, readErr)
+				continue
+			}
+			fm, ok := agentFrontmatter(string(body))
+			if !ok {
+				t.Errorf("%s has no frontmatter block, so the harness reads no name, no model and "+
+					"no tool policy from it", rel)
+				continue
+			}
+			if want := agentNamePrefix + r.Name; fm["name"] != want {
+				t.Errorf("%s declares `name: %s`, but the role it is generated from is %q, so the "+
+					"dispatchable id is %q and not %q. A file and a role that disagree about the "+
+					"name is a dispatch that silently reaches the wrong agent, or none.",
+					rel, fm["name"], r.Name, agentIdPrefix+fm["name"], agentIdPrefix+want)
+			}
+			if fm["model"] == "" {
+				t.Errorf("%s carries no `model:` — the dispatch would inherit the parent session's "+
+					"model, the aihub#544 state this whole mechanism replaces", rel)
+			}
+			// The capability is DERIVED from the role's own read_only flag through the same
+			// compiler the generator uses, so flipping read_only in the YAML without regenerating
+			// goes red here rather than shipping an agent whose tool policy contradicts its
+			// definition.
+			shape, cerr := roles.CompileCapability(r.Capability.ReadOnly, "cc")
+			if cerr != nil {
+				t.Errorf("roles.CompileCapability(%v, \"cc\") for role %q: %v", r.Capability.ReadOnly, r.Name, cerr)
+				continue
+			}
+			if fm["disallowedTools"] != shape.CCDisallowedTools {
+				t.Errorf("%s declares disallowedTools %q, but role %q declares read_only=%v, which "+
+					"compiles to %q. The YAML is the contract; a file that disagrees with it is "+
+					"read-only (or write-capable) by accident.",
+					rel, fm["disallowedTools"], r.Name, r.Capability.ReadOnly, shape.CCDisallowedTools)
+			}
+		}
+	})
+
+	t.Run("NoAgentFileOutlivesItsRole", func(t *testing.T) {
+		entries, readErr := os.ReadDir(filepath.Join(pluginRoot, dispatchAgentDir))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", dispatchAgentDir, readErr)
+		}
+		known := map[string]bool{}
+		for _, r := range catalog {
+			known[agentNamePrefix+r.Name+".md"] = true
+		}
+		found := 0
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || !strings.HasPrefix(e.Name(), agentNamePrefix) {
+				continue
+			}
+			found++
+			if !known[e.Name()] {
+				t.Errorf("%s/%s corresponds to no role in internal/roles/definitions/ (which "+
+					"defines %v). Either a role was renamed or deleted and its generated file was "+
+					"left behind — a dispatchable agent nothing can resolve a step to — or the "+
+					"file is hand-written, which the staleness gate forbids.",
+					dispatchAgentDir, e.Name(), dispatchRoleNames(catalog))
+			}
+		}
+		if found == 0 {
+			t.Fatalf("no %s* file was found under %s at all, so the orphan check above scanned "+
+				"nothing and would pass whatever the catalog said", agentNamePrefix, dispatchAgentDir)
+		}
+	})
+
+	t.Run("EveryCatalogRoleIsRoutedOrDeclaredUnrouted", func(t *testing.T) {
+		engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
+		consts := agentConstantsRe.FindStringSubmatch(engineDoc)
+		if consts == nil {
+			t.Fatalf("%s no longer declares the agent constants, so the routed set is empty and "+
+				"this check would report every role as unrouted for the wrong reason",
+				dispatchEngineDoc)
+		}
+		routed := map[string]bool{}
+		for _, id := range consts[1:] {
+			if name, ok := dispatchRoleOfAgentID(id); ok {
+				routed[name] = true
+			}
+		}
+		if len(routed) == 0 {
+			t.Fatal("no documented constant resolved to a role name, so `routed` is empty and the " +
+				"loop below reports every role as unrouted — a red that says nothing")
+		}
+
+		for _, r := range catalog {
+			_, deferred := dispatchDeferredRoles[r.Name]
+			switch {
+			case routed[r.Name] && deferred:
+				t.Errorf("role %q is BOTH routed by the documented dispatch and listed in "+
+					"dispatchDeferredRoles. The list is for roles the dispatch does not reach; a "+
+					"routed role left in it makes the list stop meaning anything.", r.Name)
+			case !routed[r.Name] && !deferred:
+				t.Errorf("role %q is defined in internal/roles/definitions/, `polyforge engine "+
+					"resolve-role` can resolve a step to it, and the documented dispatch in %s "+
+					"routes to neither it nor anything else on its behalf — it selects only "+
+					"between %v. A step resolving to %q is therefore dispatched to the wrong "+
+					"agent SILENTLY: wrong tier, and possibly wrong tool policy.\n\n"+
+					"Fix it one of two ways, and both are decisions, not chores: wire the "+
+					"dispatch to select this role's agent, or add %q to dispatchDeferredRoles "+
+					"with the reason it stays unrouted.",
+					r.Name, dispatchEngineDoc, dispatchSortedKeys(routed), r.Name, r.Name)
+			}
+		}
+		for name := range dispatchDeferredRoles {
+			if _, ok := roles.RoleByName(catalog, name); !ok {
+				t.Errorf("dispatchDeferredRoles excuses role %q, which the catalog no longer "+
+					"defines (it defines %v). A stale entry silently excuses a role that may be "+
+					"re-added later under the same name.", name, dispatchRoleNames(catalog))
+			}
+		}
+	})
+
+	t.Run("TheCatalogAndTheReviewPredicateAgreeOnWhichStepsAreReviews", func(t *testing.T) {
+		engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
+		consts := agentConstantsRe.FindStringSubmatch(engineDoc)
+		if consts == nil {
+			t.Fatalf("%s no longer declares the agent constants", dispatchEngineDoc)
+		}
+		reviewRoleName, ok := dispatchRoleOfAgentID(consts[2])
+		if !ok {
+			t.Fatalf("REVIEW_AGENT = %q does not name a step agent", consts[2])
+		}
+
+		// Both counters must move, or the loop below is agreeing with a constant function.
+		reviews, nonReviews := 0, 0
+		for _, r := range catalog {
+			wantReview := r.Name == reviewRoleName
+			for _, stepID := range r.SortedStepIDs() {
+				if wantReview {
+					reviews++
+				} else {
+					nonReviews++
+				}
+				if got := engine.IsReviewStep(stepID); got != wantReview {
+					t.Errorf("the catalog binds step id %q to role %q, but engine.IsReviewStep(%q) "+
+						"= %v. `polyforge engine resolve-role` answers from the CATALOG (tier 2) "+
+						"while a B/C session follows the documented is_review predicate, so the "+
+						"two paths dispatch this step to DIFFERENT agents for the same wi — the "+
+						"read-only reviewer or a write-capable role.",
+						stepID, r.Name, stepID, got)
+				}
+			}
+		}
+		if reviews == 0 || nonReviews == 0 {
+			t.Errorf("the catalog's step ids are all on one side (review=%d, non-review=%d), so "+
+				"agreement with engine.IsReviewStep above is agreement with a constant",
+				reviews, nonReviews)
+		}
+	})
+
+	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
+		// dispatchRoleOfAgentID is what turns a documented constant into a catalog lookup; every
+		// assertion above about a rename depends on it REJECTING the ids it should.
+		for _, bad := range []string{
+			"step-executor",              // not plugin-namespaced: resolves to a user/project shadow
+			"polyforge:executor",         // not a step agent
+			"polyforge:step-",            // namespaced, prefixed, but names no role
+			"other-plugin:step-executor", // a different plugin's agent
+			"",
+		} {
+			if name, ok := dispatchRoleOfAgentID(bad); ok {
+				t.Errorf("dispatchRoleOfAgentID(%q) = %q, true — this id would be looked up as a "+
+					"role and could resolve, hiding exactly the mis-namespacing aihub#555 measured",
+					bad, name)
+			}
+		}
+		if name, ok := dispatchRoleOfAgentID(agentIdPrefix + agentNamePrefix + "reviewer"); !ok || name != "reviewer" {
+			t.Errorf("dispatchRoleOfAgentID on the shipped review id = %q, %v; want \"reviewer\", "+
+				"true — if it cannot read the real id, every catalog lookup above is checking a "+
+				"role name it invented", name, ok)
+		}
+		// ...and the file rule must produce the paths that actually ship.
+		if got := dispatchAgentFile("reviewer"); got != "agents/step-reviewer.md" {
+			t.Errorf("dispatchAgentFile(\"reviewer\") = %q, want agents/step-reviewer.md — the "+
+				"derivation has drifted from internal/roles/render_cc.go's output naming, so the "+
+				"role->file direction would report every role as shipping no file", got)
+		}
+	})
+}
+
+func dispatchSortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -6,8 +6,8 @@
 
 ## Startup - one command, not six steps
 
-`polyforge engine startup --workspace-root=<ws> --worktree-root=<wt> --wi-type=<wi_type>
---scenario-url=<project.scenario> [--project=<name>]` IS §0 - clone at
+`polyforge engine startup --workspace-root='<ws>' --worktree-root='<wt>' --wi-type='<wi_type>'
+--scenario-url='<project.scenario>' [--project='<name>']` IS §0 - clone at
 `<workspace_root>/.repo/<owner>__<repo>/`, SHA pinned into `.pf_meta.json`, template resolved,
 sections scanned, `@include`s expanded at that sha - and prints
 `{scenario_path, legacy_fallback, sha, template_source, steps:[{id, content, expanded}]}`.
@@ -20,7 +20,7 @@ Prior-step context = `pf_get_step` -> `completed_steps`; nothing writes a worktr
 ```python
 # The tier is a STEP KIND -> AGENT choice (aihub#338/#555); the models live ONLY in the agent
 # files (agents/*.md), so the loop picks WHICH agent and never passes a model - an explicit one
-# silently OVERRIDES the file. `polyforge engine resolve-role --step-id=<sid>` IS the predicate:
+# silently OVERRIDES the file. `polyforge engine resolve-role --step-id='<sid>'` IS the predicate:
 # is_review(sid) = sid.endswith("_review") or sid in ("review","code_review","release_review").
 STEP_AGENT, REVIEW_AGENT = "polyforge:step-executor", "polyforge:step-reviewer"
 

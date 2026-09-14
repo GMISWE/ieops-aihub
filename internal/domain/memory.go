@@ -768,8 +768,9 @@ type RecallResponse struct {
 	// non-empty query, whichever path served Items; a query that matched
 	// nothing still gets the section, carrying an explicit total of 0. Attached
 	// by Recall around the router for the same one-exit reason as
-	// RequestAdjusted above. See lexical.go for the aihub#367 measurement this
-	// answers and memory_lexical.go for the predicate.
+	// RequestAdjusted above. See lexical.go for the measurement this answers,
+	// including why aihub#367's original numbers are no longer it, and
+	// memory_lexical.go for the predicate.
 	Lexical *MemoryLexicalSection `json:"lexical,omitempty"`
 }
 
@@ -2498,9 +2499,12 @@ func Recall(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*Recal
 	// text paths alike. Keyed on the REQUEST (a non-empty query),
 	// never on what the router returned: an empty semantic page still gets the
 	// section, and a full one does too, because "the vector path answered" is
-	// precisely the state in which aihub#367 measured the misses (recall@1
-	// 0/42, with 11 of 12 production-shape targets retrievable by an unrelated
-	// query — in the corpus, not semantically reachable). recallRouted has
+	// precisely the state the misses live in: in the corpus, and not
+	// semantically reachable. Twelve of the 42 frozen queries are still in it
+	// after aihub#650 repaired the embedding serving (aihub#660), which is the
+	// reading this rests on — aihub#367's 2026-09-06 numbers were taken through
+	// the aihub#648 defect and are withdrawn as evidence (see lexical.go).
+	// recallRouted has
 	// already normalized req.TopK by the time this runs, so the section's page
 	// cap is the same one Items obeys.
 	if strings.TrimSpace(req.Query) != "" {

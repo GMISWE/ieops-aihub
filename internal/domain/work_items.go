@@ -1431,9 +1431,9 @@ type ListWorkItemsResult struct {
 	// has no query text, so it never gets one), whichever path served Items,
 	// and an empty match set is an explicit total of 0 rather than an absent
 	// field. Attached by ListWorkItems around the routing, same one-exit
-	// reasoning as RequestAdjusted. See lexical.go for the aihub#367
-	// measurement (query= scored 0/6 at every N) and wi_lexical.go for the
-	// predicate.
+	// reasoning as RequestAdjusted. See wi_vector.go for the blind spot this
+	// answers and why the wi-side "0/6 at every N" number that used to be cited
+	// here is withdrawn (aihub#677), and wi_lexical.go for the predicate.
 	Lexical *WorkItemLexicalSection `json:"lexical,omitempty"`
 }
 
@@ -1767,10 +1767,11 @@ func ListWorkItems(ctx context.Context, pool *pgxpool.Pool, project string, f Li
 	// same one-exit reason as the disclosure above — listWorkItemsPage returns
 	// from the similar_to path, the vector path, and the ILIKE text path, and
 	// annotating each is three chances to forget one. Keyed on the REQUEST (a
-	// non-empty query=), never on which path answered: aihub#367 measured the
-	// vector path missing at 0/6 for every N precisely while returning
-	// plausible full pages, and on the ILIKE fallback the section is a cheap
-	// restatement rather than a wrong one. f.Limit is already normalized above,
+	// non-empty query=), never on which path answered: the vector path can miss
+	// precisely while returning a plausible full page (wi_vector.go — the
+	// wi-side number once cited here is withdrawn, aihub#677), and on the ILIKE
+	// fallback the section is a cheap restatement rather than a wrong one.
+	// f.Limit is already normalized above,
 	// so the section's page cap is the same one Items obeys.
 	if f.Query != nil && strings.TrimSpace(*f.Query) != "" {
 		lex, lerr := listWorkItemsLexical(ctx, pool, project, f)

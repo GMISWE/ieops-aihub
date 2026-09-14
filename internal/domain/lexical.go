@@ -9,20 +9,39 @@ package domain
 // defect: an EXCERPT of a stored document is embedded as a different point
 // than its parent, so the parent routinely does not come back.
 //
-// Measured against production, 2026-09-06 (aihub#367, 44 queries whose answers
-// were frozen and committed at ce13215 BEFORE the first query ran):
+// Measured in the REPAIRED embedding space, 2026-09-14 (aihub#660 arm 1), over
+// the same 44 queries aihub#367 froze and committed at ce13215 BEFORE the first
+// query ran, criterion unchanged character-for-character:
 //
-//	recall@1 = 0/42 over every query family;
-//	production-shape (query = wi.goal, target = the memories attached to that
-//	wi, n=18): @1 0.0%, @5 11.1%, @10 33.3% against a 14.1% random baseline;
-//	work items via pf_list_work_items(query=): 0/6 at EVERY N.
+//	memories: @1 20/42, @5 26/42, @10 30/42 — twelve queries still miss at
+//	@10, five of them structurally unwinnable under the frozen criterion.
 //
-// The decisive observation: 11 of the 12 production-shape misses WERE retrieved
-// — by a different, unrelated query. Independently confirmed, all 161
-// embeddable memories carried a vector (0 missing). So the failures are not a
-// data gap, and no re-embedding fixes them; what the failing queries lack is a
-// lexical component (the canonical sample: query `already_held empty` cannot
-// retrieve the document whose first line is `already_held: []`).
+// What those twelve lack is a lexical component, and no ranking change reaches
+// them. The canonical sample is the blind spot isolated: the query
+// `already_held empty` cannot retrieve the document whose first line is
+// `already_held: []`.
+//
+// ⚠️ HISTORICAL, and withdrawn as evidence (aihub#677). This header used to
+// cite aihub#367's 2026-09-06 reading — @1 0/42, production-shape @10 33.3%
+// against a 14.1% random baseline, work items 0/6 at EVERY N — and to conclude,
+// from "11 of the 12 production-shape misses were retrieved by a different
+// query" plus "all 161 embeddable memories carried a vector", that the failures
+// were not a data gap and NO RE-EMBEDDING FIXED THEM. Both steps fail:
+//
+//   - the reading was taken through the serving defect aihub#648 found in
+//     production TEI (a causal checkpoint forwarded under bidirectional
+//     attention; cosine 0.139-0.348 to a correct causal reference, 17/17
+//     documents), so it measured serving and index shape at once and separated
+//     neither;
+//   - "every row has a vector" excludes a MISSING vector and nothing more. A
+//     vector in the WRONG SPACE is present, is indistinguishable by emb_model,
+//     and is exactly what the corpus held. aihub#650 re-embedded it and the
+//     identical frozen set went 0/1/2 to 20/26/30 at @1/@5/@10.
+//
+// The claim this file is built on survives — a single unchunked vector per row
+// cannot answer a verbatim-excerpt query, and twelve of them still miss in the
+// repaired space. Its 2026-09-06 evidence does not. Do not quote those numbers
+// forward.
 //
 // This file is the shared half of the repair the owner ruled for on 2026-09-06
 // (aihub#360, option B): a lexical retrieval section returned ALONGSIDE the

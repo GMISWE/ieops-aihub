@@ -1,8 +1,7 @@
 package domain
 
 // aihub#360 — the work-item-side acceptance anchor, against a real pgvector
-// Postgres. The wi side is the one aihub#367 measured WORST — 0/6 at every N —
-// so the anchor here demonstrates both halves of the published contract:
+// Postgres. The anchor demonstrates both halves of the published contract:
 //
 //   - excerpt query: the vector page fills with decoys, the parent work item
 //     is structurally outside it, and the lexical section retrieves it;
@@ -13,6 +12,14 @@ package domain
 // The provider is the same deterministic fake as recall_lexical_db_test.go
 // (anchorEmbedProvider): target's goal+content carries the marker and embeds
 // orthogonal to everything else.
+//
+// ⚠️ This header used to open "the wi side is the one aihub#367 measured WORST
+// — 0/6 at every N". aihub#677 removed that: the reading was taken through the
+// serving defect aihub#648 found, and after aihub#650 repaired it the same six
+// frozen queries read 3/6 at @1 and 6/6 at @5 (aihub#660) — worst to 100% at
+// @10. Nothing below changes, and that is the point worth keeping: the geometry
+// here is CONSTRUCTED by the fake provider, so this anchor never rested on the
+// field reading and is unaffected by its withdrawal.
 //
 //	AIHUB_TEST_DB=postgres://... go test ./internal/domain/ \
 //	  -run '^TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot$' -v -count=1

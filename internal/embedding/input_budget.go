@@ -17,9 +17,10 @@ import (
 // comment admitted it had never been reconciled against any provider's real
 // context length. The reconciliation has now been done, and this is it:
 //
-//   - The deployed provider is text-embeddings-inference 1.7.2 serving
-//     Qwen/Qwen3-Embedding-0.6B. Its /info reports max_input_length=32768
-//     tokens, but the EFFECTIVE per-input ceiling is max_batch_tokens=16384:
+//   - The provider deployed AT THE TIME OF THAT DERIVATION was
+//     text-embeddings-inference 1.7.2 serving Qwen/Qwen3-Embedding-0.6B. Its
+//     /info reported max_input_length=32768 tokens, but the EFFECTIVE per-input
+//     ceiling was max_batch_tokens=16384:
 //     probed 2026-09-12 with length-increasing requests, an input of 16,382
 //     tokens embeds in ~1.5s, 16,492 tokens HANGS FOREVER (never schedulable —
 //     a single queue entry larger than max_batch_tokens fits in no batch, so
@@ -39,12 +40,34 @@ import (
 //     emb_vector NULL — the pre-existing, logged degraded mode, now visible
 //     per row via embedded_len (migration 0039).
 //
-// If the serving config changes — in particular if max_batch_tokens is raised
-// to match max_input_length, which removes the hang zone entirely — re-run the
-// probe and re-derive; that is what the knob below is for. Raising it moves
-// BOTH writers at once or neither, and re-embedding the stored corpus after a
-// raise is required to keep one embedding semantics per emb_model (see
-// cmd/aihub-embed-backfill).
+// 🔴 THAT PREMISE IS STALE, AND THE RE-DERIVE TRIGGER THIS COMMENT NAMES HAS
+// ALREADY FIRED (recorded 2026-09-14 by aihub#677; NOT re-derived).
+//
+// The condition written below used to read "if max_batch_tokens is raised to
+// match max_input_length, which removes the hang zone entirely — re-run the
+// probe and re-derive". aihub#650 then swapped production to
+// text-embeddings-inference 89-1.9.3, whose /info reports max_input_length=32768
+// AND max_batch_tokens=32768 (plus --auto-truncate false). Source: the aihub#650
+// work-item record, attrs.execution_2026_09_14 step 3 — not a probe run for this
+// comment. So the hang zone is gone and 16000 is now MORE conservative than it
+// was derived to be, not less: the same worst observed 0.620 tokens/rune puts
+// 16000 runes at ~9,900 tokens, which is ~70% headroom under 32,768 rather than
+// the 39% it had under 16,384. The direction is safe, which is why this is a
+// stale premise and not a defect.
+//
+// 🔴 BEFORE ACTUALLY RE-DERIVING IT, PRICE THE MOVE. This value is stamped into
+// every row's provenance: EmbedPipelineDoc (internal/domain/embed_pipeline.go)
+// writes `in=<this value>` into the emb_pipeline document segment, and
+// cmd/aihub-embed-backfill's predicate compares exactly that segment. Changing
+// the number therefore selects EVERY row in both tables for re-embedding, by
+// design — memories and work_items alike, thousands of rows, one provider call
+// each. That is the correct behaviour (a different budget is a different
+// embedding semantics), but it is a deployment-window decision, not a constant
+// edit. EMBEDDING_INPUT_MAX_RUNES has the same effect for the same reason.
+//
+// And whichever value a re-derivation lands on, RAISING THE BUDGET moves BOTH
+// writers at once or neither — that is the aihub#361 property, and it belongs to
+// the budget, not to the probe.
 const DefaultInputMaxRunes = 16000
 
 // InputMaxRunes reads EMBEDDING_INPUT_MAX_RUNES into the embedding input budget.

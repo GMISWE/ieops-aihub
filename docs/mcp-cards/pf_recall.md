@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_recall",
-  "description_sha256": "ad0170367823e8481a50ac51523b48131f2f22f738d4a15d24234dc12ffeaae3",
+  "description_sha256": "200b9ff9f70df29974cd93a5cff2ccf972d730326837a962c49b0af1fb0377b2",
   "input_schema_sha256": "b4c16095e09e28760e784f8d5b4ee98eb79ad70246a819d9d75e3bbeaee1bf16",
   "params": {
     "cursor": {
@@ -108,11 +108,23 @@ It is gone rather than implemented, and not for want of demand — implementing 
 was measured to be a regression. `docs/design/polyforge-v1-design.md` §7.5
 specified `sim×(1-w) + normalized_recency×w + normalized_strength×0.1` at w=0.3,
 the same shape as the fused score `aihub#311` removed from the vector path as a
-defect. The embedding model packs a result set's cosines into a band ~0.04 wide,
-so a 0.3-weighted recency term spans several times the whole spread of the signal
-it blends into: replayed on a real 20-row result set, the highest-cosine row fell
+defect. The cosines on a returned page sit close enough together that a
+0.3-weighted recency term spans several times the whole spread of the signal it
+blends into: replayed on a real 20-row result set, the highest-cosine row fell
 from rank 1 to rank 10 and similarity inversions rose from 16/190 to 98/190. And
 there was nothing to win, because recency was never absent — see hop 4.
+
+⚠️ That sentence used to read "packs a result set's cosines into a band ~0.04
+wide", and both halves of it were wrong until `aihub#677`: the narrow band is a
+property of the PAGE rather than the candidate set (`aihub#646`, `aihub#647`),
+and `~0.04` was the fingerprint of the serving defect `aihub#648` found in
+production TEI, not of this model — the repaired page band reads median `0.1281`
+(`aihub#650`). The conclusion is unchanged, and no longer rests on any single
+band: `internal/domain/recall_recency_replay_test.go`
+(`TestRecencyDominatesCosineInClosedForm`) derives the band from the replayed
+page itself, 0.0555, and holds `w=0.3`'s overturn threshold of 0.2709 at 4.88×
+it — against the retired 0.04 it is 6.8×, against the repaired 0.1281 it is
+2.11×, and w=0.3 loses under all three.
 
 ⚠️ That row is also the reason `aihub#469` exists rather than being caught: the
 card gate's K4 arm (`internal/mcp/contract_cards_gate_test.go`) requires only that a
@@ -270,9 +282,10 @@ passing nothing returned the same 20 items in the same order.
     `0.7*cosine + 0.3*tanh(strength)` score ranked a memory below a LESS similar
     one for being older and more activated: the target held the set's highest
     cosine (0.7227) and came second to 0.7202. Reweighting was measured
-    insufficient — the model packs a result set's cosines into a band ~0.04 wide,
-    so any non-trivial second term flips gaps that small. Bucketing keeps recency
-    deciding only genuine near-ties.
+    insufficient: a returned page's cosines sit close enough together that any
+    non-trivial second term flips gaps that small. That used to read "the model
+    packs a result set's cosines into a band ~0.04 wide" — see hop 0-1 for both
+    errors in it. Bucketing keeps recency deciding only genuine near-ties.
 
   This is the hop `recency_weight` was withdrawn from (`aihub#469`), and the two
   facts are one fact: the knob was never read, and had it been honoured with the
@@ -280,7 +293,10 @@ passing nothing returned the same 20 items in the same order.
   `aihub#311` fixed.
   <!-- prose-only: because=counterfactual -->
   At w=0.3 a 30-day age gap overturns a cosine gap of 0.2709,
-  6.8× the whole band; keeping cosine dominant would need w < 0.06.
+  4.88× the replayed page's own band of 0.0555; keeping cosine dominant would
+  need w < 0.081. The conclusion holds against every band on record, which is
+  why the numbers moved and the ruling did not: 6.8× and w < 0.060 against the
+  retired 0.04, 2.11× and w < 0.169 against the repaired-space 0.1281.
 - **`similarity_threshold` has no default and must keep none.** Measured on one
   project with limit=200: a pure-punctuation noise query scores 0.4712 at its WORST
   hit while a real query whose top hit is correct scores 0.4798 at its BEST — 0.0086
@@ -478,7 +494,9 @@ pgvector database by `internal/domain/recall_lexical_db_test.go`
 (`TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot`), whose anchor
 reproduces `aihub#367`'s measured failure shape (an excerpt of a stored
 document cannot retrieve its parent through the single-vector unchunked index;
-recall@1 0/42, measured 2026-09-06) and requires the lexical section to
+12 of 42 frozen queries still miss at @10 in the repaired embedding space,
+measured 2026-09-14 by `aihub#660`, five of them out of reach of any ranking)
+and requires the lexical section to
 retrieve the parent the vector page missed, in the same response. The scoped
 arm of `TestRecallLexicalSectionRetrievesWhatTheVectorPathCannot` covers the
 one shape where the query text used to do nothing at all — `work_item_id` plus

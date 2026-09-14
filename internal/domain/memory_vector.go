@@ -29,13 +29,34 @@ import (
 // the index shape, not a data defect (aihub#360): each row carries ONE
 // unchunked vector over its whole content, so an EXCERPT of a stored document
 // embeds as a different point than its parent and routinely fails to retrieve
-// it. Measured against production 2026-09-06 (aihub#367, answers frozen before
-// the first query ran): recall@1 = 0/42; production-shape recall@10 33.3%
-// against a 14.1% random baseline — with 11 of the 12 misses retrievable by an
-// unrelated query and all 161 embeddable rows carrying a vector, so no
-// re-embedding fixes it. The repair is the parallel lexical section Recall
-// attaches around this path (memory_lexical.go); judge existence by that
+// it. The canonical sample is the query `already_held empty` against the
+// document whose first line is `already_held: []` — verbatim text no single
+// unchunked vector can be asked for. The repair is the parallel lexical section
+// Recall attaches around this path (memory_lexical.go); judge existence by that
 // section or by direct filters, never by a page from here.
+//
+// The reading that claim now rests on was taken in the REPAIRED space,
+// 2026-09-14 (aihub#660 arm 1, the same 44 queries aihub#367 froze at ce13215,
+// criterion unchanged): 12 of 42 still miss at @10, and 5 of those are
+// structurally unwinnable under the frozen criterion.
+//
+// ⚠️ It used to rest on aihub#367's 2026-09-06 numbers — recall@1 0/42,
+// production-shape @10 33.3% against a 14.1% random baseline — and on the
+// inference that all 161 embeddable rows carried a vector "so no re-embedding
+// fixes it". BOTH are withdrawn, and they fail differently:
+//
+//   - The numbers were taken THROUGH the serving defect aihub#648 later found
+//     (production TEI forwarded a causal checkpoint under bidirectional
+//     attention; cosine to a correct causal reference 0.139-0.348 on 17/17
+//     documents). They are honest readings of a broken pipeline, so they do not
+//     isolate the index shape from it.
+//   - The inference was never valid, not merely outdated. A row HAVING a vector
+//     rules out a MISSING vector; it says nothing about a vector in the wrong
+//     space, and emb_model was byte-identical across the two spaces — which is
+//     precisely the gap emb_pipeline was added to close (aihub#661,
+//     embed_pipeline.go). aihub#650 then re-embedded the corpus and moved the
+//     identical frozen query set from 0/1/2 to 20/26/30 at @1/@5/@10. Verbatim:
+//     re-embedding fixed most of it.
 //
 // Only memories that have emb_model matching the current provider and a non-NULL
 // emb_vector are candidates — unembedded memories fall through to the text path.
@@ -247,12 +268,27 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	// which compressed the cosine space about 2.8x on the page band, so each 0.01
 	// bucket swallowed far more rows than it does now. Quote them only as history.
 	//
-	// One copy of the sentence corrected above survives outside this file and is NOT
-	// corrected by aihub#647, deliberately: replayCosineBand in
-	// internal/domain/recall_recency_replay_test.go quotes it verbatim and pins 0.04 as
-	// the denominator of a design-doc ratio, so moving it is a test change, not a
-	// comment change. Its own fixture is a 20-row page captured 2026-09-08 under the
-	// same broken serving. If you touch that constant, re-measure first.
+	// 🔴 THIS NOTE USED TO SAY "one copy of the sentence corrected above survives
+	// outside this file". It was six, so aihub#647 shipped a fresh false claim inside
+	// the act of correcting one. aihub#677 corrected the six and is deliberately NOT
+	// replacing that number with another number: a census written down as prose is
+	// stale the moment anything moves, and the only honest form of it is a command.
+	// Count them yourself, from the repo root:
+	//
+	//	git grep -n '0\.04' -- '*.go' '*.md'
+	//
+	// Then READ every hit before counting it as a live claim. This repo corrects in
+	// place, so a large share of those hits are tombstones for the old sentence (this
+	// paragraph is one) and one is an unrelated decay example in the design doc. A
+	// grep HIT is no more self-evident than a grep MISS.
+	//
+	// replayCosineBand in internal/domain/recall_recency_replay_test.go was the one
+	// aihub#647 left alone on purpose, because moving it is a test change rather than
+	// a comment change and its fixture is a 20-row page captured 2026-09-08 under the
+	// same broken serving. aihub#677 moved it without re-measuring production: the
+	// constant is now DERIVED from that fixture's own rows instead of quoted from
+	// aihub#311's different result set, which is the one band the ratio built on it is
+	// entitled to use. See that file for what the derivation does to §7.5's numbers.
 	//
 	// NOT AN INVARIANT - stated outright because aihub#646 met an inversion and read it
 	// as a regression rather than as the trade: bucketing does NOT guarantee that the

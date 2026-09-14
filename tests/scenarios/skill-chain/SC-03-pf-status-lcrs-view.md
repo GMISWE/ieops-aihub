@@ -17,7 +17,9 @@ AS ADMIN (via MCP tools, not skills):
   5. Create WI_BLOCKED_DEP (chore) → create dependency on WI_RUNNING → stalled[]
   6. Create WI_UNCLASSIFIED via raw HTTP (wi_type=NULL) → unclassified[]
 
-NOTE: For MCP claims (steps 3-4), use pf_claim_work_item:
+NOTE: Steps 3-4 claim over MCP with
+pf_claim_work_item(work_item_id=<WI_ID>, idempotency_key=<client ULID>).
+There is no mode/kind selector on a claim: re-claiming IS resuming (aihub#394).
 ```bash
 MY_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 # WI_RUNNING: claim with Alice's key, do not wrap — remains in running[]

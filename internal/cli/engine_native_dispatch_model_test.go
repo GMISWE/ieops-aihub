@@ -222,6 +222,13 @@ var (
 			"\\s*\\|\\s*`([^`]*)`\\s*\\|\\s*(.*?)\\s*\\|\\s*$")
 	}
 
+	// harnessTableRowRe matches ANY row of that table, capturing the harness cell. It exists for
+	// the orphan direction: harnessRowRe can only look for harnesses the Go table already names,
+	// so it can never see a row for a harness that was DELETED from the Go table (or never added
+	// to it). The harness cell is deliberately un-backticked in the document so this cannot also
+	// match the role table above it, whose first cell is `role` in backticks.
+	harnessTableRowRe = regexp.MustCompile("(?m)^\\|\\s*([a-z][a-z0-9]*)\\s*\\|\\s*`[^`]*`\\s*\\|\\s*.*?\\s*\\|\\s*$")
+
 	// retiredPredicateTokens is any restatement of the two-way predicate aihub#664 retired.
 	// Checked against LIVE pseudocode regions only (the resident loop, the §0b template) —
 	// never against prose that explains the retirement, which legitimately names these tokens
@@ -282,6 +289,27 @@ func dispatchAgentRegion(tmpl string) (string, bool) {
 		return "", false
 	}
 	return tmpl[s:p], true
+}
+
+// harnessNameRe matches a harness key as a WORD. Not a bare substring: "pi" occurs inside
+// "pinned" in engine.native.md's startup paragraph, and a strings.Contains check on a
+// two-letter key was measured green against a document that had stopped mentioning pi at all.
+func harnessNameRe(harness string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(harness) + `\b`)
+}
+
+// harnessNamePairedWithID reports whether doc states the harness name and its agent-id form on
+// ONE line. Extracted rather than inlined so the anti-vacuity fixtures can feed it the documents
+// that must NOT satisfy it — a fixture that re-implements the predicate proves only that the
+// fixture agrees with itself, which is the decoration this file rejects elsewhere.
+func harnessNamePairedWithID(doc, harness, wantID string) bool {
+	re := harnessNameRe(harness)
+	for _, ln := range strings.Split(doc, "\n") {
+		if re.MatchString(ln) && strings.Contains(ln, wantID) {
+			return true
+		}
+	}
+	return false
 }
 
 func readAgentDoc(t *testing.T, pluginRoot, rel string) string {
@@ -602,6 +630,30 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 					dispatchDetailDoc, d.Harness, call)
 			}
 		}
+
+		// ...and the ORPHAN direction, which the loop above cannot see. It asks "is every Go row
+		// documented?"; without this, DELETING a row from internal/roles/dispatch.go leaves that
+		// harness's markdown row checked by nothing and free to rot into a lie, while the gate
+		// goes green because there is no longer a Go row asking after it. This is the same
+		// asymmetry TestEngineDispatchIsRootedInTheRoleCatalog closes for roles (a role with no
+		// agent file, an agent file with no role); the harness table needs both halves too.
+		//
+		// Counted by re-finding every row of the table the loop above matched into, keyed on the
+		// first cell, so a row for an unknown harness is caught by the COUNT even though no
+		// per-harness matcher would ever look for it.
+		documented := harnessTableRowRe.FindAllStringSubmatch(details, -1)
+		if len(documented) != len(table) {
+			var names []string
+			for _, row := range documented {
+				names = append(names, row[1])
+			}
+			sort.Strings(names)
+			t.Errorf("%s: §0f's harness table has %d row(s) (%v) but internal/roles/dispatch.go "+
+				"declares %d (%v). A row the Go table does not declare is documentation nothing "+
+				"checks — and a Go row the document dropped is a harness reading somebody else's "+
+				"dispatch.", dispatchDetailDoc, len(documented), names, len(table),
+				roles.DispatchHarnesses())
+		}
 	})
 
 	t.Run("TheResidentLoopSaysWhichHarnessItIsShowing", func(t *testing.T) {
@@ -643,14 +695,7 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 				continue // cc's ids are spelled out entry by entry in the ROLE_AGENT dict
 			}
 			wantID := fmt.Sprintf(d.AgentIDFormat, "<role>")
-			paired := false
-			for _, ln := range strings.Split(engineDoc, "\n") {
-				if nameRe.MatchString(ln) && strings.Contains(ln, wantID) {
-					paired = true
-					break
-				}
-			}
-			if !paired {
+			if !harnessNamePairedWithID(engineDoc, d.Harness, wantID) {
 				t.Errorf("%s never states harness %q and its agent id form %q on the SAME line. "+
 					"Naming the harness without pairing it to an id is the half-fix: opencode's "+
 					"argument is spelled `subagent_type` exactly as cc's is, so a reader who "+
@@ -685,29 +730,36 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		}
 
 		// aihub#670: the mutant that ESCAPED the first draft of
-		// TheResidentLoopSaysWhichHarnessItIsShowing, kept as a fixture because the reason it
-		// escaped is not visible from reading the assertion. A bare
-		// strings.Contains(engineDoc, "pi") is satisfied by the word "pinned" in the startup
-		// paragraph, so deleting the only mention of pi from the substitution rule stayed green.
-		// The live assertion pairs a word-boundary name with the id form on ONE line; both
-		// halves of that are load-bearing and each is checked here.
+		// TheResidentLoopSaysWhichHarnessItIsShowing, kept because the reason it escaped is not
+		// visible from reading the assertion. These fixtures call harnessNamePairedWithID and
+		// harnessNameRe, the SAME functions the live check calls — an earlier version of this
+		// block asserted properties of its own string literals instead, which left it passing
+		// when the live check was weakened from per-line to whole-document, i.e. it was exactly
+		// the decoration this file refuses ten lines further down.
 		accidental := "`<workspace_root>/.repo/<owner>__<repo>/`, SHA pinned into `.pf_meta.json`"
 		if !strings.Contains(accidental, "pi") {
 			t.Error("the accidental-substring fixture no longer contains \"pi\", so it cannot " +
-				"demonstrate why the bare-substring check was unsafe")
+				"demonstrate why a bare-substring name check was unsafe")
 		}
-		if regexp.MustCompile(`\bpi\b`).MatchString(accidental) {
-			t.Errorf("a word-boundary match for \"pi\" fires on %q. That is the carrier the "+
-				"escaped mutant rode; if this ever becomes true the name check is back to "+
-				"being satisfiable by prose that says nothing about the pi harness.", accidental)
+		if harnessNameRe("pi").MatchString(accidental) {
+			t.Errorf("harnessNameRe(\"pi\") fires on %q. That is the carrier the escaped mutant "+
+				"rode: if this ever becomes true the name check is satisfiable by prose that "+
+				"says nothing about the pi harness.", accidental)
 		}
-		// ...and the pairing half: name and id in separate paragraphs must NOT satisfy it.
-		split := "# pi is one of the four harnesses.\n# some other line\n# the id is `pf-<role>`."
-		for _, ln := range strings.Split(split, "\n") {
-			if regexp.MustCompile(`\bpi\b`).MatchString(ln) && strings.Contains(ln, "pf-<role>") {
-				t.Errorf("the un-paired fixture matched on one line (%q) — the same-line "+
-					"requirement is not actually discriminating", ln)
-			}
+		// Name and id in the same DOCUMENT but on different lines must not satisfy the pairing.
+		// This is the fixture that goes red if the live check is relaxed to whole-document.
+		if harnessNamePairedWithID(
+			"# pi is one of the four harnesses.\n# unrelated\n# the id is `pf-<role>`.",
+			"pi", "pf-<role>") {
+			t.Error("harnessNamePairedWithID accepted a name and an id on DIFFERENT lines — a " +
+				"reader of that text still cannot tell which id is theirs, which is the whole " +
+				"question the rule exists to answer")
+		}
+		// ...and the positive control, so "nothing paired" cannot mean "the matcher is dead".
+		if !harnessNamePairedWithID("# off cc: id `pf-<role>` (pi) / `step-<role>`.",
+			"pi", "pf-<role>") {
+			t.Error("harnessNamePairedWithID rejected a correctly paired line; every pairing " +
+				"assertion above would then pass for the wrong reason")
 		}
 
 		noAgent := "Agent(\n  prompt: \"\"\"\nbody\n\"\"\"\n)"

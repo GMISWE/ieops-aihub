@@ -166,21 +166,37 @@ const (
 // the ~9,460 discriminator bound applies to the PAYLOAD (which is 499 under it), and the
 // worst-case check on the gate (9,111 + 2 pointers x 125 = 9,361) stays under the harness
 // limit.
-// aihub#670 re-baselined native 8,961 -> 9,328 (+367). This is a RAISE, which the failure
-// message above tells you not to do, so it needs its reason stated rather than assumed. The
-// text added is three fragments of one rule: engine.native.md's dispatch pseudocode is written
-// in Claude Code's private API (`Agent`, `subagent_type`, the `polyforge:` namespace) and the
-// file ships BYTE-IDENTICAL to pi, codex and opencode, none of which can parse any of the
-// three. Re-tiering was considered first and does not work here: the reference doc it would
-// move to is exactly where the rest of the harness table already went (§0f, on-demand, 0
-// payload), and what stayed resident is the irreducible remainder — a reader who never learns
-// the line is not addressed to it has no reason to go and read §0f at all. Two lines and a
-// six-word tail on the dispatch line is the whole of it, and the alternative is a payload that
-// is correct for one harness in four.
+// aihub#670 re-baselined native 8,961 -> 9,328. This is a RAISE, which the failure message
+// above tells you not to do, so it needs its reason stated rather than assumed — AND its cost
+// stated honestly, because the two are different numbers here.
 //
-// The worst case after the raise is 9,328 + 150 + 2 x 125 = 9,728, i.e. 272 under the harness
-// limit — tighter than aihub#657's 789 and looser than aihub#338's 389. The NEXT growth here
-// should re-tier rather than re-baseline; there is no longer room for a second +367.
+// ⚠️ THE FLOOR MOVED 367 BUT THE TEXT COSTS 224. The rest is absorbed stale drift, the fourth
+// instance of the failure mode the ⚠️ paragraph above already documents twice: the floor read
+// 8,961 while the payload on the merge-base already MEASURED 9,104. That is inside the 150-char
+// slack band, so the gate stayed green and nobody re-baselined. Measured both sides by setting
+// this entry to `1 + routerGateSlack` and reading the gate's own report:
+//
+//	merge-base: 9,104 normalised / 9,354 worst case
+//	after:      9,328 normalised / 9,578 worst case
+//
+// engine.native.md's own char delta is 3,396 -> 3,620, i.e. 224, and it agrees with the payload
+// delta exactly. Budget against 224 when you judge the next change, not against 367 — an
+// earlier draft of this comment said +367 and told the next contributor there was "no room for
+// a second +367", which is a 64% overstatement of what this change actually spent.
+//
+// WHAT THE 224 BUYS. engine.native.md's dispatch pseudocode is written in Claude Code's private
+// API (`Agent`, `subagent_type`, the `polyforge:` namespace) and the file ships BYTE-IDENTICAL
+// to pi, codex and opencode, none of which can parse any of the three. Re-tiering was tried
+// first and does not work for this remainder: the whole harness table and every per-row failure
+// mode DID go to the on-demand tier (§0f, 0 payload), and what is left resident is two comment
+// lines plus a six-word tail. You cannot re-tier the signpost that tells a reader to go and
+// read the tier — one who never learns the line is cc-specific has no reason to open §0f at all.
+//
+// MARGIN, on the same formula as the 789 and 389 quoted above (measured + 2 pointers x 125):
+// 9,328 + 250 = 9,578, i.e. 422 under the harness limit — tighter than aihub#657's 789, looser
+// than aihub#338's 389. On the conservative gate-based bound (gate + 250) it is 272; that is a
+// DIFFERENT formula and must not be compared against those two. The next growth here should
+// re-tier rather than re-baseline.
 var routerBudget = map[string]int{
 	"pf-execute/superpowers": 6939 + routerGateSlack,
 	"pf-execute/native":      9328 + routerGateSlack,

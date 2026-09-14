@@ -252,7 +252,7 @@ carry every harness itself. You know which harness you are running in; the `poly
 does not and must never be asked for it (aihub#649, refuted twice: the thing reading this line
 is the model, not the process).
 
-| harness | agent id for role `<role>` | the dispatch call, `<id>` = that agent id |
+| harness | agent id for role `<role>` (codex: a profile name, not a call argument) | the dispatch call, `<id>` = that agent id |
 |---|---|---|
 | cc | `polyforge:step-<role>` | `Agent(subagent_type=<id>, prompt=<§0b>)` |
 | pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |

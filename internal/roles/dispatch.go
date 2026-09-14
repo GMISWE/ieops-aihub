@@ -15,7 +15,9 @@ import (
 // all three Claude Code-private, and that file ships byte-identical to three other harnesses:
 //
 //   - pi:       plugins/polyforge/pi/install.sh's place_skills() is
-//     `cp -r "$PLUGIN_ROOT"/skills/* "$dst/"`, printing "(no modification needed)".
+//     `cp -r "$PLUGIN_ROOT"/skills/* "$dst/"`, and it used to report that as
+//     "(no modification needed)" — a claim nothing checked. It now says why no
+//     modification is needed, which this table is what makes true.
 //   - codex:    plugins/polyforge/.codex-plugin/plugin.json declares "skills": "./skills/" —
 //     the directory is read IN PLACE, so there is no copy step to transform.
 //   - opencode: plugins/polyforge/opencode/install.sh never copies skills at all.
@@ -60,6 +62,13 @@ type HarnessDispatch struct {
 	AgentNameFormat string
 
 	// AgentIDFormat is a single %s format applied to the role name, e.g. "polyforge:step-%s".
+	//
+	// ⚠️ On a row whose Call is empty it is NOT a dispatch argument, because there is no
+	// dispatch to pass it to. It is then the identifier that addresses the role by that
+	// harness's other means, and Note says which — for codex it is the `-p`/`--profile` name,
+	// i.e. the stem of the $CODEX_HOME/step-<role>.config.toml profile. AgentIDFor therefore
+	// answers for such a harness rather than erroring: the string is real and useful, it is just
+	// not something to put in a tool call. Check Call before treating the result as one.
 	AgentIDFormat string
 
 	// Call is the harness-native dispatch expression, or "" when this harness cannot dispatch
@@ -90,11 +99,13 @@ var harnessDispatches = []HarnessDispatch{
 		AgentIDFormat:   "pf-%s",
 		Call:            `subagent(agent=<id>, task=<§0b>)`,
 		Note: "pi's own subagent extension, which plugins/polyforge/pi/install.sh installs from " +
-			"pi's examples/extensions/subagent. Its tool is named `subagent` and its two " +
-			"required parameters are `agent` and `task` (index.ts's SubagentParams); `agents.ts` " +
-			"resolves `agent` against each file's frontmatter `name:`, which render_pi.go " +
-			"writes as pf-<role>. NOTE all three of Claude Code's spellings differ here: the " +
-			"tool name, both argument names, and the agent id.",
+			"pi's examples/extensions/subagent. Its tool is named `subagent`, and `agent` + " +
+			"`task` are its SINGLE-MODE parameter pair (index.ts's SubagentParams marks both " +
+			"Type.Optional because `tasks` and `chain` are the parallel and sequential " +
+			"alternatives, validated as \"provide exactly one mode\" — inside those two array " +
+			"shapes the same pair IS required). `agents.ts` resolves `agent` against each file's " +
+			"frontmatter `name:`, which render_pi.go writes as pf-<role>. NOTE all three of " +
+			"Claude Code's spellings differ here: the tool name, both argument names, and the id.",
 	},
 	{
 		Harness:         "opencode",

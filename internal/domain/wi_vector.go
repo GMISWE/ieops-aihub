@@ -110,16 +110,31 @@ package domain
 //
 // The single-vector, unchunked index shape gives the query= path a structural
 // blind spot: an excerpt of a stored work item embeds as a different point
-// than its parent, so verbatim text FROM a document routinely fails to
-// retrieve that document. Measured against production 2026-09-06 (aihub#367,
-// answers frozen before the first query ran): pf_list_work_items(query=)
-// scored 0/6 at EVERY N — the worst of the three measured families — while
-// returning structurally plausible full pages. That is a property of the
-// index, not a data gap, and RankedCandidates already warns that a full page
-// is a ranking rather than a match set. The repair is the parallel lexical
-// section ListWorkItems attaches around this path (wi_lexical.go): judge
-// existence by that section's explicit total, or by ids=/filters, never by a
-// page from here.
+// than its parent, so verbatim text FROM a document can fail to retrieve that
+// document — and the page comes back structurally plausible and full either
+// way. That is a property of the index, not a data gap, and RankedCandidates
+// already warns that a full page is a ranking rather than a match set. The
+// repair is the parallel lexical section ListWorkItems attaches around this
+// path (wi_lexical.go): judge existence by that section's explicit total, or
+// by ids=/filters, never by a page from here.
+//
+// ⚠️ THE NUMBER THAT USED TO BE HERE IS WITHDRAWN (aihub#677), and its
+// replacement points the other way — which is why this paragraph now argues
+// from the mechanism alone. It read: "Measured against production 2026-09-06
+// (aihub#367): pf_list_work_items(query=) scored 0/6 at EVERY N — the worst of
+// the three measured families". That reading was taken through the serving
+// defect aihub#648 found (production TEI forwarding a causal checkpoint under
+// bidirectional attention), so it never separated the index shape from the
+// pipeline. After aihub#650 repaired the serving and re-embedded the corpus,
+// the same six frozen work-item queries read 3/6 at @1 and 6/6 at @5
+// (aihub#660) — this family went from worst to 100% at @10.
+//
+// So there is no live wi-side MEASUREMENT of the blind spot, and this file
+// claims none. What holds it up is the mechanism above, the memory side's
+// surviving residue (12 of 42 still missing at @10, aihub#660; see lexical.go),
+// and the acceptance anchor in wi_lexical_db_test.go — which builds the miss
+// geometry from a deterministic fake provider and never depended on any field
+// reading.
 
 import (
 	"context"

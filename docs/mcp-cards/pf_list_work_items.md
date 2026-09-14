@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_list_work_items",
-  "description_sha256": "4a2154c164801a0713044ec1702711b6535fd0a136fd4e0fd978d7b13809c183",
+  "description_sha256": "09f84e65e171800db67951190ddfc5b44c9472f91353ac8bab6e42be7f5e6ba7",
   "input_schema_sha256": "829bee6820dfd3cffc6b21b5403cda9746fef079839b5abdc3d81f16015a4dc1",
   "params": {
     "claimed_by": {
@@ -326,8 +326,12 @@ exactly when the request carried a non-empty `query=` (`similar_to` has no
 query text and never gets one), whichever path served `items` — driven against
 a live pgvector database by `internal/domain/wi_lexical_db_test.go`
 (`TestListWorkItemsLexicalSectionRetrievesWhatTheVectorPathCannot`), whose
-anchor reproduces the failure family `aihub#367` measured WORST on this tool
-(query= recall 0/6 at every N, 2026-09-06): the vector page fills with decoys,
+anchor reproduces the failure family `aihub#367` first measured on this tool
+(the `0/6 at every N` figure it took on 2026-09-06 is withdrawn by
+`aihub#677` — measured through the `aihub#648` serving defect, and after
+`aihub#650` repaired it the same six frozen queries read 3/6 at @1 and 6/6 at
+@5 per `aihub#660`; the anchor's geometry is built by a fake provider and never
+rested on that reading): the vector page fills with decoys,
 the parent work item is outside it, and the lexical section retrieves it — and
 whose garbage-query arm holds the published advice, a full semantic page next
 to an explicit `lexical.total: 0`. The last arm of

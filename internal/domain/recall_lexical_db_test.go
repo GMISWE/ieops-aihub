@@ -11,9 +11,18 @@ package domain
 // embedding provider is a deterministic fake that reproduces that geometry on
 // purpose — the excerpt query and the decoy rows share a direction while the
 // target document sits orthogonal to both — so the vector page fills with
-// decoys and the target is structurally outside it, exactly the measured
-// production shape (recall@1 0/42; 11 of 12 misses retrievable by an unrelated
-// query, i.e. present and embedded, just not semantically reachable).
+// decoys and the target is structurally outside it: present and embedded, just
+// not semantically reachable.
+//
+// ⚠️ That shape used to be quantified here as "recall@1 0/42; 11 of 12 misses
+// retrievable by an unrelated query". aihub#677 withdrew both numbers as
+// evidence: they were measured on 2026-09-06 through the serving defect
+// aihub#648 later found, and re-embedding the corpus after aihub#650 repaired
+// it moved the identical frozen query set to 20/26/30 at @1/@5/@10. What
+// survives, and what this anchor models, is the residue — 12 of 42 queries
+// still miss at @10 in the repaired space (aihub#660), five of them out of
+// reach of any ranking. The fixture below is a constructed geometry, so it
+// never depended on either reading; only this paragraph did.
 //
 // Against a tree without the lexical section this test cannot pass: the
 // before/after contrast is items[] (miss, full plausible page) vs lexical

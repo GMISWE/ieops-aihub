@@ -66,6 +66,7 @@ on:
       - 'internal/config/**'
       - 'internal/domain/**'
       - 'internal/embedding/**'
+      - 'internal/engine/**'
       - 'internal/mcp/**'
       - 'internal/render/**'
       - 'internal/roles/**'

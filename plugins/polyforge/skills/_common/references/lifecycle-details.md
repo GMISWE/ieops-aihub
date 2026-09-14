@@ -62,6 +62,14 @@ Because the note precedes the completion, a terminal call that fails *at the com
 already recorded it. **Drop `note=` when retrying**, unless the error says the note was not
 recorded either.
 
+This same wrap-cleanup logic also exists as a behavior-preserving Go port for a future headless
+orchestrator: `internal/engine/wrap.go`'s `CleanupWorktrees`, reachable today via
+`polyforge engine cleanup-worktrees --workspace-root=<ws> --worktrees=<json>`. The pseudocode
+above and the Go port agree on both load-bearing details: each removal runs from the repo's main
+clone (`.repo/<repo_name>`), not from inside the worktree being removed, and the shared parent is
+removed once, unconditionally, after every per-repo removal has been attempted, even if one of
+them failed.
+
 ---
 
 ## 1. Older server binaries: `next_step` on `pf_update_step`

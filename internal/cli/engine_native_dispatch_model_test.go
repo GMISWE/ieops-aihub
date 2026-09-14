@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/engine"
+	"github.com/GMISWE/ieops-aihub/internal/roles"
 )
 
 // Tag F (aihub#555, succeeding aihub#553's Tag E) — the step's model is HARNESS-READ
@@ -402,6 +405,100 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		if m := agentModelRe.FindStringSubmatch("---\nmodel: tinker\n---\n"); m == nil || m[1] != "tinker" {
 			t.Errorf("agentModelRe did not extract a re-tiered model line (got %v) — "+
 				"hooks/pf-skill-router documents this regex as the shape it derives tiers with", m)
+		}
+	})
+}
+
+// TestEngineResolveRoleNeverBottomsOutAtExecutor is aihub#654's CODE-LEVEL companion to
+// TestEngineNativeDispatchSelectsAgentNotModel above: that test pins the DOC contract (the
+// engine-native prose never wires a model argument, and keys agent choice on is_review); this
+// one pins the same "never silently default to executor" invariant one layer down, in the actual
+// Go implementation (internal/engine.ResolveRole) that a future headless orchestrator calls
+// instead of an LLM reading the prose. It is additive - it does not replace or alter any
+// assertion above. internal/engine/role_test.go's own TestResolveRole_NeverBottomsOutAtExecutor
+// already runs against the same real embedded roles.LoadRoles() catalog (via its
+// loadCatalogOrFail helper), not a hand-built fixture, so this test is not adding real-catalog
+// coverage the other one lacks; the value here is narrower - this test lives in package cli,
+// beside the doc-contract test above, so a reader auditing this file sees both the prose
+// contract and its code-level analogue together, without also having to open
+// internal/engine/role_test.go.
+func TestEngineResolveRoleNeverBottomsOutAtExecutor(t *testing.T) {
+	catalog, err := roles.LoadRoles()
+	if err != nil {
+		t.Fatalf("roles.LoadRoles: %v", err)
+	}
+
+	t.Run("catalog-absent, review-shaped step id resolves to reviewer, never executor", func(t *testing.T) {
+		// A step id absent from every role's StepIDs list, but review-shaped by name (the
+		// "_review" suffix IsReviewStep recognises) — the exact case ResolveRole's tier-3
+		// heuristic exists for.
+		const stepID = "aihub654_never_in_any_catalog_yaml_review"
+		if _, ok := roles.RoleForStepID(catalog, stepID); ok {
+			t.Fatalf("fixture step id %q is unexpectedly present in the real catalog — pick a "+
+				"different placeholder, or this subtest exercises tier 2, not the tier-3 "+
+				"heuristic it claims to", stepID)
+		}
+		role, source, _, rerr := engine.ResolveRole(catalog, stepID, "")
+		if rerr != nil {
+			t.Fatalf("ResolveRole(%q): %v", stepID, rerr)
+		}
+		if role.Name != "reviewer" {
+			t.Errorf("ResolveRole(%q) = role %q, want %q — a review-shaped id must never fall "+
+				"through to the write-capable executor role", stepID, role.Name, "reviewer")
+		}
+		if source != engine.RoleSourceHeuristic {
+			t.Errorf("ResolveRole(%q) source = %q, want %q", stepID, source, engine.RoleSourceHeuristic)
+		}
+		if role.Capability.ReadOnly != true {
+			t.Errorf("ResolveRole(%q) resolved to role %q with ReadOnly=%v, want true — the "+
+				"reviewer role's whole purpose is to be read-only by construction",
+				stepID, role.Name, role.Capability.ReadOnly)
+		}
+	})
+
+	t.Run("explicit declared role beats the catalog's own step-id mapping", func(t *testing.T) {
+		// Pick a step id the real catalog DOES map (to some role X), then declare a DIFFERENT
+		// known role name for it. Tier 1 (declared) must win over tier 2 (catalog-by-step-id)
+		// even though the catalog itself would resolve this step id to something else.
+		var mappedStepID, catalogRole string
+		for _, r := range catalog {
+			if len(r.StepIDs) > 0 {
+				mappedStepID, catalogRole = r.StepIDs[0], r.Name
+				break
+			}
+		}
+		if mappedStepID == "" {
+			t.Fatal("the real catalog has no role with any StepIDs at all — cannot exercise the " +
+				"declared-beats-catalog precedence without one")
+		}
+		var declaredRole string
+		for _, r := range catalog {
+			if r.Name != catalogRole {
+				declaredRole = r.Name
+				break
+			}
+		}
+		if declaredRole == "" {
+			t.Fatal("the real catalog has fewer than two distinct role names — cannot exercise " +
+				"declared-vs-catalog precedence")
+		}
+
+		role, source, unknownDeclared, rerr := engine.ResolveRole(catalog, mappedStepID, declaredRole)
+		if rerr != nil {
+			t.Fatalf("ResolveRole(%q, declared=%q): %v", mappedStepID, declaredRole, rerr)
+		}
+		if unknownDeclared != "" {
+			t.Errorf("ResolveRole(%q, declared=%q) unknownDeclared = %q, want %q (declaredRole was picked from the real catalog's own role names)",
+				mappedStepID, declaredRole, unknownDeclared, "")
+		}
+		if role.Name != declaredRole {
+			t.Errorf("ResolveRole(%q, declared=%q) = role %q, want the DECLARED role %q, not the "+
+				"catalog's own step-id mapping (%q)", mappedStepID, declaredRole, role.Name,
+				declaredRole, catalogRole)
+		}
+		if source != engine.RoleSourceDeclared {
+			t.Errorf("ResolveRole(%q, declared=%q) source = %q, want %q",
+				mappedStepID, declaredRole, source, engine.RoleSourceDeclared)
 		}
 	})
 }

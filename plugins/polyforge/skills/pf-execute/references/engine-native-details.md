@@ -8,6 +8,16 @@
 > `Read` this file when you are actually running an interactive (`requires_human_session=true`)
 > execute loop, or when a tool does not publish a parameter the resident fragment uses.
 
+**Go package pointer (aihub#654).** `internal/engine` now implements pieces (a)-(e) of this
+document behind `polyforge engine <verb>`: (a) §0's startup sequence (`startup.go`), (b) the
+step-bracket `pf_update_step` sequencing described in `_common/references/lifecycle-details.md`
+§1 (`bracket.go`), (c) review-marker parsing (`review.go`), (d) the `role:` catalog/heuristic
+fallback (`role.go`), and (e) wrap-time worktree cleanup (`wrap.go`), each with its own Go tests
+(`internal/engine/*_test.go`, `internal/cli/engine_test.go`). This page still carries the
+pseudocode a dispatched B/C loop reads and executes directly; the two are not yet unified into
+one call path (deferred to aihub#657, which also owns thinning this prose down to literal
+`polyforge engine ...` wrappers once it lands).
+
 ---
 
 ## 0. Startup - the exact commands
@@ -270,6 +280,36 @@ neither half is satisfied by saying nothing. It carries the scenario vocabulary 
 because aihub's CI never checks out polyforge-coding, and reconciles that pinned set against the
 live repo whenever a checkout is reachable - so the pin cannot rot silently on any machine that
 has one.
+
+## 0g. Identity: the A vs. B/C enforcement asymmetry (aihub#654 S1/S2)
+
+`aihub#640` names three ways this engine can run: **A** is a future headless CLI orchestrator
+with no LLM turning the crank; **B/C** is today's Claude Code / pi session, where an LLM reads
+this file and the loop above is pseudocode it executes by hand. The `workflow_identity_constraint`
+(aihub#640, owner-authored) requires A to contain no execution logic B/C lacks - which is why
+`internal/engine` exists (see the Go package pointer above) - but the constraint is about
+*execution logic*, not about *enforcement*, and those two turned out to differ:
+
+- **S1** - does a headless CLI (`claude -p`, `codex exec`, `opencode --auto`) fire
+  `pf-commit-guard` (IR1)? Measured yes on Claude Code (hooks fire identically in `-p` mode;
+  `hooks/pf-skill-router`'s own in-repo comment records a blocked push from a subagent the same
+  day). Inferred yes on Codex (`codex-hooks.json` wires the same guard, `exec` mode itself not
+  independently measured). Confirmed gap on opencode (no hook mechanism yet; aihub#653's scope).
+- **S2** - does `claude -p` receive the `SessionStart` using-polyforge payload while a
+  Task-spawned subagent does not? Measured, both halves: a dispatched subagent gets
+  `PreToolUse` gating but NOT `SessionStart`'s `additionalContext` (IR1-3 do not arrive); a
+  headless top-level `claude -p` gets both.
+- **Net conclusion.** A (once built) gets the full `SessionStart` payload AND `PreToolUse`
+  gating. B/C (today, a dispatched subagent) gets the same `PreToolUse` gating but not the raw
+  `SessionStart` payload - which is exactly why `hooks/pf-skill-router`'s `Skill`-matcher exists
+  as B/C's substitute injection channel, and why the §0b dispatch template pastes the prior-step
+  and step-instruction context directly into the subagent's prompt rather than relying on any
+  ambient session context reaching it. A and B/C reach *equivalent* enforcement through
+  *different* mechanisms - a real, load-bearing asymmetry, not an oversight to be closed by
+  making A "reuse the same channel" B/C uses (the option aihub#640's review rejected). Whoever
+  builds A's own dispatch path later must preserve B/C's inline-instruction compensation rather
+  than assume ambient context will be there, because for A it will be present twice and for B/C
+  it is the only copy.
 
 ## 1. Execute (rhs=true, interactive mode) - the loop in full
 

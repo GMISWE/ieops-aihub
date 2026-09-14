@@ -191,6 +191,10 @@ func runCLI(ctx context.Context, args []string) {
 	case "roles":
 		// No aihubClient needed: purely local (embedded role YAMLs + mc.Roles).
 		cli.RunRolesGenerate(mc, args[1:])
+	case "engine":
+		// No aihubClient needed: every `engine` verb is local-only (internal/engine +
+		// internal/roles + git), for a future headless orchestrator (aihub#654).
+		cli.RunEngine(ctx, args[1:])
 	case "help":
 		printUsage()
 	default:
@@ -269,6 +273,44 @@ Role/tier agent generation (aihub#642):
                               files are generated at build time instead
                               (committed via "go generate ./internal/roles/...")
                               -- this subcommand never touches them.
+
+Engine (aihub#654, local-only, for a future headless orchestrator):
+  engine startup --workspace-root=<dir> --worktree-root=<dir> --scenario-url=<url>
+                 --wi-type=<type> [--project=<name>]
+                              Resolve scenario path (owner-qualified, legacy-fallback),
+                              pin its HEAD sha, resolve+scan the wi_type template into
+                              steps, expand each step's @include:/level: pairs, and write
+                              <worktree-root>/.pf_meta.json. Prints scenario_path,
+                              legacy_fallback, sha, template_source and the step list.
+  engine resolve-role --step-id=<id> [--declared-role=<name>]
+                              Run the 3-tier role fallback (declared -> catalog ->
+                              heuristic) against the real internal/roles catalog; never
+                              bottoms out at "executor". Prints role, tier, read_only,
+                              source, and unknown_declared_role (set only when
+                              --declared-role was given but unknown to the catalog).
+  engine parse-review [--file=<path>]
+                              Parse a REVIEW_RESULT marker (last one wins if several;
+                              WARN if none) from --file, or stdin if omitted. Prints
+                              result.
+  engine bracket-plan --step-id=<id> --status=<completed|failed> --step-attempt-id=<sa>
+                       [--next-step-id=<id>] [--next-step-attempt-id=<sa>]
+                       [--supports-next-step] [--artifact-summary=<text>]
+                       [--error-type=<type>]
+                              Plan the pf_update_step call sequence for completing/failing
+                              a step (fused single call when the connected server supports
+                              next_step, else the degraded two-call form). Prints a JSON
+                              array of calls.
+  engine cleanup-worktrees --workspace-root=<dir> --worktrees=<json-map-repo-to-path>
+                              Remove each repo's worktree (git worktree remove --force,
+                              run from <workspace-root>/.repo/<repo-name>, the repo's
+                              main clone, so a worktree already deleted by an
+                              interrupted prior cleanup is still pruned), then the
+                              shared parent directory once, after the loop,
+                              unconditionally (even if a per-repo removal failed).
+                              Best-effort: always exits 0, reporting what succeeded in
+                              "removed" and every failure in "errors" (one entry per
+                              failing repo, plus "(parent)" if the shared-parent
+                              removal itself failed). Prints removed, errors.
 
 Config files (§9.5.3):
   ~/.polyforge/config.toml   Machine-level config (machine_id, [auth] api_key)

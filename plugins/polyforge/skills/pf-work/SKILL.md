@@ -176,8 +176,20 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 
 3. **Conflict preview** (before creating):
    ```
-   pf_predict_conflicts(declared_resources=<new wi's resources>, dry_run=true)
+   pf_predict_conflicts(project=<from .polyforge.yaml>,
+                        declared_resources=<new wi's resources>,
+                        dry_run=true)
    ```
+   `project` is REQUIRED here, not decorative. The wi does not exist yet, so there is no
+   `work_item_id` for the server to resolve a project from, and since aihub#662 a payload
+   carrying any entry that derives a `file_scope` key - a `path`/`document`/`section` whose
+   uri names an actual file - is refused **400** without one, the error naming the offending
+   paths in `paths_needing_project`. It is not a formality: `file_scope`
+   keys are `<project>:<repo>:<path>`, so an empty project builds every probe key as
+   `:<repo>:<path>`, matches no lock, and the answer used to be an empty prediction list
+   indistinguishable from a real all-clear. A payload of only `repo`/`service`/`external_ref`
+   entries needs neither field and is unaffected. A `project` you hold no role in answers
+   404, not 403 (aihub#665).
    Show impact. If hard conflict -> stop and explain. Severity ceiling (aihub#416): repo and
    service entries derive no lock, so a repo/service-only declaration can never report
    `hard_block` - a repo overlap reports `soft_block`, a service overlap `info`, both from a
@@ -263,9 +275,17 @@ reached no model at all (aihub#285). Resolve it by reading the file, not by reca
 
 ### Mode B - Claim existing queued wi (`/pf-work <slug>`)
 
-1. `pf_predict_conflicts(work_item_id=<slug>, dry_run=true)` -> conflict preview. Since aihub#564
+1. `pf_predict_conflicts(work_item_id=<slug>, declared_resources=<the wi's declarations>,
+   dry_run=true)` -> conflict preview. Since aihub#564
    the preview excludes this wi's own locks and declarations, so any soft_block/hard_block it
    shows is held by somebody else - do not dismiss one as "probably my own earlier attempt".
+   `declared_resources` is REQUIRED and the server does not fill it in from the wi row, so
+   send the wi's own declarations; omitting it is `declared_resources is required`.
+   No `project` here, and that is correct rather than an omission: the slug resolves to an
+   existing wi and that wi's own project wins, which is the carve-out aihub#662's refusal
+   names. Send the parameter as `work_item_id` - `wi_id` is not a published parameter, so it
+   is dropped at the server's bind step and the call degrades to the anonymous shape that
+   aihub#662 refuses.
 2. `pf_claim_work_item(work_item_id=<slug>, ...)`
 3. After successful claim - recall wi-linked memories:
    ```python

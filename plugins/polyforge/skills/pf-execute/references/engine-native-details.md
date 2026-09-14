@@ -24,8 +24,8 @@ is what a hand-executed copy of the same logic had become.
 ## 0. Startup - one command, and what it does for you
 
 ```bash
-polyforge engine startup --workspace-root=<workspace_root> --worktree-root=<worktree_root> \
-  --scenario-url=<project.scenario> --wi-type=<wi_type> [--project=<project>]
+polyforge engine startup --workspace-root='<workspace_root>' --worktree-root='<worktree_root>' \
+  --scenario-url='<project.scenario>' --wi-type='<wi_type>' [--project='<project>']
 ```
 
 prints `{scenario_path, legacy_fallback, sha, template_source, steps:[{id, content, expanded}]}`
@@ -333,6 +333,11 @@ and read the answer. They are a COMPUTE surface, never a side-effect one: none o
 MCP call, so `pf_update_step` / `pf_complete_attempt` remain the loop's own calls, made after
 reading what the verb printed.
 
+**QUOTE every flag value, on every verb** - `--name='<value>'`, not `--name=<value>`. The rule is
+spelled out under `bracket-plan` below and the reason is identical for all five;
+`internal/cli/engine_bc_contract_test.go` now reads EVERY documented invocation in this plugin,
+not only the `bracket-plan` blocks, so an unquoted value goes red wherever it is written.
+
 | verb | replaces the pseudocode for | stdout |
 |---|---|---|
 | `startup` | §0 steps 2-6 | `{scenario_path, legacy_fallback, sha, template_source, steps:[{id,content,expanded}]}`, and writes `.pf_meta.json` |
@@ -413,7 +418,7 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
                                      pf_complete_attempt(failed, note="failed reason: <user description>");
                                      break (stop the whole loop)
 
-    if is_review(step_id):   # `polyforge engine resolve-role --step-id=<step_id>` -> reviewer
+    if is_review(step_id):   # `polyforge engine resolve-role --step-id='<step_id>'` -> reviewer
         "PASS" / "continue"  -> fall through to the completed report below
         "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report
                                 completed as usual

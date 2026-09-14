@@ -42,7 +42,7 @@ is broken.
 result = pf_complete_attempt(work_item_id=<current>, status="wrapped",
                              note="wrapped: <1-sentence summary of what was accomplished>")
 # Hand result["worktrees"] (repo name -> path) straight to the engine; do not loop by hand.
-polyforge engine cleanup-worktrees --workspace-root=<workspace_root> \
+polyforge engine cleanup-worktrees --workspace-root='<workspace_root>' \
   --worktrees='{"<repo_name>": "<worktree_path>", ...}'
 # -> {"removed": ["<repo_name>", ...], "errors": {}}   (exit 0 even when a removal failed:
 #    cleanup is best-effort, so read `errors` rather than the exit code)

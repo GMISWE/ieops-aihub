@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -222,45 +224,127 @@ func bcFirstFencedBlock(s string) (string, bool) {
 	return rest[:closeAt], true
 }
 
-// bcParseInvocation turns a shell invocation — line continuations and all — into its flag list.
+// bcParseInvocation turns a bracket-plan shell invocation — line continuations and all — into its
+// flag list. It is the verb-pinned wrapper the §0h/§0c gates use; bcParseCommand below is the
+// general form aihub#663 generalised it to.
 func bcParseInvocation(block string) ([]bcDocFlag, error) {
-	// A trailing backslash continues the line; join before tokenising, or every flag after the
-	// first line is invisible and the gate silently drives a one-line subset of the command.
-	joined := strings.ReplaceAll(block, "\\\n", " ")
-
-	fields := strings.Fields(joined)
-	if len(fields) < 3 || fields[0] != "polyforge" || fields[1] != "engine" || fields[2] != "bracket-plan" {
-		return nil, fmt.Errorf("the block does not start with `polyforge engine bracket-plan` (got %q). "+
-			"This gate renders a command line from it verbatim, so it has to be the real command",
-			strings.Join(fields, " "))
+	verb, flags, err := bcParseCommand(block)
+	if err != nil {
+		return nil, err
 	}
+	if verb != "bracket-plan" {
+		return nil, fmt.Errorf("the block invokes `polyforge engine %s`, not `bracket-plan`. "+
+			"This gate renders a command line from it verbatim, so it has to be the real command",
+			verb)
+	}
+	return flags, nil
+}
 
-	var out []bcDocFlag
-	for _, tok := range fields[3:] {
+// bcSplitWords splits a documented command line into shell WORDS, honouring the one quoting form
+// these documents use: single quotes. Whitespace inside '…' does NOT split, which is the whole
+// reason the quoting rule exists — `--worktrees='{"a": "b"}'` is one argument to a shell and one
+// word here, while the same value unquoted is three words to both. Quotes are RETAINED in the
+// returned words: whether a value carries them is the property every assertion below reads, so a
+// tokeniser that dropped them would erase exactly what it was built to measure.
+//
+// A trailing backslash continues the line and is joined first, or every flag after the first line
+// is invisible and the gate silently drives a one-line subset of the command.
+func bcSplitWords(s string) ([]string, error) {
+	s = strings.ReplaceAll(s, "\\\n", " ")
+
+	var (
+		out    []string
+		cur    strings.Builder
+		inWord bool
+		quoted bool
+	)
+	flush := func() {
+		if inWord {
+			out = append(out, cur.String())
+			cur.Reset()
+			inWord = false
+		}
+	}
+	for _, r := range s {
+		switch {
+		case quoted:
+			cur.WriteRune(r)
+			if r == '\'' {
+				quoted = false
+			}
+		case r == '\'':
+			inWord = true
+			quoted = true
+			cur.WriteRune(r)
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			flush()
+		default:
+			inWord = true
+			cur.WriteRune(r)
+		}
+	}
+	if quoted {
+		return nil, fmt.Errorf("the command opens a single quote it never closes (%q). A reader "+
+			"copying this into a shell gets an unterminated string, not a command", s)
+	}
+	flush()
+	return out, nil
+}
+
+// bcParseCommand parses ANY documented `polyforge engine <verb> …` line into its verb and flags.
+//
+// aihub#657 gated the two bracket-plan blocks; aihub#663 found the identical unquoted-value
+// truncation still shipped in `startup` (twice), `cleanup-worktrees` and `resolve-role` (twice),
+// because the extractor could only read a block it already knew the verb of. Everything the old
+// parser asserted is preserved — the verb check simply moved to bcParseInvocation, its one
+// verb-pinned caller.
+func bcParseCommand(block string) (verb string, flags []bcDocFlag, err error) {
+	words, err := bcSplitWords(block)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(words) < 3 || words[0] != "polyforge" || words[1] != "engine" {
+		return "", nil, fmt.Errorf("the block does not start with `polyforge engine <verb>` (got %q). "+
+			"This gate renders a command line from it verbatim, so it has to be the real command",
+			strings.Join(words, " "))
+	}
+	verb = words[2]
+
+	for _, tok := range words[3:] {
+		// `[--project='<name>']` — an OPTIONAL flag. The brackets are documentation notation, not
+		// something a reader types, so they are stripped before parsing; the value inside is held
+		// to the same quoting rule as a mandatory one, because "optional" describes whether it is
+		// passed, not what happens to it when it is.
+		if strings.HasPrefix(tok, "[") {
+			if !strings.HasSuffix(tok, "]") {
+				return "", nil, fmt.Errorf("token %q opens an optional-flag bracket it does not "+
+					"close in the same word. This gate can only read the one-word `[--x='<y>']` "+
+					"form; write it that way or teach bcParseCommand the shape you meant", tok)
+			}
+			tok = tok[1 : len(tok)-1]
+		}
 		if !strings.HasPrefix(tok, "--") {
-			return nil, fmt.Errorf("token %q is not a flag. A positional argument here would be passed "+
+			return "", nil, fmt.Errorf("token %q is not a flag. A positional argument here would be passed "+
 				"by a reader and ignored by internal/cli's parser, which reads only --name=value", tok)
 		}
 		body := strings.TrimPrefix(tok, "--")
 		i := strings.Index(body, "=")
 		if i < 0 {
-			out = append(out, bcDocFlag{name: body, boolean: true})
+			flags = append(flags, bcDocFlag{name: body, boolean: true})
 			continue
 		}
 		name, placeholder := body[:i], body[i+1:]
-		quoted := strings.HasPrefix(placeholder, "'")
-		if quoted {
+		isQuoted := strings.HasPrefix(placeholder, "'")
+		if isQuoted {
 			if len(placeholder) < 2 || !strings.HasSuffix(placeholder, "'") {
-				// Whitespace inside a quoted placeholder would also land here, because Fields
-				// splits on it. Either way the doc is not something a reader can copy.
-				return nil, fmt.Errorf("--%s opens a quote it does not close (%q). A reader "+
+				return "", nil, fmt.Errorf("--%s opens a quote it does not close (%q). A reader "+
 					"copying this gets an unterminated string or a split argument", name, placeholder)
 			}
 			placeholder = placeholder[1 : len(placeholder)-1]
 		}
-		out = append(out, bcDocFlag{name: name, placeholder: placeholder, quoted: quoted})
+		flags = append(flags, bcDocFlag{name: name, placeholder: placeholder, quoted: isQuoted})
 	}
-	return out, nil
+	return verb, flags, nil
 }
 
 // bcShellQuote renders s as a single POSIX shell word.
@@ -928,6 +1012,454 @@ func TestEngineNativeLoopOpensTheFirstStepAsTheEngineDoes(t *testing.T) {
 				"the next step's — silently, since nothing validates it.", rel)
 		}
 	}
+}
+
+// ── aihub#663: EVERY documented verb invocation, not only the two bracket-plan blocks ────────
+//
+// aihub#657 built the quoting gate around `bcBracketHeading`, so it read the two `bracket-plan`
+// blocks and nothing else. Measured on origin/main @56803a1, the same unquoted-value truncation
+// was still shipping in FOUR other places — `startup` twice (engine.native.md, §0), `resolve-role`
+// twice (engine.native.md's loop comment, §1's), and `cleanup-worktrees` once
+// (_common/references/lifecycle-details.md) — invisible to that gate purely because it was
+// anchored on a heading rather than on the command form.
+//
+// So the extractor is now anchored on the COMMAND, and the corpus is every markdown the plugin
+// ships rather than a list of files somebody has to remember to extend. A fifth document that
+// documents a verb is gated the day it lands.
+
+const (
+	// bcCommandPrefix is the literal that makes a line an invocation of this CLI surface.
+	bcCommandPrefix = "polyforge engine"
+
+	// bcVerbPlaceholder is the ONE token allowed where a verb belongs but none is meant: §0h's
+	// own heading and its opening paragraph write `polyforge engine <verb>` to name the surface.
+	// Every other unrecognised token is a typo'd verb, which internal/cli answers with a usage
+	// error — so the reader runs nothing, and this gate says so rather than skipping the line.
+	bcVerbPlaceholder = "<verb>"
+)
+
+// bcEngineVerbs maps each verb to the internal/cli function that implements it. The map is a
+// derivation RULE, not a second copy of the flag lists: bcAcceptedFlags reads the flag names out
+// of engine.go's own source through this mapping, so a flag renamed in Go but not in the markdown
+// goes red here instead of being silently ignored at runtime.
+var bcEngineVerbs = map[string]string{
+	"startup":           "runEngineStartup",
+	"resolve-role":      "runEngineResolveRole",
+	"parse-review":      "runEngineParseReview",
+	"bracket-plan":      "runEngineBracketPlan",
+	"cleanup-worktrees": "runEngineCleanupWorktrees",
+}
+
+var (
+	// bcInlineSpanRe matches a markdown inline code span. Its character class matches a NEWLINE
+	// in Go, which is required rather than incidental: engine.native.md's startup invocation
+	// wraps across two source lines inside one span, and a line-scoped regex would read half a
+	// command and call the missing half absent.
+	bcInlineSpanRe = regexp.MustCompile("`([^`]+)`")
+
+	// bcFenceLineRe matches a ``` fence MARKER line. Those are blanked (length-preservingly)
+	// before the inline-span scan so the fences cannot pair with each other and swallow a whole
+	// block as one span.
+	bcFenceLineRe = regexp.MustCompile("(?m)^[ \t]*```.*$")
+
+	// bcFlagReadRe finds the flag names internal/cli actually reads. engine.go's parsing is
+	// hand-rolled prefix matching, so these string literals ARE the accepted set; there is no
+	// flag struct to reflect over.
+	bcFlagReadRe = regexp.MustCompile(`(?:flagValue|hasFlag)\(args, "([a-z][a-z0-9-]*)"\)`)
+)
+
+// bcInvocation is one documented `polyforge engine <verb> …` command line, with the position that
+// lets a failure name it.
+type bcInvocation struct {
+	doc   string // plugin-root-relative path
+	line  int    // 1-based line of the command's first line
+	verb  string
+	flags []bcDocFlag
+	raw   string
+}
+
+func bcSortedVerbs() []string {
+	out := make([]string, 0, len(bcEngineVerbs))
+	for v := range bcEngineVerbs {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bcAcceptedFlags returns, per verb, the flag names its run function really reads — extracted
+// from internal/cli/engine.go's source rather than restated here. A restated table is a second
+// copy that drifts; this one cannot, because it IS the first copy.
+func bcAcceptedFlags(t *testing.T) map[string]map[string]bool {
+	t.Helper()
+	repoRoot, err := findRepoRoot(t)
+	if err != nil {
+		t.Fatalf("findRepoRoot: %v", err)
+	}
+	path := filepath.Join(repoRoot, "internal", "cli", "engine.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	src := string(raw)
+
+	out := map[string]map[string]bool{}
+	for verb, fn := range bcEngineVerbs {
+		marker := "\nfunc " + fn + "("
+		i := strings.Index(src, marker)
+		if i < 0 {
+			t.Fatalf("internal/cli/engine.go has no %s — this gate derives `polyforge engine %s`'s "+
+				"accepted flag names from that function's flagValue/hasFlag literals. If the verb "+
+				"was renamed or its implementation moved, move bcEngineVerbs with it; leaving this "+
+				"unresolved would silently stop checking the flag names of every documented "+
+				"invocation.", marker[1:], verb)
+		}
+		body := src[i+1:]
+		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+			body = body[:end+1]
+		}
+		set := map[string]bool{}
+		for _, m := range bcFlagReadRe.FindAllStringSubmatch(body, -1) {
+			set[m[1]] = true
+		}
+		if len(set) == 0 {
+			t.Fatalf("%s reads no flags at all through flagValue/hasFlag, so every flag documented "+
+				"for `polyforge engine %s` would be accepted by this gate for free. The parsing "+
+				"has moved; move bcFlagReadRe with it.", fn, verb)
+		}
+		out[verb] = set
+	}
+	return out
+}
+
+// bcInvocationAt parses one candidate command line. It returns nothing — without failing — only
+// for the two forms that are deliberately NOT invocations: a bare `polyforge engine` naming the
+// surface, and `polyforge engine <verb>` naming it generically. Anything else that cannot be
+// parsed is reported, because "skipped quietly" is the failure mode this whole file exists to
+// remove.
+func bcInvocationAt(t *testing.T, rel string, line int, raw string) *bcInvocation {
+	t.Helper()
+	rest := strings.TrimSpace(strings.TrimPrefix(raw, bcCommandPrefix))
+	if rest == "" {
+		return nil
+	}
+	verbTok := strings.Fields(rest)[0]
+	if verbTok == bcVerbPlaceholder {
+		return nil
+	}
+	if _, known := bcEngineVerbs[verbTok]; !known {
+		t.Errorf("%s:%d documents `%s %s`, which is not one of internal/cli's verbs (%v). An "+
+			"unknown verb reaches the usage error, so a reader following this line runs nothing "+
+			"at all. If a verb was added, add it to bcEngineVerbs; if this is prose about the "+
+			"surface rather than a command, write it as `%s %s`.",
+			rel, line, bcCommandPrefix, verbTok, bcSortedVerbs(), bcCommandPrefix, bcVerbPlaceholder)
+		return nil
+	}
+	verb, flags, err := bcParseCommand(raw)
+	if err != nil {
+		t.Errorf("%s:%d: cannot parse the documented invocation (%v).\nCommand: %s", rel, line, err, raw)
+		return nil
+	}
+	return &bcInvocation{doc: rel, line: line, verb: verb, flags: flags, raw: raw}
+}
+
+// bcScanDoc finds every documented invocation in one markdown, in BOTH of the forms these
+// documents use them in: a bare command line inside a fenced block (with `\` continuations), and
+// an inline code span in prose or in a pseudocode comment. Four of the six defects aihub#663 found
+// were in the second form, which is exactly the form a heading-anchored, fenced-block-only
+// extractor cannot see.
+func bcScanDoc(t *testing.T, rel, body string) []bcInvocation {
+	t.Helper()
+	var out []bcInvocation
+
+	lines := strings.Split(body, "\n")
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, bcCommandPrefix) {
+			continue
+		}
+		start := i
+		logical := trimmed
+		for strings.HasSuffix(logical, "\\") && i+1 < len(lines) {
+			logical = strings.TrimSuffix(logical, "\\") + " " + strings.TrimSpace(lines[i+1])
+			i++
+		}
+		if inv := bcInvocationAt(t, rel, start+1, strings.TrimSpace(logical)); inv != nil {
+			out = append(out, *inv)
+		}
+	}
+
+	stripped := bcFenceLineRe.ReplaceAllStringFunc(body, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+	for _, m := range bcInlineSpanRe.FindAllStringSubmatchIndex(stripped, -1) {
+		content := strings.TrimSpace(stripped[m[2]:m[3]])
+		if !strings.HasPrefix(content, bcCommandPrefix) {
+			continue
+		}
+		line := 1 + strings.Count(stripped[:m[0]], "\n")
+		if inv := bcInvocationAt(t, rel, line, content); inv != nil {
+			out = append(out, *inv)
+		}
+	}
+	return out
+}
+
+// bcScanPlugin walks every markdown the plugin ships and returns every documented invocation.
+func bcScanPlugin(t *testing.T, pluginRoot string) []bcInvocation {
+	t.Helper()
+	var out []bcInvocation
+	err := filepath.WalkDir(pluginRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(pluginRoot, path)
+		if relErr != nil {
+			rel = path
+		}
+		out = append(out, bcScanDoc(t, filepath.ToSlash(rel), string(body))...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s for documented invocations: %v", pluginRoot, err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].doc != out[j].doc {
+			return out[i].doc < out[j].doc
+		}
+		return out[i].line < out[j].line
+	})
+	return out
+}
+
+// TestEngineDocumentedInvocationsQuoteEveryValue is the generalised quoting gate: the rule
+// aihub#657 asserted for `bracket-plan` alone, asserted for every verb in every markdown the
+// plugin ships.
+//
+// The failure names the DOCUMENT, the LINE, the VERB and the FLAG, because "some value somewhere
+// lost its quotes" is not a message anyone can act on, and because a gate whose red state does not
+// locate the defect is a gate people learn to re-run rather than read.
+func TestEngineDocumentedInvocationsQuoteEveryValue(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	accepted := bcAcceptedFlags(t)
+	invocations := bcScanPlugin(t, pluginRoot)
+
+	seenVerb := map[string]bool{}
+	seenValueFlag := 0
+	for _, inv := range invocations {
+		seenVerb[inv.verb] = true
+		named := map[string]bool{}
+		for _, f := range inv.flags {
+			if named[f.name] {
+				t.Errorf("%s:%d passes --%s twice to `%s %s`. The hand-rolled parser takes the "+
+					"FIRST, so the second is silently inert.", inv.doc, inv.line, f.name,
+					bcCommandPrefix, inv.verb)
+			}
+			named[f.name] = true
+
+			if !accepted[inv.verb][f.name] {
+				t.Errorf("%s:%d tells a reader to pass --%s to `%s %s`, which that verb never "+
+					"reads (it reads %v). internal/cli ignores unknown flags rather than "+
+					"rejecting them, so the value is DROPPED with exit 0 and nothing on stderr.",
+					inv.doc, inv.line, f.name, bcCommandPrefix, inv.verb,
+					bcSortedKeys(accepted[inv.verb]))
+			}
+			if f.boolean {
+				continue
+			}
+			seenValueFlag++
+			if f.placeholder == "" {
+				t.Errorf("%s:%d writes `%s %s --%s=` with no placeholder, so a reader has nothing "+
+					"to substitute", inv.doc, inv.line, bcCommandPrefix, inv.verb, f.name)
+			}
+			if !f.quoted {
+				t.Errorf("%s:%d documents `%s %s --%s=%s` UNQUOTED. A B/C loop types this into a "+
+					"SHELL, and internal/cli reads only tokens matching `--name=`, so any value "+
+					"containing a space arrives split: the flag keeps the first word and every "+
+					"later word is DROPPED with exit 0 and nothing on stderr. Write --%s='%s'.",
+					inv.doc, inv.line, bcCommandPrefix, inv.verb, f.name, f.placeholder,
+					f.name, f.placeholder)
+			}
+		}
+	}
+
+	// Anti-vacuity. Every assertion above is of the form "no defect was found", which a scanner
+	// that found nothing satisfies for free — and the previous version of this gate went green
+	// over six such defects by scanning two blocks.
+	for _, verb := range bcSortedVerbs() {
+		if !seenVerb[verb] {
+			t.Errorf("no documented invocation of `%s %s` was found in any markdown under %s. "+
+				"Either the verb is undocumented — a CLI surface the loop is never told to call — "+
+				"or the scanner stopped seeing the form it is written in, in which case every "+
+				"quoting assertion about that verb above passed by finding nothing.",
+				bcCommandPrefix, verb, pluginRoot)
+		}
+	}
+	if seenValueFlag == 0 {
+		t.Fatalf("the scan found %d invocations but not one VALUE flag among them, so the quoting "+
+			"rule — the entire subject of this gate — was asserted against nothing",
+			len(invocations))
+	}
+}
+
+// TestEngineDocumentedInvocationScannerIsNotBlind runs the scanner and the parser against
+// fixtures reproducing every form the shipped documents use, plus the mutants each rule exists to
+// reject. Without it, "no unquoted value found" cannot be told from "nothing was parsed".
+func TestEngineDocumentedInvocationScannerIsNotBlind(t *testing.T) {
+	t.Run("an inline span that wraps a newline is ONE command", func(t *testing.T) {
+		// engine.native.md's startup invocation, verbatim in shape: one code span, two source
+		// lines, no backslash. A line-scoped scanner reads the first half and reports the
+		// second half's flags as absent rather than as unquoted.
+		doc := "text `" + bcCommandPrefix + " startup --workspace-root='<ws>' --wi-type='<t>'\n" +
+			"--scenario-url='<u>' [--project='<p>']` more text\n"
+		got := bcScanDoc(t, "fixture.md", doc)
+		if len(got) != 1 {
+			t.Fatalf("scanned %d invocations, want 1: %+v", len(got), got)
+		}
+		if names := bcNamesOf(got[0].flags); len(names) != 4 {
+			t.Errorf("flags = %v, want all four — the two on the SECOND line are the ones a "+
+				"line-scoped scan loses", names)
+		}
+		for _, f := range got[0].flags {
+			if !f.quoted {
+				t.Errorf("--%s parsed as unquoted", f.name)
+			}
+		}
+	})
+
+	t.Run("an optional flag's brackets are stripped and its value still checked", func(t *testing.T) {
+		verb, flags, err := bcParseCommand(bcCommandPrefix + " startup [--project=<p>]\n")
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if verb != "startup" || len(flags) != 1 || flags[0].name != "project" {
+			t.Fatalf("verb=%q flags=%+v, want one --project flag on startup", verb, flags)
+		}
+		if flags[0].quoted {
+			t.Error("an UNQUOTED optional flag parsed as quoted — the quoting rule would then " +
+				"never fire on an optional value, and `[--project=<name>]` is exactly where it " +
+				"was shipping unquoted")
+		}
+		if flags[0].placeholder != "<p>" {
+			t.Errorf("placeholder = %q, want <p> (the bracket leaked into the value)", flags[0].placeholder)
+		}
+	})
+
+	t.Run("a quoted value containing spaces stays ONE flag", func(t *testing.T) {
+		// lifecycle-details.md §0's --worktrees is a JSON object with spaces in it. The old
+		// Fields-based parser rejected this shape outright, which is why cleanup-worktrees could
+		// not be gated at all.
+		verb, flags, err := bcParseCommand(
+			bcCommandPrefix + ` cleanup-worktrees --workspace-root='<ws>' ` +
+				`--worktrees='{"<repo>": "<path>", ...}'` + "\n")
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if verb != "cleanup-worktrees" || len(flags) != 2 {
+			t.Fatalf("verb=%q flags=%+v, want two flags on cleanup-worktrees", verb, flags)
+		}
+		if flags[1].name != "worktrees" || !flags[1].quoted {
+			t.Errorf("--worktrees parsed as %+v, want name=worktrees quoted=true", flags[1])
+		}
+		if flags[1].placeholder != `{"<repo>": "<path>", ...}` {
+			t.Errorf("placeholder = %q — the spaces inside the quotes split the value", flags[1].placeholder)
+		}
+	})
+
+	t.Run("an unknown verb is reported, not skipped", func(t *testing.T) {
+		sub := &testing.T{}
+		got := bcInvocationAt(sub, "fixture.md", 7, bcCommandPrefix+" bracket-plann --step-id='<id>'")
+		if got != nil {
+			t.Errorf("a misspelled verb parsed as an invocation: %+v", got)
+		}
+		if !sub.Failed() {
+			t.Error("a misspelled verb was skipped silently. Skipping is how the old gate missed " +
+				"four invocations; a typo'd verb runs nothing and must be loud.")
+		}
+	})
+
+	t.Run("the two non-invocation forms are skipped WITHOUT failing", func(t *testing.T) {
+		for _, raw := range []string{bcCommandPrefix, bcCommandPrefix + " " + bcVerbPlaceholder} {
+			sub := &testing.T{}
+			if got := bcInvocationAt(sub, "fixture.md", 1, raw); got != nil {
+				t.Errorf("%q parsed as an invocation: %+v", raw, got)
+			}
+			if sub.Failed() {
+				t.Errorf("%q was reported as a defect; §0h's own heading writes it that way", raw)
+			}
+		}
+	})
+
+	t.Run("fence markers cannot pair into a span that swallows a block", func(t *testing.T) {
+		doc := "```bash\n" + bcCommandPrefix + " startup --workspace-root='<ws>'\n```\n\n" +
+			"```bash\n" + bcCommandPrefix + " parse-review\n```\n"
+		got := bcScanDoc(t, "fixture.md", doc)
+		if len(got) != 2 {
+			t.Fatalf("scanned %d invocations, want 2 (one per block): %+v", len(got), got)
+		}
+		if got[0].verb != "startup" || got[1].verb != "parse-review" {
+			t.Errorf("verbs = %q/%q, want startup/parse-review", got[0].verb, got[1].verb)
+		}
+		if got[0].line != 2 || got[1].line != 6 {
+			t.Errorf("lines = %d/%d, want 2/6 — a failure that misreports the line sends the "+
+				"reader to the wrong place", got[0].line, got[1].line)
+		}
+	})
+
+	t.Run("continuations inside a fenced block are joined", func(t *testing.T) {
+		doc := "```bash\n" + bcCommandPrefix + " bracket-plan --step-id='<id>' \\\n" +
+			"  --status='<s>' \\\n  --supports-next-step\n```\n"
+		got := bcScanDoc(t, "fixture.md", doc)
+		if len(got) != 1 {
+			t.Fatalf("scanned %d invocations, want 1: %+v", len(got), got)
+		}
+		names := bcNamesOf(got[0].flags)
+		sort.Strings(names)
+		if !reflect.DeepEqual(names, []string{"status", "step-id", "supports-next-step"}) {
+			t.Errorf("flags = %v, want all three across the continuations", names)
+		}
+	})
+
+	t.Run("the accepted-flag sets really came from engine.go", func(t *testing.T) {
+		accepted := bcAcceptedFlags(t)
+		// One spot check per verb, chosen as a flag whose absence would change the answer.
+		for verb, flag := range map[string]string{
+			"startup":           "workspace-root",
+			"resolve-role":      "step-id",
+			"parse-review":      "file",
+			"bracket-plan":      "supports-next-step",
+			"cleanup-worktrees": "worktrees",
+		} {
+			if !accepted[verb][flag] {
+				t.Errorf("bcAcceptedFlags(%q) = %v, which does not include --%s. The extraction "+
+					"is reading the wrong function body, so every documented flag name would be "+
+					"reported as unknown — or, worse, an unknown one accepted.",
+					verb, bcSortedKeys(accepted[verb]), flag)
+			}
+		}
+		// ...and it must not be reading the WHOLE file into every verb, which would accept any
+		// flag for any verb.
+		if accepted["parse-review"]["worktrees"] {
+			t.Error("parse-review's accepted set contains cleanup-worktrees' --worktrees — the " +
+				"per-function slicing is not slicing, so the flag-name check accepts anything")
+		}
+	})
+}
+
+func bcSortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────────────────────

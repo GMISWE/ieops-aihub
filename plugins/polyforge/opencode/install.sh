@@ -207,7 +207,7 @@ verify
   A banned commit message is actually blocked (not just matched):
   cd "$PROJECT_DIR" && node --test plugins/polyforge/opencode/tests/opencode-bridge.test.cjs
   (this runs the real bridge against the real pf-commit-guard/pf-chain-hook.cjs scripts --
-  see that file's own header for what it does and does not cover. Two follow-ups are filed as
-  aihub#659: CI does not yet invoke this file, and pf-commit-guard.test.sh's cross-harness
-  matcher table has no opencode row -- both out of aihub#653's file_scope lock.)
+  see that file's own header for what it does and does not cover. aihub#659 wired this file
+  into CI and added an opencode row to pf-commit-guard.test.sh's cross-harness matcher
+  table, both out of aihub#653's file_scope lock at the time.)
 EOF

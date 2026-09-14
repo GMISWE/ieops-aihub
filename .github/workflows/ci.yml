@@ -4903,6 +4903,38 @@ jobs:
             || { echo "::error::pi-bridge.test.cjs reported failures"; exit 1; }
           echo "pi bridge gate: $(grep -oE '^# pass [0-9]+$' pi_bridge.log | head -1)"
 
+      # aihub#659 adds opencode as a fifth runtime. opencode has no native hooks.json
+      # mechanism; its bridge (opencode/plugin/polyforge-hooks.js) reads
+      # opencode/opencode-hooks.json and drives the SAME shared hook scripts
+      # (pf-commit-guard, pf-chain-hook.cjs) the other four runtimes use — mirroring the
+      # pi-bridge gate above, including the same "grep-over-source cannot tell wired from
+      # honoured" reasoning: this drives the REAL handlers against the REAL hook scripts.
+      - name: aihub#659 opencode bridge behaviour gate
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap plugins/polyforge/opencode/tests/opencode-bridge.test.cjs 2>&1 | tee opencode_bridge.log
+          for want in "tool.execute.before: a banned commit message is blocked, and the thrown message carries the guard's reason" \
+                      "tool.execute.before: a clean commit message is NOT blocked" \
+                      "tool.execute.before: pf_pr / pf_wrap / pf_ship are gated too" \
+                      "tool.execute.before: the as-shipped MCP tool id (\"polyforge_pf_commit\") is blocked end to end" \
+                      "tool.execute.before: a renamed server key is still recognized as polyforge's (PREFIX rename)" \
+                      "tool.execute.before: a renamed server key is still recognized as polyforge's (INFIX rename)" \
+                      "tool.execute.before: a renamed server key is still recognized as polyforge's (__-bearing rename)" \
+                      "tool.execute.before: a genuinely unrelated server key is NOT misclassified as polyforge's" \
+                      "tool.execute.before: the built-in bash tool is gated by its confirmed bare id \"bash\"" \
+                      "tool.execute.before: the deny rule does not swallow ordinary tools" \
+                      "the hook environment does not announce opencode as Codex or Cursor, and marks POLYFORGE_RUNTIME"; do
+            grep -qF -- "$want" opencode_bridge.log \
+              || { echo "::error::opencode-bridge.test.cjs did not report '$want' — the opencode bridge behaviour gate is not actually executing"; exit 1; }
+          done
+          # Several assertions skip when python3 is absent (the guard is inert by design
+          # without it), which would quietly hollow out this step.
+          ! grep -q '# skip [1-9]' opencode_bridge.log \
+            || { echo "::error::opencode-bridge.test.cjs SKIPped tests (python3 missing?) — the blocking assertions did not run"; exit 1; }
+          grep -qE '^# fail 0$' opencode_bridge.log \
+            || { echo "::error::opencode-bridge.test.cjs reported failures"; exit 1; }
+          echo "opencode bridge gate: $(grep -oE '^# pass [0-9]+$' opencode_bridge.log | head -1)"
+
       - name: aihub#503 pi runtime gate
         run: |
           set -o pipefail

@@ -5,7 +5,7 @@ package mcp_test
 //
 // WHY THESE ARE HANDLER TESTS AND NOT UNIT TESTS. The defect is not in
 // addClaimWorktree — it is in the branch that runs INSTEAD of addClaimWorktree,
-// and every test in claim_worktree_test.go asserts its own precondition that the
+// and every test in internal/lifecycle/worktree_test.go asserts its own precondition that the
 // worktree directory does NOT exist (see claimRepo.add). The whole of this
 // defect lives in the case those tests exclude by construction.
 //
@@ -255,8 +255,9 @@ func TestClaimReusesAHealthyExistingWorktree(t *testing.T) {
 // that the validation itself introduced, and it is the dangerous direction: a
 // false REJECT tells the operator to `rm -rf` a directory that was fine.
 //
-// verifyClaimWorktree is the only place in tools_lifecycle.go that PARSES git's
-// stdout; everywhere else the output is error text, which is why CombinedOutput
+// verifyClaimWorktree (internal/lifecycle/worktree.go since aihub#667) is the
+// place the claim PARSES git's stdout to make a decision; elsewhere on that path
+// the output is error text, which is why CombinedOutput
 // is the house style and why reaching for it here was the natural mistake. git
 // writes diagnostics to stderr and still exits 0, so with CombinedOutput the
 // parsed value becomes "trace: built-in: git rev-parse --show-toplevel\n<path>",

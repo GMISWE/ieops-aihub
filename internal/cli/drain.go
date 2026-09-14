@@ -15,8 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/internal/drain"
 	"github.com/GMISWE/ieops-aihub/internal/engine"
+	"github.com/GMISWE/ieops-aihub/internal/lifecycle"
 	"github.com/GMISWE/ieops-aihub/internal/roles"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
@@ -93,12 +95,16 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		return
 	}
 
-	// Said once, up front, so the operator is not surprised by what follows. The run still
-	// proceeds: preflight, the snapshot and `polyforge watch` are all real and worth
-	// exercising, and the claim itself reports the gap per work item. What must NOT happen is
-	// the run ending IDLE, which would read as "come back later" for a capability that does
-	// not exist — see drain.ErrNotSupported, which is why it ends FAILED instead.
-	fmt.Fprintf(os.Stderr, "drain: WARNING: %v\n", errLifecycleSeamMissing)
+	// The scenario URL is read ONCE per run, not once per claim. It is a property of the
+	// project, the claim response does not carry it (domain.ClaimResponse has no such field),
+	// and `engine startup` cannot resolve a step graph without it — so a run that cannot read
+	// it would fail every work item identically, one round-trip at a time. Failing here says
+	// so once. `--plan` returned above and never needs it.
+	scenarioURL, err := projectScenarioURL(ctx, c, opts.Project)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "drain: %v\n", err)
+		os.Exit(2)
+	}
 
 	// Ops problem 2, startup half: prove a channel works before claiming anything. Claiming
 	// first and discovering the credential problem afterwards would leave a trail of claimed
@@ -124,7 +130,7 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		Executable:      q.Executable,
 		AllInScope:      q.AllInScope,
 		ObserveQueue:    q.ObserveQueue,
-		Claim:           claimForDrain,
+		Claim:           (&drainClaimer{c: c, wsRoot: wsRoot, scenarioURL: scenarioURL}).Claim,
 		UpdateStep:      q.UpdateStep,
 		CompleteAttempt: q.CompleteAttempt,
 		Notify:          q.Notify,
@@ -551,55 +557,173 @@ func drainCleanup(_ context.Context, wsRoot string) func(context.Context, drain.
 	}
 }
 
-// claimForDrain is the one seam `polyforge drain` cannot fill today, and it refuses loudly
-// rather than half-filling it.
+// ─── the work-item lifecycle seam ─────────────────────────────────────────────
 //
-// # What is missing, precisely
+// This USED TO BE A REFUSAL. Until aihub#667 the whole of pf_claim_work_item's local half —
+// session_secret minting and its idempotency-key replay, task-branch naming, worktree creation
+// with the aihub#328 and aihub#257 adoption checks, .git/info/exclude seeding, the state file,
+// repo pins — lived in six unexported functions in internal/mcp/tools_lifecycle.go and was
+// reachable only over MCP stdio. pkg/client.ClaimWorkItem does the server-side half, but on its
+// own it produces a claimed work item with NO worktree, NO state file and NO session_secret, so
+// the step agent dispatched next has nowhere to work and cannot make an authenticated pf_* call.
 //
-// aihub#640's `retro_and_crystallize` ruling splits the work item lifecycle in two: the
-// DETERMINISTIC half (claim / pf_update_step / wrap) is called directly by pf, and only the LLM
-// half (step execution, retro, crystallize) is dispatched to an agent. Every deterministic piece
-// of the STEP loop got a Go home in aihub#654 — internal/engine holds startup, the step bracket,
-// review parsing, role resolution and wrap-time worktree cleanup, and internal/cli and the
-// markdown B/C loop both call it. The work-item-level lifecycle did not:
-//
-//	pf_claim_work_item's implementation — session_secret minting, branch naming
-//	(newClaimBranchNames/resolveClaimBranch), worktree creation WITH the adoption safety checks
-//	that aihub#328/#257/#264 each had to add, .git/info/exclude seeding, state-file and repo-pin
-//	writes — lives entirely in internal/mcp/tools_lifecycle.go, in SIX unexported functions
-//	(addClaimWorktree, verifyClaimWorktree, newClaimBranchNames, resolveClaimBranch,
-//	writeWorktreeExcludes, repairReusedWorktreeUpstream). It is reachable only over MCP stdio.
-//
-// pkg/client.ClaimWorkItem performs the server-side half, but on its own it produces a claimed
-// work item with NO worktree, NO state file and NO session_secret — so the step agent it then
-// dispatches has nowhere to work and cannot make an authenticated pf_* call.
-//
-// # Why this returns an error instead of a reimplementation
-//
-// Because reimplementing it here is precisely what the workflow_identity_constraint forbids: it
-// would put ~350 lines of execution logic in A that B/C does not share, and make a second source
-// of truth for worktree adoption — the exact thing whose FIRST source of truth needed three
-// separate bug fixes to get right. The constraint's own words are that finding yourself writing
-// step-execution logic means the logic belongs in the shared layer.
-//
-// The fix is the aihub#654 move applied to the work-item lifecycle: extract the claim/wrap
-// lifecycle out of internal/mcp into a package both the MCP tool and this scheduler call. That is
-// a separate change to files this work item does not own, so it is reported rather than guessed.
-// Until it lands, `--plan` exercises the entire scheduling half, which is what this work item is
-// scoped to.
-var errLifecycleSeamMissing = errors.New(
-	"cannot execute yet: the work-item lifecycle (claim + worktree provisioning + state file + " +
-		"session_secret) has no Go-callable implementation outside internal/mcp, where it lives " +
-		"in six unexported functions reachable only over MCP stdio. " +
-		"`polyforge drain --plan` exercises the whole scheduling half and is fully supported. " +
-		"Fix: extract pf_claim_work_item's lifecycle into a shared package, the way aihub#654 " +
-		"extracted the step engine")
+// aihub#640 refused to reimplement it here and ended the run FAILED instead, because
+// reimplementing is exactly what the workflow_identity_constraint forbids: ~350 lines of
+// execution logic in A that B/C does not share, and a second source of truth for worktree
+// adoption — the thing whose FIRST source of truth needed two separate incident fixes to get
+// right. aihub#667 did the aihub#654 move instead. What is left here is a translation between
+// two struct shapes, and that is the whole point: if this file ever grows a git command or a
+// path rule, it has become the second implementation again.
 
-func claimForDrain(_ context.Context, wiID, _ string) (*drain.ClaimInfo, *drain.Blocker, error) {
-	// Wrapped in drain.ErrNotSupported so the run ends FAILED (exit 12, "a human has to act")
-	// rather than IDLE (exit 10, "re-running later makes progress with no human involved").
-	// Re-running never helps here.
-	return nil, nil, fmt.Errorf("%w: %w (work item %s)", drain.ErrNotSupported, errLifecycleSeamMissing, wiID)
+// drainClaimer holds the per-run values a claim needs and the loop does not carry.
+type drainClaimer struct {
+	c      *client.Client
+	wsRoot string
+	// scenarioURL is the project's step-graph repo, read once per run. It is not on the claim
+	// response, so it cannot come out of internal/lifecycle; see RunDrain.
+	scenarioURL string
+}
+
+// Claim is drain.Runner.Claim. It calls the same internal/lifecycle.Claim the MCP tool calls,
+// and adds nothing except the mapping onto drain.ClaimInfo.
+func (d *drainClaimer) Claim(ctx context.Context, wiID, idempotencyKey string) (*drain.ClaimInfo, *drain.Blocker, error) {
+	// startupCfg is nil deliberately: this process has no startup config snapshot, and
+	// lifecycle.Claim reads .polyforge.yaml out of the workspace root first in either case
+	// (resolveWorkspaceConfig). The MCP server passes its snapshot only as a fallback.
+	res, err := lifecycle.Claim(ctx, d.c, nil, lifecycle.ClaimRequest{
+		WorkItemID:     wiID,
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		// classifyHubError is what turns a 409 CONFLICT_LOCK_TAKEN into drain.ErrLockTaken,
+		// which the loop treats as ordinary control flow (skip, never retry).
+		return nil, lockBlockerFrom(err), classifyHubError(err)
+	}
+
+	info := &drain.ClaimInfo{
+		WorkItemID: res.State.WIID,
+		AttemptID:  res.State.AttemptID,
+		// From the RESPONSE, not from the state file: wi_type is server state that selects
+		// the step-graph template, and the state file deliberately holds only credentials.
+		WIType:       str(res.Response["wi_type"]),
+		ScenarioURL:  d.scenarioURL,
+		WorktreeRoot: claimWorktreeRoot(d.wsRoot, res.State),
+		Worktrees:    res.State.Worktrees,
+	}
+	// Worktree problems are NOT an error — the claim succeeded and says so. They are exactly
+	// the aihub#328 rejections, and they reach the operator here because in A there is no
+	// model reading an ok:true response to notice them.
+	//
+	// Printed BEFORE the attempt_id check below, not after: that check returns, and a return
+	// that swallowed the aihub#328 warnings would put the rejected directory back in the
+	// "noticed by nobody" state the check was filed about.
+	for _, p := range res.WorktreeProblems {
+		fmt.Fprintf(os.Stderr, "drain: %s: %s\n", wiID, p)
+	}
+	if info.AttemptID == "" {
+		// A claim that did not come back with an attempt id cannot authenticate anything
+		// afterwards. Reported rather than executed: the alternative is a work item running
+		// under credentials that do not exist, failing one step at a time.
+		//
+		// ⚠️ THIS IS ON THE FAR SIDE OF THE SERVER COMMIT, which is why the message says so.
+		// The run classifies a plain error here as ResultClaimFailed — "somebody beat me to
+		// it", which ends the run IDLE, i.e. come back later — and that is false: the work
+		// item IS claimed, holds its locks, and no later round can take it. Same hazard the
+		// aihub#323 message in internal/lifecycle guards on the MCP side.
+		return nil, nil, fmt.Errorf(
+			"claim of %s SUCCEEDED ON THE SERVER but returned no attempt_id, so nothing here can "+
+				"authenticate as the attempt: it is claimed, holds this work item's locks, and no "+
+				"later round will pick it up. A human has to force_takeover or complete it", wiID)
+	}
+	return info, nil, nil
+}
+
+// claimWorktreeRoot is the pf.<project>-<seq> directory the claim materialised: the parent of
+// every per-repo worktree, which is what engine.CleanupWorktrees removes at wrap and what the
+// step agent runs in.
+//
+// Derived from the worktrees the claim actually recorded rather than recomputed from the slug,
+// so a repo that was skipped (a rejected directory) cannot make this name a guess. Falls back
+// to the slug-derived name only when there are no worktrees at all, which is the case where
+// nothing was created and the value is used for nothing.
+func claimWorktreeRoot(wsRoot string, sf *config.StateFile) string {
+	for _, path := range sf.Worktrees {
+		return filepath.Dir(path)
+	}
+	// The seq comes from the slug's "#" suffix and ONLY from there. A slug with no "#" has no
+	// seq, and treating the whole slug as one produced pf.aihub-aihub — a path this claim never
+	// created, handed to a cleanup that removes a directory tree. Found by the test below, not
+	// by reading.
+	i := strings.LastIndex(sf.Slug, "#")
+	if i < 0 {
+		return ""
+	}
+	seq := sf.Slug[i+1:]
+	if sf.Project == "" || seq == "" {
+		return ""
+	}
+	return filepath.Join(wsRoot, fmt.Sprintf("pf.%s-%s", sf.Project, seq))
+}
+
+// lockBlockerFrom pulls the holder out of a 409 CONFLICT_LOCK_TAKEN so layer ② can tell them
+// somebody is waiting (aihub#640 `notification_three_layers`).
+//
+// Best-effort by construction, and nil is a legitimate answer: the server's holder lookup is
+// itself best-effort (internal/domain/resource_events.go says a refusal reported without a name
+// is still a refusal), so the fields may be empty on the wire. A nil Blocker costs the note,
+// never the skip.
+func lockBlockerFrom(err error) *drain.Blocker {
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "CONFLICT_LOCK_TAKEN" {
+		return nil
+	}
+	var details struct {
+		ConflictWith struct {
+			ActorDisplay string `json:"actor_display"`
+			WorkItemSlug string `json:"work_item_slug"`
+		} `json:"conflict_with"`
+	}
+	if len(apiErr.Details) > 0 {
+		_ = json.Unmarshal(apiErr.Details, &details)
+	}
+	b := &drain.Blocker{
+		Actor:    details.ConflictWith.ActorDisplay,
+		WorkItem: details.ConflictWith.WorkItemSlug,
+		// The message is "resource <type>:<key> is already locked"; the key is the half an
+		// operator can act on. Read off the message because the details object carries the
+		// holder and not the resource.
+		Resource: lockResourceFromMessage(apiErr.Message),
+	}
+	if b.Actor == "" && b.WorkItem == "" && b.Resource == "" {
+		return nil
+	}
+	return b
+}
+
+const (
+	lockMsgPrefix = "resource "
+	lockMsgSuffix = " is already locked"
+)
+
+func lockResourceFromMessage(msg string) string {
+	if !strings.HasPrefix(msg, lockMsgPrefix) || !strings.HasSuffix(msg, lockMsgSuffix) {
+		return ""
+	}
+	return msg[len(lockMsgPrefix) : len(msg)-len(lockMsgSuffix)]
+}
+
+// projectScenarioURL reads the project's step-graph repo URL from aihub.
+func projectScenarioURL(ctx context.Context, c *client.Client, project string) (string, error) {
+	proj, err := c.GetProject(ctx, project)
+	if err != nil {
+		return "", fmt.Errorf("read project %q to find its scenario repo: %w", project, err)
+	}
+	url := str(proj["scenario"])
+	if url == "" {
+		return "", fmt.Errorf("project %q has no scenario repo configured, so no work item in it has a "+
+			"step graph to execute; set one with `polyforge project update --scenario=<git url>`", project)
+	}
+	return url, nil
 }
 
 // ─── aihub queries ────────────────────────────────────────────────────────────
@@ -789,8 +913,41 @@ func dependencyIDs(res map[string]any) []string {
 	return out
 }
 
+// attemptCredentials reads the three fields every credential-checked pf_* call carries, out of
+// the state file THIS RUN's claim wrote.
+//
+// 🔴 This is the other half of aihub#667, and it did not work before it. Without a state file
+// there was nothing to read, so drain sent step updates with no attempt identity at all and the
+// server answered
+//
+//	400 BAD_REQUEST: attempt_id "" does not name an existing run attempt
+//
+// on the FIRST terminal step transition — measured on a real round, not predicted. The MCP tools
+// have always done exactly this (internal/mcp/tools_step.go, tools_events.go): the state file is
+// the one local record of who the attempt is, and a scheduler that claims without reading it back
+// is claiming as nobody.
+//
+// Missing or unreadable is NOT fatal here: an unauthenticated call is refused by the server with a
+// message that says so, which is a better failure than one invented locally. What must not happen
+// is sending an EMPTY attempt_id, which is the shape the server rejects with the message above —
+// so a blank id is omitted rather than sent.
+func attemptCredentials(wiID string) map[string]any {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil || sf == nil || sf.AttemptID == "" {
+		return nil
+	}
+	return map[string]any{
+		"attempt_id":     sf.AttemptID,
+		"claim_epoch":    sf.ClaimEpoch,
+		"session_secret": sf.SessionSecret,
+	}
+}
+
 func (q *drainQueries) UpdateStep(ctx context.Context, wiID string, call engine.StepCall) error {
 	body := map[string]any{"step_id": call.StepID, "status": call.Status}
+	for k, v := range attemptCredentials(wiID) {
+		body[k] = v
+	}
 	if call.StepAttemptID != "" {
 		body["step_attempt_id"] = call.StepAttemptID
 	}
@@ -811,8 +968,40 @@ func (q *drainQueries) UpdateStep(ctx context.Context, wiID string, call engine.
 }
 
 func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note string) error {
-	_, err := q.c.CompleteAttempt(ctx, wiID, map[string]any{"status": status, "note": note})
-	return classifyHubError(err)
+	body := map[string]any{"status": status, "note": note}
+	for k, v := range attemptCredentials(wiID) {
+		body[k] = v
+	}
+	if status == "wrapped" {
+		// 🔴 `derived` is REQUIRED on a wrap since aihub#350 (migration 0040) and the server
+		// refuses without it — "an omitted list is refused because …". Sending nothing here made
+		// every wrap fail, so a drain run could execute a work item perfectly and still end
+		// FAILED on the last call; found running a real round for aihub#667.
+		//
+		// An EMPTY list is the honest value, not a placeholder: `derived` is the disposition of
+		// findings this attempt noticed and did not fix, and a headless scheduler has no channel
+		// on which a step agent can report one. Sending [] says "nothing was carried forward",
+		// which is true of A today. When the step agent grows a structured return (aihub#640
+		// `retro_and_crystallize` wants one for retro_worthy anyway), this is where its
+		// dispositions belong.
+		body["derived"] = []any{}
+	}
+	if _, err := q.c.CompleteAttempt(ctx, wiID, body); err != nil {
+		return classifyHubError(err)
+	}
+	// Terminal statuses delete the local credential, exactly as pf_complete_attempt does
+	// (internal/mcp/tools_lifecycle.go). Leaving it behind would hand the next round a state
+	// file for an attempt that no longer exists, which is the shape every "invalid
+	// session_secret" report starts from. Paused keeps it: a paused attempt is resumable.
+	if status == "wrapped" || status == "failed" {
+		if sf, err := config.ResolveStateFile(wiID); err == nil && sf != nil {
+			_ = config.DeleteStateFile(sf.WIID)
+			if sf.WIID != wiID {
+				_ = config.DeleteStateFile(wiID)
+			}
+		}
+	}
+	return nil
 }
 
 // AttemptPaused asks the server whether a work item's current attempt is paused. It is the
@@ -832,11 +1021,22 @@ func (q *drainQueries) Notify(ctx context.Context, n drain.Notification) error {
 	if target == "" {
 		return nil // a project-level note has no timeline to land on today
 	}
-	_, err := q.c.EmitEvent(ctx, map[string]any{
+	body := map[string]any{
 		"work_item_id": target,
 		"event_type":   "note",
 		"payload":      map[string]any{"text": n.Note, "source": "polyforge drain"},
-	})
+	}
+	// 🔴 NO attempt credentials here, deliberately, and an earlier draft of this change got it
+	// wrong. Neither Notify target is a work item this run holds an attempt on: one is the
+	// BLOCKER's (internal/drain/runner.go, the "tell the holder somebody is waiting" half) and
+	// the other is a blocked work item in scope that was never claimed. Attaching a credential
+	// keyed on the target would not merely be useless — config.ResolveStateFile falls back to
+	// matching on SLUG across every file in the state directory, and the runner passes a slug,
+	// so on a live workspace (328 state files here) a stale or foreign record can resolve. The
+	// server verifies the credential only when attempt_id is non-empty, so the effect of
+	// attaching one is to turn a note that WOULD have landed unauthenticated into a 403 — on
+	// the one channel that reaches another human in an unattended run.
+	_, err := q.c.EmitEvent(ctx, body)
 	return err
 }
 

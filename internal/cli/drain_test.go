@@ -2,14 +2,23 @@ package cli
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/internal/drain"
 	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
@@ -465,35 +474,487 @@ func containsStr(hay []string, needle string) bool {
 	return false
 }
 
-// TestClaimForDrain_ReportsAStructuralGapNotATransientOne pins the terminal state the unbuilt
-// lifecycle seam produces.
+// TestDrainOwnsNoLifecycleLogicOfItsOwn is what replaced aihub#640's refusal test, and it is the
+// workflow_identity_constraint expressed as something a build can check.
 //
-// A run that could not claim anything used to end IDLE (exit 10), which `internal/drain/drain.go`
-// documents as "work remains, waiting on my own work items; come back later" and which notifies
-// nobody. Coming back later never helps: the capability does not exist. Wrapping the refusal in
-// drain.ErrNotSupported is what makes the run end FAILED (exit 12) instead, i.e. "a human has to
-// act", which is true.
+// ─── what it used to be ──────────────────────────────────────────────────────
+// Until aihub#667 this file held TestClaimForDrain_ReportsAStructuralGapNotATransientOne, which
+// asserted that claimForDrain returned a drain.ErrNotSupported refusal so a run that could not
+// claim ended FAILED (exit 12, "a human has to act") rather than IDLE (exit 10, "come back
+// later"). That was correct while the capability was missing. The capability now exists, so the
+// refusal is gone and asserting it would be asserting a bug.
 //
-// Mutant watched: dropping the ErrNotSupported wrap makes the claim classify as ResultClaimFailed
-// and the run report IDLE again.
-func TestClaimForDrain_ReportsAStructuralGapNotATransientOne(t *testing.T) {
-	_, _, err := claimForDrain(context.Background(), "wi_x", "key")
-	if err == nil {
-		t.Fatal("the unbuilt claim seam returned no error")
+// ─── what is worth asserting instead ─────────────────────────────────────────
+// The hazard the refusal was avoiding has not gone away: it is that A grows its own copy of the
+// lifecycle. aihub#640's `workflow_identity_constraint` is that A must contain no execution logic
+// B/C lacks, and the concrete failure mode is a SECOND implementation of worktree adoption drifting
+// from the first — the one that needed aihub#328's and aihub#257's incident fixes to get right.
+//
+// So: the scheduler may call internal/lifecycle, and may not spell any of its details itself. The
+// census is over STRING LITERALS ONLY, via the AST, which matters — the seam's own doc comment
+// names "--no-track", ".git/info/exclude" and "session_secret" while explaining why they are not
+// here, and a grep would have flagged the explanation as the violation. Every token below is one a
+// re-implementation cannot avoid writing down.
+func TestDrainOwnsNoLifecycleLogicOfItsOwn(t *testing.T) {
+	// Each entry is a literal fragment that only a second implementation of the lifecycle would
+	// need. They are argv words and wire keys, not prose: "--no-track" cannot appear in code for
+	// any other reason.
+	forbidden := map[string]string{
+		"--no-track":       "aihub#257's create-path prevention — the branch creation belongs to internal/lifecycle.AddClaimWorktree",
+		"--unset-upstream": "aihub#257's repair — coding.GitClearProtectedUpstream is reached through internal/lifecycle, not from here",
+		"--show-toplevel":  "aihub#328's adoption check — verifyClaimWorktree is the only place that decides whether a directory is a worktree",
+		"info/exclude":     "the per-worktree exclude seeding — writeWorktreeExcludes owns it",
+		"polyforge/":       "the task-branch prefix — branch naming is newClaimBranchNames' and nothing else's",
 	}
-	if !errors.Is(err, drain.ErrNotSupported) {
-		t.Fatalf("error %v does not wrap drain.ErrNotSupported, so the run would end IDLE "+
-			"(exit 10, \"come back later\") for a capability that does not exist", err)
+
+	// ⚠️ "session_secret" WAS on that list and was REMOVED, after this gate caught its own
+	// author. The scheduler legitimately spells it: attemptCredentials reads the three
+	// credential fields out of the state file the claim wrote and puts them on the wire, which
+	// is what every pf_* caller does (internal/mcp/tools_step.go spells it too). READING a
+	// credential is not MINTING one, and the forbidden-token list has to name the second.
+	//
+	// The minting primitive is what this replaces it with: internal/lifecycle/secret.go is the
+	// only place allowed to draw 32 random bytes. An import check is the right shape for that —
+	// there is no way to mint a secret without one of these, and no other reason for either to
+	// appear in a scheduler.
+	forbiddenImports := map[string]string{
+		"crypto/rand": "minting a session_secret is internal/lifecycle.GenerateSessionSecret's, and only its, job",
 	}
-	// The message has to name the work item and the fix; an operator reading it at 3am has
-	// nothing else to go on.
-	for _, needle := range []string{"wi_x", "--plan", "internal/mcp", "aihub#654"} {
-		if !strings.Contains(err.Error(), needle) {
-			t.Errorf("the refusal never mentions %q: %v", needle, err)
+
+	files := []string{"drain.go"}
+	entries, err := os.ReadDir(filepath.Join("..", "drain"))
+	if err != nil {
+		t.Fatalf("list internal/drain: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+			files = append(files, filepath.Join("..", "drain", e.Name()))
 		}
 	}
-	// And the terminal state that error produces must be the one that summons a human.
-	if got := drain.ExitCode(drain.Classify(true, drain.QueueState{Executable: 1})); got != 12 {
-		t.Errorf("a run with a failed work item exits %d, want 12", got)
+	if len(files) < 4 {
+		t.Fatalf("only %d files to scan (%v) — internal/drain has several production files, so this "+
+			"census would pass by having read almost nothing", len(files), files)
+	}
+
+	literals := 0
+	perFile := map[string]int{}
+	for _, path := range files {
+		lits, imports, perr := stringLiteralsIn(path)
+		if perr != nil {
+			t.Fatalf("%v", perr)
+		}
+		literals += len(lits)
+		perFile[path] = len(lits)
+		// The BUGGY spellings, not just the fixed ones. A re-implementation that reintroduces
+		// aihub#257 writes `worktree add -b` with no --no-track, and one that reintroduces
+		// aihub#328 writes `rev-parse --git-dir` — neither contains a forbidden token above,
+		// because every token above is part of the CORRECT version. What both must contain is
+		// a git command, and a scheduler has no business constructing one: the two places that
+		// legitimately shell to git from internal/cli are execGitRunner (engine.go) and the
+		// engine seams that call it, none of them in these files.
+		for _, line := range gitCommandLinesIn(path) {
+			t.Errorf("%s:%d builds a git command directly. Every git invocation on the claim "+
+				"path belongs to internal/lifecycle, and every one on the STEP path to "+
+				"internal/engine via execGitRunner. A git command spelled here is how "+
+				"aihub#257 (`worktree add -b` with no --no-track) and aihub#328 "+
+				"(`rev-parse --git-dir`) come back, and neither of those spellings contains a "+
+				"forbidden literal — they are the DEFECTIVE forms, not the fixed ones.", path, line)
+		}
+		for _, imp := range imports {
+			if why, bad := forbiddenImports[imp]; bad {
+				t.Errorf("%s imports %q. %s\nA scheduler that can mint a credential has become "+
+					"the second implementation of the work-item lifecycle (aihub#640's "+
+					"workflow_identity_constraint, aihub#667).", path, imp, why)
+			}
+		}
+		for _, lit := range lits {
+			for token, why := range forbidden {
+				if strings.Contains(lit.text, token) {
+					t.Errorf("%s:%d has the string literal %q, which contains %q.\n%s\n"+
+						"A scheduler that spells this has become the second implementation of the work-item "+
+						"lifecycle, which is what aihub#640's workflow_identity_constraint forbids and what "+
+						"aihub#667 existed to stop. Call internal/lifecycle instead.",
+						path, lit.line, lit.text, token, why)
+				}
+			}
+		}
+	}
+
+	// ── Anti-vacuity, both halves. A walk that collected no literals, or a detector that cannot
+	//    fire, passes exactly like a clean tree.
+	if literals < 50 {
+		t.Fatalf("the walk collected %d string literals across %d files — that is too few for these "+
+			"files and means the AST walk, not the code, is what is clean", literals, len(files))
+	}
+	planted := []string{
+		`git worktree add --no-track -b x`,
+		`.git/info/exclude`,
+		`polyforge/aihub-1-x`,
+		`git branch --unset-upstream`,
+		`rev-parse --show-toplevel`,
+	}
+	for _, p := range planted {
+		hit := false
+		for token := range forbidden {
+			if strings.Contains(p, token) {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Errorf("the detector does not fire on %q, so a re-implementation writing exactly that "+
+				"would pass this gate", p)
+		}
+	}
+	// Per-FILE, not just in total: `literals` above is a sum, so internal/drain could
+	// contribute zero and drain.go alone would clear the floor. Every file must have been
+	// really read.
+	for path, n := range perFile {
+		if n == 0 {
+			t.Errorf("%s yielded no string literals at all — that is the AST walk failing, and "+
+				"its silence reads exactly like a clean file", path)
+		}
+	}
+
+	// The import half needs its own anti-vacuity: an empty import list from every file would
+	// satisfy the loop above by having nothing to check.
+	if _, imports, err := stringLiteralsIn("drain.go"); err != nil {
+		t.Fatalf("%v", err)
+	} else if len(imports) < 5 {
+		t.Errorf("drain.go reports %d imports (%v) — the import walk is broken, and its silence "+
+			"would read as \"this file imports nothing dangerous\"", len(imports), imports)
+	}
+
+	// And the git-command half, against a synthetic source rather than by mutating a real file:
+	// both call shapes must be found, and a non-git command must NOT be.
+	probe := `package p
+import ("context"; "os/exec")
+func f(ctx context.Context) {
+	_ = exec.Command("git", "worktree", "add", "-b", "x", "p", "origin/main")
+	_ = exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	_ = exec.Command("claude", "-p")
+}`
+	if lines := gitCommandLinesInSource(t, probe); len(lines) != 2 {
+		t.Errorf("the git-command detector found %d sites in a probe containing exactly two "+
+			"(exec.Command and exec.CommandContext) plus one non-git call: %v. A detector that "+
+			"cannot fire reports a clean tree", len(lines), lines)
+	}
+}
+
+type sourceLiteral struct {
+	text string
+	line int
+}
+
+// gitCommandLinesIn reports the lines where path constructs a git command through os/exec.
+//
+// ⚠️ WHAT THIS GATE STILL CANNOT SEE, stated rather than implied. It is a tripwire on the two
+// spellings a re-implementation cannot avoid — a forbidden literal or a git command — in a FIXED
+// file set (internal/cli/drain.go plus internal/drain/*.go). A new file elsewhere in internal/cli,
+// a branch name built with path.Join, an exclude path built with filepath.Join, or a secret minted
+// from math/rand all pass. Widening the file set is not free: internal/cli/engine.go shells to git
+// legitimately, so "no git in internal/cli" is false. What actually pins the behaviour is
+// TestClaimLifecycleIsOneImplementationReachedTwoWays, which compares OBSERVABLE state from both
+// paths and cannot be fooled by where the code lives; this gate exists to make the cheap mistake
+// loud, not to be the proof.
+func gitCommandLinesIn(path string) []int {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil
+	}
+	return gitCommandLines(fset, f)
+}
+
+func gitCommandLinesInSource(t *testing.T, src string) []int {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "probe.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse the detector probe: %v", err)
+	}
+	return gitCommandLines(fset, f)
+}
+
+func gitCommandLines(fset *token.FileSet, f *ast.File) []int {
+	var out []int
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "exec" {
+			return true
+		}
+		// exec.Command(name, ...) and exec.CommandContext(ctx, name, ...) put the program
+		// name in different positions; both are checked rather than one assumed.
+		idx := -1
+		switch sel.Sel.Name {
+		case "Command":
+			idx = 0
+		case "CommandContext":
+			idx = 1
+		}
+		if idx < 0 || len(call.Args) <= idx {
+			return true
+		}
+		lit, ok := call.Args[idx].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if name, err := strconv.Unquote(lit.Value); err == nil && name == "git" {
+			out = append(out, fset.Position(call.Pos()).Line)
+		}
+		return true
+	})
+	return out
+}
+
+// stringLiteralsIn returns every string literal in a Go file, COMMENTS EXCLUDED by construction:
+// the parser is run without ParseComments, so a comment naming a forbidden token is invisible here.
+// That is the difference between this and a grep, and it is load-bearing — the seam's doc comment
+// names several of the tokens while explaining that they live elsewhere.
+func stringLiteralsIn(path string) ([]sourceLiteral, []string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	var out []sourceLiteral
+	var imports []string
+	for _, imp := range f.Imports {
+		if p, uerr := strconv.Unquote(imp.Path.Value); uerr == nil {
+			imports = append(imports, p)
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		// An import path is a string literal too, and it is NOT a literal this gate is about:
+		// importing internal/lifecycle is the correct behaviour, not a violation.
+		if isImportPathLit(f, lit) {
+			return true
+		}
+		unquoted, uerr := strconv.Unquote(lit.Value)
+		if uerr != nil {
+			unquoted = lit.Value
+		}
+		out = append(out, sourceLiteral{text: unquoted, line: fset.Position(lit.Pos()).Line})
+		return true
+	})
+	return out, imports, nil
+}
+
+func isImportPathLit(f *ast.File, lit *ast.BasicLit) bool {
+	for _, imp := range f.Imports {
+		if imp.Path == lit {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDrainWrapSendsDerived is the gate on the last call a successful drain makes, and it exists
+// because that call USED TO FAIL EVERY TIME.
+//
+// aihub#350 (migration 0040) made `derived` required on a wrap: the server's own message is
+// "derived is required to wrap … an omitted list is refused because …". drainQueries.CompleteAttempt
+// sent only {status, note}, so a run could claim a work item, execute every step, and then be
+// refused on the wrap — turning a perfect round into a FAILED one on the final request. Found by
+// running a real round against an isolated project for aihub#667, not by reading.
+//
+// The assertion is on the KEY BEING PRESENT, not on its contents: an empty list is a legitimate
+// disposition ("nothing carried forward") and the whole defect was absence.
+//
+// Mutant watched: delete the `body["derived"]` line and the wrapped arm goes red; the failed arm,
+// which must NOT send it, stays green either way — which is why both arms are here.
+func TestDrainWrapSendsDerived(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = map[string]any{}
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	// 🔴 SANDBOX FIRST. CompleteAttempt's terminal branch calls config.DeleteStateFile, and
+	// config.StateDir() walks up for .polyforge.yaml when POLYFORGE_WORKSPACE_ROOT is unset —
+	// from this worktree that lands on the LIVE workspace, whose state directory holds every
+	// claimed work item's session_secret. It was safe only because the literal "wi_x" happens
+	// not to resolve to one of them, which is luck rather than isolation. The sibling contract
+	// test in this package makes the same assertion for the same reason.
+	root := t.TempDir()
+	t.Setenv("POLYFORGE_WORKSPACE_ROOT", root)
+	if dir := config.StateDir(); !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
+		t.Fatalf("config.StateDir() = %q, outside this test's temp root %q — refusing to run: "+
+			"this test reaches a state-file DELETE", dir, root)
+	}
+
+	q := &drainQueries{c: client.New(srv.URL, "k"), project: "p"}
+
+	if err := q.CompleteAttempt(context.Background(), "wi_x", "wrapped", "done"); err != nil {
+		t.Fatalf("CompleteAttempt(wrapped): %v", err)
+	}
+	if _, ok := got["derived"]; !ok {
+		t.Errorf("a wrap was sent WITHOUT `derived` (body: %v). The server refuses that since "+
+			"aihub#350, so every successful drain round would fail on its last call", got)
+	}
+	if s, _ := got["status"].(string); s != "wrapped" {
+		t.Errorf("status = %q, want wrapped", s)
+	}
+
+	// Negative control: only a wrap records a disposition list. Sending it on a failure would be
+	// claiming something the tool's own description says only a wrap records.
+	got = nil
+	if err := q.CompleteAttempt(context.Background(), "wi_x", "failed", "nope"); err != nil {
+		t.Fatalf("CompleteAttempt(failed): %v", err)
+	}
+	if _, ok := got["derived"]; ok {
+		t.Errorf("a FAILED completion carried `derived` (body: %v); only a wrap records it", got)
+	}
+}
+
+// ─── the drain-side lifecycle seam's own helpers ──────────────────────────────
+//
+// These four were added by aihub#667 and a clean-context review found every one of them
+// unreferenced by any test. Three of them are read by something destructive or by the only
+// channel that reaches a human in an unattended run, so "it looked right" is not enough.
+
+// TestClaimWorktreeRoot_IsDerivedFromWhatTheClaimActuallyCreated pins the value
+// engine.CleanupWorktrees deletes a directory tree from at wrap.
+//
+// The derivation is deliberately from the RECORDED worktrees rather than recomputed from the
+// slug: a repo that was skipped (a directory rejected by verifyClaimWorktree, aihub#328) must not
+// make this name a guess, and the parent of any recorded worktree is the same directory for all
+// of them.
+func TestClaimWorktreeRoot_IsDerivedFromWhatTheClaimActuallyCreated(t *testing.T) {
+	const ws = "/tmp/ws"
+
+	t.Run("from the recorded worktrees", func(t *testing.T) {
+		sf := &config.StateFile{
+			Project: "aihub", Slug: "aihub#667",
+			Worktrees: map[string]string{"aihub": "/elsewhere/pf.aihub-667/aihub"},
+		}
+		// /elsewhere, not /tmp/ws: the recorded path wins over the slug derivation, which is
+		// the whole point — the claim may have put them somewhere this process did not compute.
+		if got := claimWorktreeRoot(ws, sf); got != "/elsewhere/pf.aihub-667" {
+			t.Errorf("claimWorktreeRoot = %q, want the PARENT of the recorded worktree", got)
+		}
+	})
+
+	t.Run("falls back to the slug derivation when nothing was created", func(t *testing.T) {
+		sf := &config.StateFile{Project: "aihub", Slug: "aihub#667"}
+		if got := claimWorktreeRoot(ws, sf); got != filepath.Join(ws, "pf.aihub-667") {
+			t.Errorf("claimWorktreeRoot = %q, want the slug-derived name", got)
+		}
+	})
+
+	// 🔴 The empty answer matters more than the derived one. This value is handed to a cleanup
+	// that removes a directory tree, and "" joined with anything is a relative path — returning
+	// a guess here is how a wrap deletes something it never created.
+	for name, sf := range map[string]*config.StateFile{
+		"no project":       {Slug: "aihub#667"},
+		"no slug":          {Project: "aihub"},
+		"slug with no seq": {Project: "aihub", Slug: "aihub"},
+		"nothing at all":   {},
+	} {
+		if got := claimWorktreeRoot(ws, sf); got != "" {
+			t.Errorf("%s: claimWorktreeRoot = %q, want \"\" — a directory tree is removed from "+
+				"this path at wrap, so a derived-from-nothing value is worse than none", name, got)
+		}
+	}
+}
+
+// TestLockBlockerFrom_ReadsTheHolderTheServerNamed pins layer ②'s input.
+//
+// aihub#640's `notification_three_layers` calls the note on the BLOCKER's work item the only
+// channel that reaches another human in an unattended run, and internal/drain/runner.go only
+// sends it when Blocker.WorkItem is non-empty — so a parse that quietly returns nil silences the
+// feature without failing anything.
+func TestLockBlockerFrom_ReadsTheHolderTheServerNamed(t *testing.T) {
+	// The exact shape internal/domain/run_attempts.go builds for CONFLICT_LOCK_TAKEN.
+	apiErr := &client.APIError{
+		StatusCode: 409,
+		Code:       "CONFLICT_LOCK_TAKEN",
+		Message:    "resource file_scope:aihub:aihub:internal/cli/drain.go is already locked",
+		Details:    json.RawMessage(`{"conflict_with":{"attempt_id":"ra_other","actor_display":"someone","work_item_slug":"aihub#665"}}`),
+	}
+	b := lockBlockerFrom(fmt.Errorf("wrapped: %w", apiErr))
+	if b == nil {
+		t.Fatal("no blocker parsed from a well-formed CONFLICT_LOCK_TAKEN, so the note that tells " +
+			"the holder somebody is waiting is never sent")
+	}
+	if b.Actor != "someone" || b.WorkItem != "aihub#665" {
+		t.Errorf("blocker = %+v, want actor=someone work_item=aihub#665", b)
+	}
+	if b.Resource != "file_scope:aihub:aihub:internal/cli/drain.go" {
+		t.Errorf("blocker.Resource = %q — the key is the half an operator can act on", b.Resource)
+	}
+
+	// Negative controls. Each must return nil rather than an empty-but-non-nil Blocker, which
+	// the runner would treat as "a holder was named".
+	for name, err := range map[string]error{
+		"not an API error":     errString("connection refused"),
+		"a different 409":      &client.APIError{StatusCode: 409, Code: "CONFLICT_EPOCH_MISMATCH", Message: "nope"},
+		"no details, no match": &client.APIError{StatusCode: 409, Code: "CONFLICT_LOCK_TAKEN", Message: "something else entirely"},
+	} {
+		if got := lockBlockerFrom(err); got != nil {
+			t.Errorf("%s: lockBlockerFrom = %+v, want nil", name, got)
+		}
+	}
+
+	// Best-effort is legitimate: the server's holder lookup may come back empty, and a refusal
+	// reported without a name is still a refusal. The resource alone is enough to report.
+	partial := &client.APIError{
+		StatusCode: 409, Code: "CONFLICT_LOCK_TAKEN",
+		Message: "resource file_scope:aihub:x.go is already locked",
+	}
+	if got := lockBlockerFrom(partial); got == nil || got.Resource != "file_scope:aihub:x.go" {
+		t.Errorf("a conflict with no holder details lost its resource key: %+v", got)
+	}
+}
+
+// TestProjectScenarioURL_RefusesRatherThanReturningEmpty covers the value every work item in a
+// run needs. Returning "" would make engine.ResolveScenarioPath fail once per work item with a
+// message about a URL rather than about the project.
+func TestProjectScenarioURL_RefusesRatherThanReturningEmpty(t *testing.T) {
+	serve := func(body string, status int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+
+	ok := serve(`{"name":"p","scenario":"git@github.com:GMISWE/polyforge-coding.git"}`, 200)
+	defer ok.Close()
+	got, err := projectScenarioURL(context.Background(), client.New(ok.URL, "k"), "p")
+	if err != nil || got != "git@github.com:GMISWE/polyforge-coding.git" {
+		t.Fatalf("projectScenarioURL = (%q, %v)", got, err)
+	}
+
+	// A project with scenario NULL decodes to a missing key, not to an error — which is
+	// precisely the case that must not pass silently.
+	none := serve(`{"name":"p"}`, 200)
+	defer none.Close()
+	if _, err := projectScenarioURL(context.Background(), client.New(none.URL, "k"), "p"); err == nil {
+		t.Error("a project with no scenario returned no error, so every work item in the run " +
+			"would fail separately on a message about a URL instead of once about the project")
+	} else if !strings.Contains(err.Error(), "no scenario repo") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+
+	bad := serve(`{"error":{"code":"PROJECT_NOT_FOUND"}}`, 404)
+	defer bad.Close()
+	if _, err := projectScenarioURL(context.Background(), client.New(bad.URL, "k"), "p"); err == nil {
+		t.Error("a 404 on the project lookup was swallowed")
 	}
 }

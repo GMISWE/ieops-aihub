@@ -89,7 +89,7 @@ call site.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
-`internal/mcp/tools_lifecycle.go` (`registerLifecycleTools`) builds the body for
+`internal/lifecycle/claim.go` (`Claim`) builds the body for
 `pkg/client/client.go` (`ClaimWorkItem`) → `POST /v1/work_items/<id>/claim`, bound by
 `internal/server/router.go` (`handleClaimWorkItem`).
 

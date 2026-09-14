@@ -327,7 +327,12 @@ var fileContentReaders = map[string]bool{"ReadFile": true, "Open": true, "OpenFi
 // checks it non-stale in both directions: a site missing from here fails, and an
 // entry naming a site that no longer reads a file fails too.
 var fileReadSitesNotFromACallerNamedPath = map[string]string{
-	"tools_lifecycle.go/writeWorktreeExcludes": "appends three patterns to " +
+	// ⚠️ Was "tools_lifecycle.go/writeWorktreeExcludes" until aihub#667 moved the
+	// claim path into internal/lifecycle. The site is unchanged; the census below
+	// now walks that directory as well, because the MCP tools still reach this
+	// read and a census that stopped at the package boundary would have answered
+	// "nothing else reads a file" about a reader that is still there.
+	"lifecycle/worktree.go/writeWorktreeExcludes": "appends three patterns to " +
 		".git/info/exclude. The path is filepath.Join(worktree, \".git/info/exclude\") — a fixed " +
 		"relative name under a directory this process derived, so no caller ever names the file " +
 		"that is read.",
@@ -443,46 +448,66 @@ func TestOnlyOnePublishedParameterNamesAFileThisProcessReads(t *testing.T) {
 // every one of those sentences as a call site.
 func mcpFileReadSites(t *testing.T) (sites, resolverCalls []string) {
 	t.Helper()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("list the package directory: %v", err)
+	// aihub#667: two directories, not one. internal/lifecycle holds the claim
+	// path that used to be in this package, including the .git/info/exclude
+	// reader the exemption table names, and a census scoped to the package
+	// directory would report it gone rather than moved.
+	//
+	// Sites from internal/lifecycle are keyed "lifecycle/<file>.go/<func>" so a
+	// same-named file in the two directories can never collide in the table.
+	dirs := []struct{ path, prefix string }{
+		{".", ""},
+		{filepath.Join("..", "lifecycle"), "lifecycle/"},
 	}
 	scanned := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir.path)
+		if err != nil {
+			t.Fatalf("list %s: %v", dir.path, err)
 		}
-		fset := token.NewFileSet()
-		f, perr := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parse %s: %v", name, perr)
-		}
-		scanned++
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
+		dirScanned := 0
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			where := name + "/" + fn.Name.Name
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, isCall := n.(*ast.CallExpr)
-				if !isCall {
-					return true
+			fset := token.NewFileSet()
+			f, perr := parser.ParseFile(fset, filepath.Join(dir.path, name), nil, parser.SkipObjectResolution)
+			if perr != nil {
+				t.Fatalf("parse %s: %v", name, perr)
+			}
+			scanned++
+			dirScanned++
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
 				}
-				sel, isSel := call.Fun.(*ast.SelectorExpr)
-				if !isSel {
-					if id, isID := call.Fun.(*ast.Ident); isID && id.Name == "resolveArtifactContent" {
-						resolverCalls = append(resolverCalls, where)
+				where := dir.prefix + name + "/" + fn.Name.Name
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, isCall := n.(*ast.CallExpr)
+					if !isCall {
+						return true
+					}
+					sel, isSel := call.Fun.(*ast.SelectorExpr)
+					if !isSel {
+						if id, isID := call.Fun.(*ast.Ident); isID && id.Name == "resolveArtifactContent" {
+							resolverCalls = append(resolverCalls, where)
+						}
+						return true
+					}
+					pkg, isPkg := sel.X.(*ast.Ident)
+					if isPkg && pkg.Name == "os" && fileContentReaders[sel.Sel.Name] {
+						sites = appendUnique(sites, where)
 					}
 					return true
-				}
-				pkg, isPkg := sel.X.(*ast.Ident)
-				if isPkg && pkg.Name == "os" && fileContentReaders[sel.Sel.Name] {
-					sites = appendUnique(sites, where)
-				}
-				return true
-			})
+				})
+			}
+		}
+		if dirScanned == 0 {
+			t.Fatalf("parsed no production source under %s — the listing is relative to the package "+
+				"directory and must match; an empty half of this census answers every question below "+
+				"by having read nothing", dir.path)
 		}
 	}
 	if scanned == 0 {

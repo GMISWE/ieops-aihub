@@ -343,9 +343,15 @@ var substringMatchers = map[string]bool{
 // wrong, and an exemption would preserve the wrong predicate while hiding the
 // only evidence of it.
 var errTextMatchExemptions = map[string]string{
-	`tools_lifecycle.go:strings.Contains(err.Error(), "already exists")`:      "git's own stderr from `git worktree add`, not an aihub envelope: there is no code field to compare, and the phrase is not a code.",
-	`tools_lifecycle.go:strings.Contains(err.Error(), "already checked out")`: "same git stderr as above.",
-	`tools_coding.go:strings.Contains(err.Error(), coding.BaseMovedMarker)`:   "a marker string this repo defines and puts in the error itself (internal/coding), so the text IS the contract rather than an observed value. Not a server code.",
+	// ⚠️ These two keys said `tools_lifecycle.go:` until aihub#667 moved the claim
+	// worktree code to internal/lifecycle. The sites are the same lines; only the
+	// file changed. Re-keying them rather than deleting them is the point — the
+	// loop at the bottom fails on an exemption that matches nothing, so a move
+	// that quietly took the code out of this gate's reach would have shown up as
+	// a dead exemption rather than as silence.
+	`worktree.go:strings.Contains(err.Error(), "already exists")`:           "git's own stderr from `git worktree add`, not an aihub envelope: there is no code field to compare, and the phrase is not a code.",
+	`worktree.go:strings.Contains(err.Error(), "already checked out")`:      "same git stderr as above.",
+	`tools_coding.go:strings.Contains(err.Error(), coding.BaseMovedMarker)`: "a marker string this repo defines and puts in the error itself (internal/coding), so the text IS the contract rather than an observed value. Not a server code.",
 }
 
 // SCOPE: internal/mcp only, and that is the whole class rather than the part
@@ -373,11 +379,26 @@ func TestNoAihubErrorCodeIsClassifiedBySubstring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
+	// aihub#667: internal/lifecycle is scanned TOO, not instead. The claim path
+	// moved there wholesale, taking both "already exists" sites with it, and a
+	// gate scoped to one package would have kept passing while the code it was
+	// written about left the package. The two directories are one subject —
+	// internal/mcp's claim tool is a thin caller of internal/lifecycle — so the
+	// scope note above is satisfied by widening the glob, exactly as it says.
+	lifecycleFiles, err := filepath.Glob(filepath.Join("..", "lifecycle", "*.go"))
+	if err != nil {
+		t.Fatalf("glob internal/lifecycle: %v", err)
+	}
+	if len(lifecycleFiles) == 0 {
+		t.Fatalf("no files found under ../lifecycle — the claim path lives there since aihub#667, " +
+			"so an empty glob means this gate silently stopped reading half of its subject")
+	}
+	files = append(files, lifecycleFiles...)
 
 	scanned := 0
 	// A SET of the exemption keys actually observed, not a count of sites: one
 	// key can legitimately match several call sites ("already exists" appears at
-	// two places in tools_lifecycle.go), so counting sites made the invariant
+	// two places in internal/lifecycle/worktree.go), so counting sites made the invariant
 	// below wrong in a way that only showed up when it fired. What must hold is
 	// that every listed exemption is still real.
 	exemptedSeen := map[string]bool{}

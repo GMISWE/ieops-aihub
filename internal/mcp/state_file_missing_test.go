@@ -642,7 +642,7 @@ type stateRefusalExemption struct {
 // stateRefusalExemptSites are the config.ResolveStateFile call sites that must
 // NOT be converted.
 //
-// There are 15 such call sites in production and 11 are members of this family.
+// There are 17 such call sites in production and 11 are members of this family.
 // Writing that down is the point: "unify the wording" is exactly the kind of
 // instruction that gets over-applied, and the second entry below is one an
 // over-eager unification would visibly damage.
@@ -656,6 +656,16 @@ type stateRefusalExemption struct {
 // because nothing was checking the sentence. They are now derived from the
 // detector by TestStateRefusalExemptionsStillSayWhatTheyMean rather than
 // remembered.
+//
+// ⚠️ 15 -> 17 at aihub#667, and the SHAPE of that move is worth noting: the
+// total rose while the member count did not. The two new sites are in
+// internal/cli/drain.go (attemptCredentials and drainQueries.CompleteAttempt),
+// where `polyforge drain` reads back the credential its own claim just wrote.
+// They are not members and must not become members: this family is about the
+// MESSAGE an MCP tool hands a model when the local credential is missing, and a
+// headless scheduler has no model to hand anything to — it returns nil and lets
+// the server refuse, which is a better failure than one invented locally. The
+// detector walks the whole module, so it saw them the moment they existed.
 //
 // The key is `<file> <enclosing func>(<argument>)`, which is what
 // stateRefusalSite.Key reports. It deliberately carries no line number: an
@@ -678,7 +688,12 @@ var stateRefusalExemptSites = map[string]stateRefusalExemption{
 		Reason: "prior-worktree read: best-effort; a miss is normal and the error is deliberately " +
 			"ignored in the condition itself.",
 	},
-	"internal/mcp/tools_lifecycle.go recordedClaimSecret(wiID)": {
+	// ⚠️ The key said internal/mcp/tools_lifecycle.go until aihub#667 moved the
+	// claim path into internal/lifecycle. Same function, same line, new file.
+	// The detector already walks the whole module, so nothing about its reach
+	// changed; what changed is the key, and the check below is what made the
+	// move say so instead of leaving a stale entry pointing at nothing.
+	"internal/lifecycle/secret.go recordedClaimSecret(wiID)": {
 		Kind:   refusalSilent,
 		Reason: "worktree lookup; returns (\"\", false) — a bool, not a message.",
 	},
@@ -749,12 +764,13 @@ func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 			members++
 		}
 	}
-	if len(sites) != 15 || members != 11 {
-		t.Errorf("stateRefusalExemptSites' comment says 15 call sites of which 11 are members; the tree "+
+	if len(sites) != 17 || members != 11 {
+		t.Errorf("stateRefusalExemptSites' comment says 17 call sites of which 11 are members; the tree "+
 			"has %d and %d. Update the sentence in the same change — the pair before this one (16 and "+
 			"12) held only until aihub#446 retired the three artifact-action tools, and the pair before "+
 			"that (18 and 14) went stale the moment aihub#448 deleted tools_release.go's two sites and "+
-			"stayed that way because nothing checked it", len(sites), members)
+			"stayed that way because nothing checked it; aihub#667 moved it 15 -> 17 by adding two "+
+			"NON-member sites in internal/cli/drain.go", len(sites), members)
 	}
 
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/mcp/tools_coding.go"))

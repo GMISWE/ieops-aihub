@@ -320,9 +320,18 @@ func TestClaimErrorDisclosesTheClaimItAlreadyMade(t *testing.T) {
 // both of its call sites run after the server has answered — so a third site
 // added later goes red rather than silently reintroducing the defect.
 //
-// ⚠️ SCOPE: this reads tools_lifecycle.go ONLY. Both call sites live there
-// today (verified by grepping the whole repo for config.WriteClaimState), but a
-// call added in another file would be invisible to this guard.
+// ⚠️ SCOPE: this reads TWO files — internal/mcp/tools_lifecycle.go, which still
+// holds pf_force_takeover's call, and internal/lifecycle/claim.go, which holds
+// pf_claim_work_item's since aihub#667 moved the claim path out of this package.
+// Both sites are verified present by grepping the whole repo for
+// config.WriteClaimState; a call added in a THIRD file would still be invisible
+// to this guard, which is why the total is asserted rather than a floor.
+//
+// 🔴 The list is what makes the move visible. When the claim path left this
+// package the count in tools_lifecycle.go fell 2 -> 1 and this gate went red
+// naming the number, which is the behaviour it was built for: a disclosure
+// requirement that followed the code without anyone noticing would be a
+// requirement nobody is holding.
 //
 // It parses the AST rather than measuring a byte distance. The first draft took
 // a fixed 1600-byte window after each call site, which is a proximity check
@@ -332,52 +341,74 @@ func TestClaimErrorDisclosesTheClaimItAlreadyMade(t *testing.T) {
 // happened during this change. The if-statement's own body is the honest scope.
 //
 // The other post-commit local writes in this package are deliberately not
-// covered: internal/mcp/tools_lifecycle.go's worktree-map update and the
-// DeleteStateFile calls in tools_lifecycle.go / tools_coding.go / tools_step.go
+// covered: internal/lifecycle/claim.go's worktree-map update (it was in
+// tools_lifecycle.go until aihub#667) and the DeleteStateFile calls in
+// tools_lifecycle.go / tools_coding.go / tools_step.go
 // are all `_ =` best-effort and return ok:true, so they cannot mislead a caller
 // into believing the call failed. They have their own problems; this is not one.
 func TestEveryPostCommitStateWriteDisclosesIt(t *testing.T) {
-	b, err := os.ReadFile("tools_lifecycle.go")
-	if err != nil {
-		t.Fatalf("read tools_lifecycle.go: %v", err)
+	// One entry per file that holds a post-commit config.WriteClaimState, with
+	// the number of calls it is expected to hold. Named rather than summed blind
+	// so that moving a site between the two files — which is what aihub#667 did —
+	// fails here naming both numbers instead of cancelling out.
+	sites := []struct {
+		path  string
+		calls int
+		why   string
+	}{
+		{"tools_lifecycle.go", 1, "pf_force_takeover"},
+		{filepath.Join("..", "lifecycle", "claim.go"), 1, "pf_claim_work_item, moved out of internal/mcp by aihub#667"},
 	}
-	src := string(b)
 
 	// A textual count first, so a call in a shape the AST walk below does not
 	// look for (a bare statement, an assignment to a named err) cannot pass by
 	// simply not being found. A count, not a floor of one: deleting a site must
 	// go red rather than pass on the survivor.
 	const call = "config.WriteClaimState("
-	if n := strings.Count(src, call); n != 2 {
-		t.Fatalf("found %d occurrences of %s in tools_lifecycle.go, expected 2 (pf_claim_work_item and pf_force_takeover) — update this guard deliberately, and disclose the committed side effect at the new site", n, call)
-	}
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "tools_lifecycle.go", src, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse tools_lifecycle.go: %v", err)
-	}
+	total := 0
+	for _, site := range sites {
+		b, err := os.ReadFile(site.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", site.path, err)
+		}
+		src := string(b)
 
-	checked := 0
-	ast.Inspect(file, func(n ast.Node) bool {
-		ifs, ok := n.(*ast.IfStmt)
-		if !ok || ifs.Init == nil {
+		if n := strings.Count(src, call); n != site.calls {
+			t.Fatalf("found %d occurrences of %s in %s, expected %d (%s) — update this guard deliberately, and disclose the committed side effect at the new site", n, call, site.path, site.calls, site.why)
+		}
+
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, site.path, src, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", site.path, err)
+		}
+
+		checked := 0
+		ast.Inspect(file, func(n ast.Node) bool {
+			ifs, ok := n.(*ast.IfStmt)
+			if !ok || ifs.Init == nil {
+				return true
+			}
+			initSrc := src[fset.Position(ifs.Init.Pos()).Offset:fset.Position(ifs.Init.End()).Offset]
+			if !strings.Contains(initSrc, call) {
+				return true
+			}
+			checked++
+			body := src[fset.Position(ifs.Body.Pos()).Offset:fset.Position(ifs.Body.End()).Offset]
+			if !strings.Contains(body, "NOT A NO-OP") {
+				t.Errorf("the config.WriteClaimState error branch at %s does not disclose the committed server-side effect. The server transaction has already committed by the time this line runs, so a bare \"write state file: <errno>\" reads as \"nothing happened\" while the attempt is live and the previous holder is already evicted (aihub#323). Branch:\n%s",
+					fset.Position(ifs.Pos()), firstLines(body, 8))
+			}
 			return true
+		})
+		if checked != site.calls {
+			t.Errorf("only %d of the %d config.WriteClaimState calls in %s sit in an `if err := ...; err != nil` whose body this guard could read. A call whose error is handled some other way is not covered by this test — either restore that shape or extend the guard", checked, site.calls, site.path)
 		}
-		initSrc := src[fset.Position(ifs.Init.Pos()).Offset:fset.Position(ifs.Init.End()).Offset]
-		if !strings.Contains(initSrc, call) {
-			return true
-		}
-		checked++
-		body := src[fset.Position(ifs.Body.Pos()).Offset:fset.Position(ifs.Body.End()).Offset]
-		if !strings.Contains(body, "NOT A NO-OP") {
-			t.Errorf("the config.WriteClaimState error branch at %s does not disclose the committed server-side effect. The server transaction has already committed by the time this line runs, so a bare \"write state file: <errno>\" reads as \"nothing happened\" while the attempt is live and the previous holder is already evicted (aihub#323). Branch:\n%s",
-				fset.Position(ifs.Pos()), firstLines(body, 8))
-		}
-		return true
-	})
-	if checked != 2 {
-		t.Errorf("only %d of the 2 config.WriteClaimState calls sit in an `if err := ...; err != nil` whose body this guard could read. A call whose error is handled some other way is not covered by this test — either restore that shape or extend the guard", checked)
+		total += checked
+	}
+	if total != 2 {
+		t.Errorf("%d post-commit config.WriteClaimState call sites were checked across %d files, expected 2 — the two sites are pf_claim_work_item's and pf_force_takeover's", total, len(sites))
 	}
 }
 

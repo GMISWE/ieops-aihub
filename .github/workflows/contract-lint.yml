@@ -68,6 +68,14 @@ on:
       - 'internal/drain/**'
       - 'internal/embedding/**'
       - 'internal/engine/**'
+      # New at aihub#667, and added in the SAME change that created the package
+      # rather than after a job silently failed to run: cmd/polyforge links
+      # internal/lifecycle (internal/mcp and internal/cli both call it), so the
+      # "paths: filter covers every package the plugin links" step below would go
+      # red without this line. That step is the reason this is a correction and
+      # not a discovery — internal/cli fell out of this list for real and PR#283
+      # shipped through the hole (aihub#326).
+      - 'internal/lifecycle/**'
       - 'internal/mcp/**'
       - 'internal/render/**'
       - 'internal/roles/**'

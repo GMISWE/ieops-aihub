@@ -122,12 +122,16 @@ type embedReadSite struct {
 var embedReadSites = map[string]embedReadSite{
 	"internal/domain/memory_vector.go": {
 		reason: "recall QUERY side: embeds the caller's search string, not a stored row. " +
-			"A query is short by construction and is never persisted, so it shares no vector-parity obligation.",
-		args: []string{"req.Query"},
+			"A query is short by construction and is never persisted, so it shares no vector-parity obligation. " +
+			"It goes through QueryEmbedInput, which is the OPPOSITE of the two builders above rather than a " +
+			"third one: it adds the model's instruct prefix and deliberately does not truncate (aihub#669). " +
+			"Parity with the writers would be the defect here, since the model ships prompts.document = \"\".",
+		args: []string{"QueryEmbedInput(req.Query)"},
 	},
 	"internal/domain/wi_vector.go": {
-		reason: "work-item recall QUERY side, same reasoning as memory_vector.go.",
-		args:   []string{"*f.Query"},
+		reason: "work-item recall QUERY side, same reasoning as memory_vector.go, including QueryEmbedInput. " +
+			"The similar_to branch in the same function embeds nothing at all: it reads a stored vector.",
+		args: []string{"QueryEmbedInput(*f.Query)"},
 	},
 	"internal/embedding/openai.go": {
 		reason: "the provider implementation itself — EmbedBatch/Ping calling its own Embed. " +
@@ -743,7 +747,7 @@ func Remember(ctx C, req R) {
 // filename hit — the entire suite stayed green with this in the tree.
 const embedFixtureFifthWriterInReadFile = `package domain
 func RecallWithVector(ctx C, pool P, req R) {
-	qvec, err := embProvider.Embed(ctx, req.Query)
+	qvec, err := embProvider.Embed(ctx, QueryEmbedInput(req.Query))
 	_, _ = qvec, err
 }
 func refreshMemoryEmbeddingRaw(ctx C, pool P, memID, content string) {
@@ -768,7 +772,7 @@ func RecallWithVector(ctx C, req R) {
 // exemption claims, no more and no fewer.
 const embedFixtureReadSiteExact = `package domain
 func RecallWithVector(ctx C, req R) {
-	qvec, err := embProvider.Embed(ctx, req.Query)
+	qvec, err := embProvider.Embed(ctx, QueryEmbedInput(req.Query))
 	_, _ = qvec, err
 }
 `

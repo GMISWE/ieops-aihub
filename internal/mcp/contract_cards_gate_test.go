@@ -3082,6 +3082,20 @@ const k12ContractCards = 45
 // with because=external-state, which is that vocabulary entry's own definition
 // ("a claim about an aihub#NNN's state") rather than a relabel between waiver
 // kinds.
+//
+// pf_recall was re-pinned again 60/49/prose-only 11 -> 65/53/prose-only 12 by
+// aihub#669 on 2026-09-14, and the finding was RECLASSIFIED rather than
+// DEBT_GROWTH: Unclassified was 0 before and is 0 after. 5 assertable sentences
+// arrived with the instruct-prefix bullet in hop 4. 4 of them cite an arm in
+// internal/domain/embed_query_prefix_test.go or the read-site exemption in
+// internal/domain/embed_writer_parity_test.go. The 5th says the prefix lowers
+// every similarity and that the lowest real query of the 44 clears the garbage
+// control by 0.0607, and it carries prose-only because=measurement, which is
+// that vocabulary entry's own definition ("a number with a unit plus a corpus or
+// a date") rather than a relabel between waiver kinds. Three neighbouring
+// sentences in the same bullet are pure readings that the recogniser does not
+// call candidate-assertable, so they carry no marker: a marker there is a
+// STALE_MARKER finding, which is how this was measured rather than guessed.
 var k12Ledger = map[string]cardclaims.Census{
 	"pf_acquire_locks":           {Candidates: 16, Cited: 13, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_activate_memory":         {Candidates: 5, Cited: 4, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
@@ -3111,7 +3125,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_predict_conflicts":       {Candidates: 38, Cited: 33, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
 	"pf_push":                    {Candidates: 8, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_read_events":             {Candidates: 17, Cited: 13, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_recall":                  {Candidates: 60, Cited: 49, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 11},
+	"pf_recall":                  {Candidates: 65, Cited: 53, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
 	"pf_redact_memory":           {Candidates: 10, Cited: 7, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
 	"pf_reinforce_memory":        {Candidates: 33, Cited: 26, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_remember":                {Candidates: 55, Cited: 45, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},

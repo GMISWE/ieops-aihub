@@ -77,12 +77,12 @@ func TestPredictConflictsIsGivenTheAuthenticatedRole(t *testing.T) {
 	}
 
 	args := calls[0].Args
-	const wantArgs = 5 // ctx, pool, req, callerProjectRoles, callerRole
+	const wantArgs = 6 // ctx, pool, req, callerProjectRoles, callerRole, callerProjectScope
 	if len(args) != wantArgs {
-		t.Fatalf("domain.PredictConflicts is called with %d argument(s), want %d. The callerRole "+
-			"parameter is the aihub#662 addition; a call that dropped it would not compile, so a "+
-			"different count here means the signature changed and this gate has to be re-derived "+
-			"against it rather than renumbered", len(args), wantArgs)
+		t.Fatalf("domain.PredictConflicts is called with %d argument(s), want %d. callerRole is the "+
+			"aihub#662 addition and callerProjectScope the aihub#665 one; a call that dropped "+
+			"either would not compile, so a different count here means the signature changed and "+
+			"this gate has to be re-derived against it rather than renumbered", len(args), wantArgs)
 	}
 
 	for _, arg := range []struct {
@@ -94,6 +94,11 @@ func TestPredictConflictsIsGivenTheAuthenticatedRole(t *testing.T) {
 		{4, "Role", "the global role, which is the ONLY thing that distinguishes an admin: " +
 			"an admin's ProjectRoles map is empty by design (aihub#227), so the map alone " +
 			"reads administrator-of-everything as member-of-nothing"},
+		{5, "ProjectScope", "the api key's confinement, and the third clause of the one access " +
+			"rule (hasProjectAccess). Since aihub#665 the domain function REFUSES a project " +
+			"the caller may not see rather than only redacting the answer, so a hard-coded " +
+			"nil here would silently ship a membership-only copy of that rule: a key issued " +
+			"for one project would read another through a user who is a member of both"},
 	} {
 		sel, ok := args[arg.i].(*ast.SelectorExpr)
 		if !ok {
@@ -140,5 +145,112 @@ func TestPredictConflictsIsGivenTheAuthenticatedRole(t *testing.T) {
 	if !sawGetUser {
 		t.Error("handlePredictConflicts never assigns `u` from GetUser(c), so the `u.Role` this " +
 			"gate accepted is not known to be the authenticated user's role")
+	}
+}
+
+// TestPredictConflictsDeniesWithTheSharedNotVisibleResponse is aihub#665's
+// wiring hop, and it exists for the same reason the one above does: the decision
+// is correct in the domain and one layer of plumbing can make it worthless.
+//
+// domain.PredictConflicts refuses a project the caller may not see with
+// ErrNotFound carrying a message of its own. That message must NOT reach the
+// wire. aihub#377's invariant is that "you may not see this" and "this does not
+// exist" are byte-identical, and the whole repo spells the survivor
+// notVisibleMessage — so the handler funnels the refusal through hideNotFound,
+// which replaces ErrNotFound with errNotVisible() and leaves every other code
+// alone.
+//
+// 🔴 THE MUTANT THIS KILLS is `return writeError(c, aihubErr)` — the line that
+// was there before, which compiles, keeps every behavioural assertion about
+// refusing green, and answers a distinguishable 404. A caller sweeping project
+// names would read the domain's own wording back and learn which projects exist.
+//
+// ⚠️ What it cannot see: that hideNotFound still means what it means. That is
+// held where it is defined (middleware.go) and by the byte-identity suites.
+func TestPredictConflictsDeniesWithTheSharedNotVisibleResponse(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "router.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse router.go: %v", err)
+	}
+
+	var handler *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Recv == nil && fn.Name.Name == "handlePredictConflicts" {
+			handler = fn
+		}
+	}
+	if handler == nil {
+		t.Fatal("router.go no longer declares handlePredictConflicts; re-point this gate rather " +
+			"than deleting it")
+	}
+
+	// The identifier the domain error lands in, taken from the call itself so a
+	// rename cannot quietly turn this arm into an assertion about nothing.
+	errName := ""
+	ast.Inspect(handler.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 2 {
+			return true
+		}
+		call, ok := assign.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "PredictConflicts" {
+			return true
+		}
+		if id, ok := assign.Lhs[1].(*ast.Ident); ok {
+			errName = id.Name
+		}
+		return true
+	})
+	if errName == "" {
+		t.Fatal("no `resp, err := domain.PredictConflicts(...)` assignment found in " +
+			"handlePredictConflicts — this gate cannot tell which value carries the refusal")
+	}
+
+	var wrapped, bare []string
+	ast.Inspect(handler.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "writeError" {
+			return true
+		}
+		for _, a := range call.Args {
+			switch v := a.(type) {
+			case *ast.Ident:
+				if v.Name == errName {
+					bare = append(bare, fset.Position(call.Pos()).String())
+				}
+			case *ast.CallExpr:
+				inner, ok := v.Fun.(*ast.Ident)
+				if !ok || inner.Name != "hideNotFound" || len(v.Args) != 1 {
+					continue
+				}
+				if arg, ok := v.Args[0].(*ast.Ident); ok && arg.Name == errName {
+					wrapped = append(wrapped, fset.Position(call.Pos()).String())
+				}
+			}
+		}
+		return true
+	})
+
+	for _, pos := range bare {
+		t.Errorf("router.go:%s writes %s straight to the response. The domain refusal for a "+
+			"project the caller may not see is an ErrNotFound carrying its own wording, and a "+
+			"404 whose body differs from notVisibleMessage is still an oracle: it tells a "+
+			"caller sweeping project names which ones exist. Wrap it: "+
+			"writeError(c, hideNotFound(%s)).", pos, errName, errName)
+	}
+	if len(wrapped) == 0 {
+		t.Errorf("handlePredictConflicts never passes %s through hideNotFound. Without it the "+
+			"aihub#665 authorization gate answers a distinguishable 404 and trades one "+
+			"disclosure for a quieter one.", errName)
 	}
 }

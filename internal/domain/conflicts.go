@@ -239,8 +239,17 @@ const notCallersOwnLockHolderSQL = ` AND ra.work_item_id <> `
 // role=admin, projects[].relation=owner for aihub, and project_roles={}, and a
 // dry_run predict over a held path answered
 // "[conflict in project aihub, no visibility]".
+//
+// callerProjectScope is the api key's project_scope confinement (nil = unscoped),
+// and it is here for the same reason callerRole is: since aihub#665 this function
+// DECIDES project visibility rather than only folding it, and hasProjectAccess —
+// package server's spelling of that decision — applies scope, membership and the
+// admin arm together. Taking two of the three would leave a third, weaker copy of
+// the access rule behind, which is the defect internal/server's R0 census
+// (project_visibility_gate_test.go) exists to make visible.
 func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest,
-	callerProjectRoles map[string]string, callerRole string) (*PredictConflictsResponse, *AihubError) {
+	callerProjectRoles map[string]string, callerRole string,
+	callerProjectScope *string) (*PredictConflictsResponse, *AihubError) {
 	// aihub#238: validate BEFORE any database access. This is the call pf-work
 	// uses as its pre-claim gate, and an unrecognized type used to fall through
 	// resourceToLock into `continue`, so the response was
@@ -286,6 +295,26 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	// Resolving once, here, is what keeps the two halves from disagreeing again.
 	effectiveProject := req.Project
 	canonicalWIID := ""
+	// resolvedWIID is canonicalWIID minus the cases where the reference did not
+	// resolve to a work item THIS CALLER MAY SEE, and it is what will_unlock is
+	// keyed on (aihub#665).
+	//
+	// 🔴 The two cannot be one variable, because they answer different questions.
+	// canonicalWIID feeds the SELF-EXCLUSION predicates, where the safe value for
+	// an unresolved reference is the caller's raw string: it matches no row, so
+	// the rule excludes nothing, which is what an anonymous predict has always
+	// got. will_unlock is the opposite — it MATCHES on
+	// wi_dependencies.blocking_wi_id, an FK into work_items(id) — so the caller's
+	// raw string is not inert there. A caller passing the canonical `wi_...` id of
+	// a work item in a project they cannot see got that work item's blocked
+	// dependents back, GOALS INCLUDED, while an id that does not exist got an
+	// empty list: one distinguishable bit, plus the contents. Measured 2026-09-14
+	// during review of this change.
+	//
+	// Keying on the visible resolution collapses the two: an invisible reference
+	// and an absent one both leave this empty, which is what an absent one already
+	// produced, so no legitimate caller sees a difference.
+	resolvedWIID := ""
 	if req.WorkItemID != nil && *req.WorkItemID != "" {
 		canonicalWIID = *req.WorkItemID
 		var id, p string
@@ -301,14 +330,64 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, dbErrCause(lookupErr, "failed to resolve the work item for predict")
 		}
-		if lookupErr == nil {
+		// 🔴 aihub#665: AN INVISIBLE WORK ITEM MUST RESOLVE EXACTLY LIKE AN ABSENT
+		// ONE, which is why the visibility test is folded into this condition
+		// rather than applied to the result below. The lookup is `id=$1 OR
+		// slug=$1` over EVERY project, work item slugs are `<project>#<seq>`
+		// counting from 1, and the authorization gate added just below answers a
+		// project the caller cannot see with ErrNotFound. Authorizing the
+		// RESOLVED project would therefore have answered 404 for a real
+		// `<project>#<n>` and 400/200 for a made-up one — one distinguishable bit
+		// per guess, which is the `<project>#<seq>` enumeration aihub#357,
+		// aihub#371 and aihub#376 were each filed for.
+		//
+		// Skipping the adoption instead leaves BOTH cases on the documented
+		// create-preview fallback: effectiveProject stays req.Project and
+		// canonicalWIID stays the caller's raw reference, byte for byte what
+		// pgx.ErrNoRows already produced. The caller learns nothing about
+		// whether the reference resolved.
+		if lookupErr == nil && canSeeProject(p, callerProjectRoles, callerRole, callerProjectScope) {
 			if p != "" {
 				effectiveProject = p
 			}
 			if id != "" {
 				canonicalWIID = id
+				resolvedWIID = id
 			}
 		}
+	}
+
+	// 🔴 aihub#665: AUTHORIZE THE PROJECT BEFORE ANY RULE READS IT. Nothing on
+	// the way in did — not the route (POST /v1/conflicts/predict carries no
+	// middleware beyond BearerAuth), not the handler (handlePredictConflicts
+	// only FORWARDS the caller's roles), and not this function, which took those
+	// roles solely to fold the ANSWER. So `project` was whatever the caller
+	// typed, and rule 1 read the lock table in that namespace.
+	//
+	// Measured 2026-09-14 through the real router against a migrated database,
+	// one authenticated non-member, one payload, one boolean apart:
+	//
+	//	GET /v1/work_items/<holder id>   404 notVisibleMessage (blind by every honest route)
+	//	predict dry_run=true             "[conflict in project P, no visibility]"   (rule 3, folded)
+	//	predict dry_run=false            actor_display + work_item_id + work_item_slug
+	//	                                 + attempt_id, verbatim                     (rule 1, unfolded)
+	//
+	// The two halves of this work item are one defect: the path that skipped the
+	// redaction was also the path with no authorization in front of it.
+	//
+	// ErrNotFound, never ErrForbidden: a 403 here would confirm the project
+	// exists to someone who may not see it, which is what aihub#377 removed
+	// repo-wide. handlePredictConflicts funnels this through hideNotFound so the
+	// wire carries notVisibleMessage — the SAME bytes a nonexistent project gets,
+	// because a caller holds no role in one of those either.
+	//
+	// Scoped to effectiveProject != "": a payload of only repo/service/external_ref
+	// entries needs no project (aihub#662's refusal names exactly that carve-out),
+	// and rules 2, 4, 5 and 6 match declarations across every project by design —
+	// the H7 fold below, not this gate, is what bounds what they may say.
+	if effectiveProject != "" &&
+		!canSeeProject(effectiveProject, callerProjectRoles, callerRole, callerProjectScope) {
+		return nil, NewErr(ErrNotFound, "no such project, or the caller may not see it")
 	}
 
 	// aihub#662: refuse a file_scope question nothing could have answered.
@@ -403,28 +482,31 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					WIID:         wiID,
 				})
 				result.Severity = SeverityHardBlock
-				// 🔴 THIS RETURN JUMPS OVER THE H7 VISIBILITY FOLD AT THE BOTTOM,
-				// and that is a KNOWN DEFECT filed separately rather than repaired
-				// here (aihub#662 measured it; see that work item for the follow-up
-				// it raised). Measured on production 2026-09-14: one credential,
-				// one payload, two answers — dry_run=true came back
-				// "[conflict in project aihub, no visibility]" while dry_run unset
-				// returned the holder's actor_display, work_item_slug, work_item_id
-				// and attempt_id in full, because rule 3's predictions pass through
-				// the fold and rule 1's do not. `req.Project` is not authorized
-				// against the caller anywhere, so this discloses across a project
-				// boundary.
+				// 🔴 `goto`, AND IT IS THE POINT OF aihub#665. This used to be
+				// `return result, nil`, which jumped over the H7 visibility fold at
+				// the bottom: rule 3's predictions were redacted for a caller who
+				// cannot see the holder's project and rule 1's were not, on one
+				// credential and one payload with only dry_run deciding which the
+				// caller saw. aihub#662 measured that and filed it rather than
+				// repairing it inline.
 				//
-				// It is left standing because removing it costs one of: a ~400-line
-				// re-indent of rules 2-6 under an `if !hardBlocked`, a `goto`, or
-				// lifting the fold into a helper — which moves its QueryRow out of
-				// this function and out of the reach of three AST gates built
-				// around this name (TestPredictConflictsAnswersEveryQueryRowError's
-				// site count, TestPredictConflictsHasNoLogAndContinuePath, and
-				// slugres' siteExemptions entry). That is a change worth reviewing
-				// on its own evidence, and it wants a database to verify, which
-				// aihub#662 did not have.
-				return result, nil
+				// The jump preserves SUPPRESSION exactly — rules 2-6 and
+				// will_unlock are skipped on the first hard hit, which
+				// predict_rule_shape_test.go pins as a property of the whole
+				// ladder and the contract card publishes — while making the fold
+				// the single exit every prediction leaves through. The two
+				// alternatives aihub#662 costed both had a price this does not: a
+				// ~400-line re-indent of rules 2-6 under an `if !hardBlocked`
+				// buries the fix in whitespace, and lifting the fold into a helper
+				// moves its QueryRow out of this function and out of reach of
+				// three gates keyed on this name — including slugres'
+				// siteExemptions entry for `p.WIID`, which no work item holding
+				// only these files may edit.
+				//
+				// TestPredictConflictsFoldsEveryPredictionItReturns holds the
+				// invariant this line satisfies: no `return result` may reach a
+				// caller without passing the fold.
+				goto fold
 			}
 		}
 	}
@@ -600,6 +682,25 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 				ResourceKey:  repoName,
 				ActorDisplay: actorDisplay,
 				WISlug:       wiSlug,
+				// 🔴 WIID IS WHAT MAKES THIS PREDICTION FOLDABLE (aihub#665).
+				// `wi.id` was selected and scanned here from the day the rule was
+				// written and then dropped on the floor, and the H7 fold's outer
+				// guard is `if p.WIID != ""` — so rules 4 and 5 were the two that
+				// walked through the redaction untouched. Measured 2026-09-14 on
+				// the pre-fix tree, one caller with NO role in the holder's
+				// project, one repo-only payload (so no project is resolved and
+				// the authorization gate above cannot fire): rule 2 answered
+				// "[conflict in project P, no visibility]" while rules 4 and 5
+				// answered with actor_display and work_item_slug — the same
+				// holder, one response, redacted by one rule and published by
+				// two. work_item_slug is `<project>#<seq>`, which is the project
+				// name and the sequence number together.
+				//
+				// Publishing the id is additive and matches rules 2 and 6, which
+				// have always carried it; the every_rule_sets_the_fold_anchor arm of
+				// TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt holds
+				// every rule to it, so a seventh cannot be written without one.
+				WIID: wiID,
 				// aihub#416: the same age rules 2 and 6 carry. Rule 4 is a repo
 				// prediction too, and a caller that got an age from rule 2 and
 				// none from rule 4 for one repo would read the gap as "that one
@@ -648,6 +749,10 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 				ResourceKey:  res.URI,
 				ActorDisplay: actorDisplay,
 				WISlug:       wiSlug,
+				// The fold anchor, same as rule 4 above (aihub#665): scanned here
+				// since the rule was written, never published, and without it the
+				// H7 fold below skips this prediction entirely.
+				WIID: wiID,
 			})
 		}
 		rows.Close()
@@ -727,8 +832,11 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	}
 
 	// Compute will_unlock: work items that would be unblocked if this wi completes.
-	// Keyed on canonicalWIID, never on the caller's raw reference (aihub#357).
-	if canonicalWIID != "" {
+	// Keyed on resolvedWIID — the canonical id of a work item the caller may SEE —
+	// never on the caller's raw reference (aihub#357 for the canonicalisation,
+	// aihub#665 for the visibility half; resolvedWIID's declaration says why this
+	// is not the same variable the self-exclusion predicates bind).
+	if resolvedWIID != "" {
 		rows, err := pool.Query(ctx, `
 			SELECT DISTINCT wi.id, wi.slug, wi.goal
 			FROM wi_dependencies dep
@@ -744,7 +852,7 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			      AND dep2.blocking_wi_id != $1
 			      AND blocker.status NOT IN ('wrapped','cancelled','failed')
 			  )`,
-			canonicalWIID,
+			resolvedWIID,
 		)
 		if err != nil {
 			// aihub#522: `"will_unlock": []` is also what "this unblocks nothing"
@@ -769,8 +877,25 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	}
 
 	// H7: cross-project folding — redact actor_display/work_item_slug for projects caller can't view
+	//
+	// 🔴 THE LABEL IS THE ONLY EXIT (aihub#665). Rule 1's hard_block jumps here
+	// instead of returning, so every prediction this function publishes has been
+	// through the redaction below. Anything added later that wants to answer
+	// early must `goto fold` too — TestPredictConflictsFoldsEveryPredictionItReturns
+	// fails on a `return result` that does not.
+fold:
 	foldedPredictions := make([]ConflictPrediction, 0, len(result.Predictions))
 	for _, p := range result.Predictions {
+		// 🔴 `p.WIID != ""` IS THE ANCHOR, AND A RULE THAT DOES NOT SET IT IS
+		// INVISIBLE HERE (aihub#665). Rules 4 and 5 selected and scanned `wi.id`
+		// and then dropped it, so their predictions walked through this loop
+		// untouched and published actor_display and `<project>#<seq>` to a caller
+		// with no role in that project — while rule 2, one field richer, was
+		// redacted in the same response. Both now set WIID, and
+		// the every_rule_sets_the_fold_anchor arm of
+		// TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt holds every
+		// rule to it, because the next rule will be written by someone reading
+		// rule 5 rather than this comment.
 		if p.WIID != "" {
 			// Look up the project of the conflicting wi
 			var wiProject string
@@ -785,7 +910,8 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, dbErrCause(err, "failed to resolve a prediction's project for visibility folding")
 			}
-			if wiProject != "" && !canSeeProject(wiProject, callerProjectRoles, callerRole) {
+			if wiProject != "" &&
+				!canSeeProject(wiProject, callerProjectRoles, callerRole, callerProjectScope) {
 				// No access — redact identifying info
 				p.ActorDisplay = ""
 				p.WIID = ""
@@ -816,13 +942,34 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 // LOOSER spelling on purpose. ListDependencies compares through
 // `RoleLevel[...] >= RoleLevel["viewer"]` because "an unrecognised value is
 // reachable" (aihub#460), whereas `!= ""` admits any non-empty role string.
-// That difference predates aihub#662 and is NOT changed here: this work item
-// added the admin arm, and switching the membership test in the same breath
-// would be a second, unmeasured behaviour change to a visibility control.
-// FnForceTakeover is deliberately not cited as a precedent: its predicate is
-// `projectRole == "maintainer" || callerRole == "admin"`, which is stricter and
-// answers a different question.
-func canSeeProject(project string, callerProjectRoles map[string]string, callerRole string) bool {
+// That difference predates aihub#662, which added the admin arm and left it, and
+// aihub#665, which added the scope arm and left it for the same reason: it is the
+// only one of the three changes that could newly REFUSE a caller who is a member
+// today, and neither work item measured that. TestCanSeeProject_AdminsAreNotStrangers
+// pins the looser reading with an unrecognised role rather than leaving it to
+// this paragraph. FnForceTakeover is deliberately not cited as a precedent: its
+// predicate is `projectRole == "maintainer" || callerRole == "admin"`, which is
+// stricter and answers a different question.
+//
+// 🔴 THE SCOPE ARM IS FIRST AND IT OUTRANKS THE ADMIN ARM (aihub#665), copied in
+// that order from hasProjectAccess (routes_memory.go) and checkProjectAccess
+// (middleware.go), which are the two package-server spellings of this same
+// decision. project_scope is a confinement written onto an API KEY: a key issued
+// for one project must not read another through the credential of a user who
+// happens to be a member of both, and an admin's key is confined by it too —
+// that is the whole reason a scoped admin key can be handed out at all. nil means
+// unscoped and changes nothing.
+//
+// This function became a DECIDER at aihub#665, not only a folder: PredictConflicts
+// now refuses a project the predicate rejects. That is why the arm was added here
+// rather than at the new call site — a fold that redacted on one rule and a gate
+// that refused on another rule would be two answers to "may this caller see
+// project P", and they would drift.
+func canSeeProject(project string, callerProjectRoles map[string]string, callerRole string,
+	callerProjectScope *string) bool {
+	if callerProjectScope != nil && *callerProjectScope != project {
+		return false
+	}
 	return callerRole == "admin" || callerProjectRoles[project] != ""
 }
 

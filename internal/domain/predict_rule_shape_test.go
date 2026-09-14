@@ -40,11 +40,22 @@ import (
 // predictRuleSite is one `ConflictPrediction{…}` literal in PredictConflicts,
 // with the three structural facts the card's paragraphs are about.
 type predictRuleSite struct {
-	rule       int
-	severity   string // the identifier named in the Severity field
-	pos        token.Pos
-	inDryRun   bool // inside the `if !req.DryRun` guard
-	loopReturn bool // the rule's own `for … range resources` loop contains a return
+	rule     int
+	severity string // the identifier named in the Severity field
+	pos      token.Pos
+	inDryRun bool // inside the `if !req.DryRun` guard
+	// loopSuppresses reports whether the rule's own `for … range resources` loop
+	// STOPS THE LADDER — publishing an answer and skipping every rule after it.
+	// Two spellings count, and aihub#665 is why there are two: `return result,
+	// nil` (rule 1 until then) and `goto fold` (rule 1 since). The jump replaced
+	// the return because the return also jumped over the H7 visibility fold, so
+	// a hard_block reached the caller unredacted while a soft_block for the same
+	// path did not. What the card promises is the SUPPRESSION, not the keyword.
+	loopSuppresses bool
+	// setsFoldAnchor reports whether the literal sets WIID. The H7 fold's outer
+	// guard is `if p.WIID != ""`, so a rule that omits the field is not redacted
+	// — it is skipped.
+	setsFoldAnchor bool
 }
 
 // predictRuleSeverities is what each rule may answer, and it is the card's
@@ -166,15 +177,49 @@ func TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt(t *testing.T) {
 	t.Run("suppression", func(t *testing.T) {
 		for _, s := range sites {
 			switch {
-			case s.rule == 1 && !s.loopReturn:
-				t.Errorf("rule 1's loop contains no return. The card says it \"returns on the first hit " +
-					"and suppresses every rule after it\", and that suppression is why the two halves of " +
-					"the self-report are never both visible — without it a caller sees rule 1 AND rule 3 " +
-					"for one path, which is the two-rules-one-input contradiction aihub#342 removed.")
-			case s.rule != 1 && s.loopReturn:
+			case s.rule == 1 && !s.loopSuppresses:
+				t.Errorf("rule 1's loop neither returns nor jumps to `fold:`. The card says it " +
+					"\"stops on the first hit and suppresses every rule after it\", and that suppression " +
+					"is why the two halves of the self-report are never both visible — without it a " +
+					"caller sees rule 1 AND rule 3 for one path, which is the two-rules-one-input " +
+					"contradiction aihub#342 removed.\n" +
+					"    ⚠️ It must not go back to `return result, nil` either: that is the aihub#665 " +
+					"defect, where the early return also skipped the H7 visibility fold and handed a " +
+					"non-member the holder's identity. `goto fold` keeps the suppression AND the " +
+					"redaction, and TestPredictConflictsFoldsEveryPredictionItReturns holds the second " +
+					"half of that.")
+			case s.rule != 1 && s.loopSuppresses:
 				t.Errorf("rule %d's loop returns early as well. Only rule 1 may: every other rule "+
 					"reports an advisory overlap, and a rule that stops the ladder hides every rule "+
 					"after it from a caller the card promises will see them.", s.rule)
+			}
+		}
+	})
+
+	// 🔴 EVERY RULE MUST SET THE FIELD THE REDACTION KEYS ON (aihub#665).
+	//
+	// The H7 fold at the bottom of PredictConflicts opens with `if p.WIID != ""`
+	// — it needs the work item id to look up the holder's project — so a
+	// prediction that leaves WIID empty is not redacted, it is SKIPPED. Rules 4
+	// and 5 selected `wi.id`, scanned it into a variable, and never put it in the
+	// literal, for as long as they had existed. Measured 2026-09-14: one caller
+	// with no role in the holder's project, one repo/external_ref payload, one
+	// response carrying rule 2 as "[conflict in project P, no visibility]" and
+	// rules 4 and 5 with actor_display and `<project>#<seq>` in full.
+	//
+	// This is an arm rather than a comment because the failure is INVISIBLE at the
+	// fold: nothing there can tell a prediction that was checked and cleared from
+	// one it never saw. And it is on the literal rather than on the response,
+	// because the next rule will be written by someone copying rule 5.
+	t.Run("every_rule_sets_the_fold_anchor", func(t *testing.T) {
+		for _, s := range sites {
+			if !s.setsFoldAnchor {
+				t.Errorf("rule %d builds a ConflictPrediction with no WIID field. The H7 "+
+					"visibility fold guards on `p.WIID != \"\"`, so this rule's predictions "+
+					"skip the redaction entirely and publish actor_display and work_item_slug "+
+					"— which is `<project>#<seq>` — to a caller with no role in that project. "+
+					"Scan wi.id in the rule's query (rules 2, 4, 5 and 6 already select it) "+
+					"and set WIID on the literal.", s.rule)
 			}
 		}
 	})
@@ -288,6 +333,8 @@ func predictRuleSites(t *testing.T, fn *ast.FuncDecl, dryRunGuards []*ast.BlockS
 				site.rule = intLiteral(t, kv.Value)
 			case "Severity":
 				site.severity = identName(kv.Value)
+			case "WIID":
+				site.setsFoldAnchor = true
 			}
 		}
 		if site.rule < 0 {
@@ -302,15 +349,16 @@ func predictRuleSites(t *testing.T, fn *ast.FuncDecl, dryRunGuards []*ast.BlockS
 				break
 			}
 		}
-		site.loopReturn = innermostLoopReturns(loops, site.pos)
+		site.loopSuppresses = innermostLoopSuppresses(loops, site.pos)
 		sites = append(sites, site)
 		return true
 	})
 	return sites
 }
 
-// innermostLoopReturns reports whether the smallest `for … range` loop
-// containing pos has a return in it that PUBLISHES AN ANSWER.
+// innermostLoopSuppresses reports whether the smallest `for … range` loop
+// containing pos STOPS THE LADDER — either by a return that PUBLISHES AN ANSWER
+// or by the `goto fold` that replaced it at aihub#665.
 //
 // aihub#522 narrowed "a return" to "a suppressing return". Every rule's loop
 // now propagates its query errors (`return nil, dbErrCause(…)`), and an error
@@ -320,8 +368,13 @@ func predictRuleSites(t *testing.T, fn *ast.FuncDecl, dryRunGuards []*ast.BlockS
 // so what this counts is a return whose first value is anything but the `nil`
 // identifier: `return result, nil` is suppression, `return nil, aerr` is not.
 // The quiet direction is covered — an early `return result, nil` smuggled into
-// rule 5 still reddens the suppression arm, error propagation or no.
-func innermostLoopReturns(loops []*ast.RangeStmt, pos token.Pos) bool {
+// rule 5 still reddens the suppression arm, error propagation or no, and so does
+// a `goto fold` smuggled into one.
+//
+// 🔴 The goto is counted only when it NAMES `fold`. A bare `break` is not
+// suppression (it leaves that rule's loop and the ladder continues), and a jump
+// to some other label would be a second exit this walk knows nothing about.
+func innermostLoopSuppresses(loops []*ast.RangeStmt, pos token.Pos) bool {
 	var best *ast.RangeStmt
 	for _, l := range loops {
 		if l.Pos() >= pos || pos >= l.End() {
@@ -334,8 +387,14 @@ func innermostLoopReturns(loops []*ast.RangeStmt, pos token.Pos) bool {
 	if best == nil {
 		return false
 	}
-	returns := false
+	suppresses := false
 	ast.Inspect(best.Body, func(n ast.Node) bool {
+		if br, ok := n.(*ast.BranchStmt); ok {
+			if br.Tok == token.GOTO && br.Label != nil && br.Label.Name == "fold" {
+				suppresses = true
+			}
+			return !suppresses
+		}
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok {
 			return true
@@ -347,10 +406,10 @@ func innermostLoopReturns(loops []*ast.RangeStmt, pos token.Pos) bool {
 				return true
 			}
 		}
-		returns = true
-		return !returns
+		suppresses = true
+		return !suppresses
 	})
-	return returns
+	return suppresses
 }
 
 func intLiteral(t *testing.T, e ast.Expr) int {

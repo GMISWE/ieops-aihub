@@ -55,6 +55,63 @@ It cannot stay a soft answer because `file_scope` keys are
 `hard_block` with a project, and `TestPredictConflicts_FileScopeProjectScoped`
 is the arm that pins that namespacing.
 
+🔴 **A `project` the caller may not see is a 404 rather than an answer**
+(`aihub#665`), which
+`internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`) drives end to end through the
+real router. This tool used to run its rules in whatever project the caller
+named: nothing on the way in authorized `project` — not the route, not the
+handler, not the domain function, which took the caller's roles only to redact
+the ANSWER — and `work_item_id` resolved across every project. Measured
+2026-09-14, one authenticated caller holding no role in the holder's project was
+handed that holder's `actor_display`, `work_item_id`, `work_item_slug` and
+`attempt_id` by rule 1 under `dry_run: false`, while the same credential got the
+shared 404 from `GET /v1/work_items/<id>`. That refusal is now the same shared
+404 and not a 403, so it is indistinguishable from what a project that does not
+exist returns, and an invisible `work_item_id` resolves exactly like an absent
+one — both arms of
+`internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`), which is also where the allow
+arms live: a member, an admin, and a key inside its own `project_scope` are what
+separate this from refusing everyone, and this call is `pf-work`'s pre-claim
+gate. The confinement half is deliberate: the check applies `project_scope`,
+membership and the admin arm together, the way `hasProjectAccess` does, and
+`internal/domain/conflicts_predict_test.go`
+(`TestCanSeeProject_AdminsAreNotStrangers`) tables each clause with its control.
+
+⚠️ **Every prediction now carries `work_item_id`, and every prediction is now
+redacted across a project boundary** (`aihub#665`) — the per-rule half held by
+`internal/domain/predict_rule_shape_test.go`
+(`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`), which fails any
+rule that omits the field, and the behavioural half by
+`internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`). Rules 4 and 5 selected `wi.id`,
+scanned it and dropped it, and the H7 fold's guard is "this prediction names a
+work item" — so those two walked through the redaction untouched and published
+`actor_display` and `work_item_slug` (which is `<project>#<seq>`) to a caller with
+no role in that project, in the same response where rule 2 was folded, which is
+what `internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`) drives with the three
+declaration rules together. Separately, `will_unlock` is keyed on a reference
+that resolved to a work item the caller may SEE, so naming the canonical id of
+one in another project no longer returns its blocked dependents' goals —
+`internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`) again, `will_unlock` arm, whose
+control is that a member still receives it.
+
+⚠️ **Rule 1's `hard_block` carries the same redaction every other rule's
+predictions carry** (`aihub#665`), held structurally by
+`internal/domain/conflicts_predict_test.go`
+(`TestPredictConflictsFoldsEveryPredictionItReturns`) because the population is
+"every early exit this function grows" rather than the one that exists today. It
+still stops on the first hit and still suppresses every rule after it —
+`internal/domain/predict_rule_shape_test.go`
+(`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) pins that as a
+property of the ladder — but it now leaves through the H7 fold instead of around
+it, so a holder in a project the (authorized) caller cannot see comes back as
+`[conflict in project X, no visibility]` on the hard rule exactly as it already
+did on rule 3.
+
 ⚠️ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 still shows the
 create-preview call without `project`**, so that line needs updating on the next
 release, since plugin text does not ride an ordinary PR; its own prose describes
@@ -85,7 +142,7 @@ followed with `aihub#564`, which
 own lock stops being reported, and ANOTHER attempt's lock still answers
 `hard_block` (`soft_block` from rule 3 under `dry_run`).
 The lock half was deliberately the later, sharper half: rule 1 answers "would
-taking this lock collide", it `return`s on the first hit and suppresses every rule
+taking this lock collide", it stops on the first hit and suppresses every rule
 after it — pinned as a property of the whole ladder by
 `internal/domain/predict_rule_shape_test.go`
 (`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) — and it decides
@@ -282,7 +339,7 @@ worth recording.
   reading `Resource lock is already held by another attempt` whose
   `work_item_slug` **was the caller**, and with `dry_run=true` — rule 1 skipped —
   a rule-3 `soft_block` / `File path overlaps with another running attempt`,
-  again naming the caller; never both visible, because rule 1 returns on its
+  again naming the caller; never both visible, because rule 1 stops on its
   first hit. `aihub#510` (2026-09-09) left it alone deliberately, because
   rule 1 decides the value `pf-work`'s pre-claim gate branches on — the
   suppression property `internal/domain/predict_rule_shape_test.go`

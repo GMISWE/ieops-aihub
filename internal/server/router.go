@@ -1151,12 +1151,25 @@ func handlePredictConflicts(pool *pgxpool.Pool) echo.HandlerFunc {
 		// handler here does it (aihub#227): an admin's ProjectRoles map is empty,
 		// so the visibility fold inside PredictConflicts read every admin as
 		// having no access and redacted the holder from the project's own owner
-		// (aihub#662). It is read from the authenticated user, never from the
-		// request body — a caller-supplied role would be a redaction the caller
-		// can switch off.
-		resp, aihubErr := domain.PredictConflicts(ctx, pool, &req, u.ProjectRoles, u.Role)
+		// (aihub#662). u.ProjectScope joins them at aihub#665, where the domain
+		// function stopped merely folding the answer and started REFUSING a
+		// project the caller may not see: scope is the third clause of the one
+		// access rule (hasProjectAccess), and forwarding two of three would ship a
+		// weaker copy of it. All three are read from the authenticated user, never
+		// from the request body — a caller-supplied role or scope would be a
+		// visibility decision the caller can switch off.
+		resp, aihubErr := domain.PredictConflicts(ctx, pool, &req,
+			u.ProjectRoles, u.Role, u.ProjectScope)
 		if aihubErr != nil {
-			return writeError(c, aihubErr)
+			// hideNotFound, not the raw error (aihub#665/aihub#377): the domain
+			// refusal above is a visibility verdict, and it must reach the wire as
+			// notVisibleMessage — the same bytes a project that does not exist
+			// gets, since the caller holds no role in one of those either. The
+			// pass-through half matters just as much: every other error this
+			// function returns is a 400 about the payload or a 500 about the
+			// database, and collapsing those to 404 would answer "not found"
+			// during an outage.
+			return writeError(c, hideNotFound(aihubErr))
 		}
 		return c.JSON(http.StatusOK, resp)
 	}

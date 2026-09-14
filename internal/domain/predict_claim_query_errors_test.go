@@ -563,8 +563,14 @@ func TestPredictConflictsSurfacesQueryFailure(t *testing.T) {
 
 	wiRef := "wi_nonexistent"
 	cases := []struct {
-		name    string
-		req     *PredictConflictsRequest
+		name string
+		req  *PredictConflictsRequest
+		// roles is the caller's membership map. aihub#665 put an authorization
+		// gate on the resolved project BEFORE the rule loop, so a case that names
+		// a project must also name a caller who may see it — otherwise the refusal
+		// arrives first and this arm measures that instead of the site's own
+		// guard, which is how it failed when the gate landed.
+		roles   map[string]string
 		wantMsg string // pins WHICH site answered, so restoring one swallow goes red
 	}{{
 		name: "rule 2's Query (the census shape)",
@@ -578,6 +584,7 @@ func TestPredictConflictsSurfacesQueryFailure(t *testing.T) {
 			Project:           "p",
 			DeclaredResources: []byte(`[{"type":"path","uri":"file:a.go","intent":"write"}]`),
 		},
+		roles:   map[string]string{"p": "writer"},
 		wantMsg: "rule 1",
 	}, {
 		name: "the id/project resolution QueryRow",
@@ -589,7 +596,7 @@ func TestPredictConflictsSurfacesQueryFailure(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, aerr := PredictConflicts(ctx, pool, tc.req, nil, "")
+			result, aerr := PredictConflicts(ctx, pool, tc.req, tc.roles, "", nil)
 			if aerr == nil {
 				t.Fatalf("PredictConflicts answered %+v with a nil error against an unreachable pool — "+
 					"the aihub#238 fake all-clear aihub#522 removed", result)

@@ -54,6 +54,19 @@ predicate; `internal/mcp/ready_queue_published_claims_test.go`
 still gone, requiring the published schema to be exactly these two parameters and a
 call passing the withdrawn name to put nothing on the wire for it.
 
+⚠️ **That "both directions" is the 2026-09-07 reading, and only one direction
+survives** (`aihub#666`): the self-report half stopped reporting the caller back
+to itself with `aihub#510` for the four declaration rules, held by
+`internal/domain/delocking_db_test.go`
+(`TestDeLockingPredictReportsAdvisoryEntries`), and with `aihub#564` for the two
+lock-table rules, held in both directions by
+`internal/domain/predict_lock_self_exclusion_db_test.go`
+(`TestPredictLockRulesLeaveTheCallerOut`). The read-intent false negative is the
+half that still stands, and it is what keeps this ruling standing: one surviving
+untrustworthy direction is still inherited by anything built on this predicate,
+so `aihub#387` holds on the narrower ground rather than on the retired one.
+<!-- prose-only: because=history -->
+
 ## hop 2-3 — what leaves this process, and what binds it
 
 `internal/mcp/tools_lifecycle.go` (`registerLifecycleTools`) renders both into a

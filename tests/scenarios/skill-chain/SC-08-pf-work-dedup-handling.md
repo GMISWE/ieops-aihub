@@ -98,7 +98,13 @@ USER_RESPONSE: "B" (or "claim existing" / "claim EXISTING_WI_ID")
 
 EXPECTED SKILL BEHAVIOR (transition to Mode B):
   1. Conflict preview:
-     pf_predict_conflicts(wi_id=EXISTING_WI_ID, dry_run=true)
+     pf_predict_conflicts(work_item_id=EXISTING_WI_ID,
+                          declared_resources=<the existing wi's declarations>,
+                          dry_run=true)
+     # aihub#666: the parameter is `work_item_id`. `wi_id` is not published, so it is
+     # dropped at the server's bind step and the call degrades to the anonymous shape
+     # aihub#662 now refuses 400. `declared_resources` is required and is not filled in
+     # from the wi row.
      Show impact: locks to acquire, downstream wi's that will unblock.
 
   2. Claim existing wi:
@@ -137,7 +143,8 @@ EXPECTED SKILL BEHAVIOR (transition to Mode B):
      - Or `polyforge-coding:prepare_context` to begin the first step
 
 ASSERT MCP CALLS (Mode B claim):
-  - pf_predict_conflicts(wi_id=EXISTING_WI_ID, dry_run=true) called
+  - pf_predict_conflicts(work_item_id=EXISTING_WI_ID, declared_resources=[...],
+                         dry_run=true) called
   - pf_claim_work_item(work_item_id=EXISTING_WI_ID, mode="fresh") called
   - pf_create_work_item NOT called again (existing wi claimed, not new one)
 

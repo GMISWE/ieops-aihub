@@ -158,7 +158,7 @@ event itself was NOT withdrawn: `pf_emit_event` still accepts
 
 | tool | purpose |
 |---|---|
-| `pf_predict_conflicts` | Predict resource-lock conflicts for a set of declared resources; also returns `will_unlock`. |
+| `pf_predict_conflicts` | Predict resource-lock conflicts for a set of declared resources; also returns `will_unlock`. **It can now refuse, which it never used to (aihub#662, aihub#665):** a payload naming a `path`/`document`/`section` is **400** unless a project can be resolved — either from `project` or from a `work_item_id` that resolves to a work item the caller may see — because `file_scope` keys are `<project>:<repo>:<path>` and an empty project builds every probe key as `:<repo>:<path>`, matching no lock and returning an empty prediction list indistinguishable from a real all-clear, on the hard rule whose job is to block. A resolved project the caller holds no role in is **404**, the same bytes a nonexistent project gets, never 403. A payload of only `repo`/`service`/`external_ref` entries needs neither field and is unaffected. |
 
 ## Coding / git (6) - `internal/mcp/tools_coding.go`
 

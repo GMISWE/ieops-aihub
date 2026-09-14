@@ -697,7 +697,15 @@ func runLiveKeyWalk(t *testing.T, w *liveKeyWalk) {
 		"work_item_id": wiID, "idempotency_key": fmt.Sprintf("livekeys-%d", stamp),
 	})
 	w.drive(t, "pf_acquire_locks", map[string]any{"work_item_id": wiID})
+	// `project` is not decoration here (aihub#662): a payload naming a path with
+	// no resolvable project is a 400, because file_scope probe keys are
+	// "<project>:<repo>:<path>" and an empty project builds ":<repo>:<path>",
+	// which matches no lock — so the answer would be an empty prediction list
+	// indistinguishable from a real all-clear. This walk drove it without one and
+	// was the third caller in the tree with that shape; it is what caught the
+	// other two.
 	w.drive(t, "pf_predict_conflicts", map[string]any{
+		"project": s.project,
 		"declared_resources": []any{
 			map[string]any{"type": "path", "uri": "file:internal/mcp/card_response_keys_live_e2e_db_test.go"},
 		},

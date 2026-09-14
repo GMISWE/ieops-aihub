@@ -4,7 +4,7 @@
 {
   "tool": "pf_predict_conflicts",
   "description_sha256": "2059fac5e349d0f53495c365092b475b9428bd5afafd5a4f4ef0919afa039caf",
-  "input_schema_sha256": "d297f35ccc472ccebad60dbbd21a6599bf358f6e4f8726a31d71654b7ac97f31",
+  "input_schema_sha256": "6326201ffe74c57b32d2019b87ea1feefba7ca7561867c3b5a02a4fe1f79da14",
   "params": {
     "declared_resources": {
       "type": "array",
@@ -40,8 +40,27 @@ Four parameters, one required.
 |---|---|---|---|
 | `declared_resources` | array | yes | `{type, uri, intent}` + optional `repo` |
 | `work_item_id` | string | no | id or slug (`TestDeLockingPredictReportsAdvisoryEntries` drives the slug spelling); "the only way this call learns which running work item is YOU" |
-| `project` | string | no | namespaces `file_scope` checks (`TestResourceToLock_FileScopeNamespacedByProject`); optional when `work_item_id` is set |
+| `project` | string | no* | namespaces `file_scope` checks (`TestResourceToLock_FileScopeNamespacedByProject`); *REQUIRED once the payload names a path/document/section, unless `work_item_id` resolves one (aihub#662) |
 | `dry_run` | boolean | no | "do not mutate state" |
+
+🔴 **An unresolvable `project` is now a 400 rather than an empty answer**
+(aihub#662), and `internal/domain/conflicts_predict_test.go`
+(`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty`) holds all
+three halves of it: the refusal, plus two positive controls proving it is the
+MISSING project that causes it and that a repo-only payload still needs none.
+It cannot stay a soft answer because `file_scope` keys are
+`<project>:<repo>:<path>`, so an empty project builds every probe key as
+`:<repo>:<path>` and matches nothing, returning
+`{"predictions":[],"severity":"info"}` on the same input that answers
+`hard_block` with a project, and `TestPredictConflicts_FileScopeProjectScoped`
+is the arm that pins that namespacing.
+
+⚠️ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 still shows the
+create-preview call without `project`**, so that line needs updating on the next
+release, since plugin text does not ride an ordinary PR; its own prose describes
+a repo/service-shaped payload, which
+`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty` shows is
+unaffected.
 
 🔴 **This tool was measured untrustworthy in both directions; the self-report
 direction is now fixed and the read-intent direction still stands.** It used to

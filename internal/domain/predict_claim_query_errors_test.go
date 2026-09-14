@@ -589,7 +589,7 @@ func TestPredictConflictsSurfacesQueryFailure(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, aerr := PredictConflicts(ctx, pool, tc.req, nil)
+			result, aerr := PredictConflicts(ctx, pool, tc.req, nil, "")
 			if aerr == nil {
 				t.Fatalf("PredictConflicts answered %+v with a nil error against an unreachable pool — "+
 					"the aihub#238 fake all-clear aihub#522 removed", result)

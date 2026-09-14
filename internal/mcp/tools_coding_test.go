@@ -353,12 +353,14 @@ func TestCommitLockGateReport_TellsTheNotCommittedFactsApart(t *testing.T) {
 				"and it is the one this row exists to catch",
 		},
 		{
-			name:      "never invoked: nothing was staged",
+			name:      "never invoked: the commit writes nothing",
 			gate:      &commitLockGate{},
 			want:      "not_run",
-			wantStage: "no staged changes",
-			why: "the commit stage COMPLETED and the index matched HEAD, so runCommitGate " +
-				"short-circuited and there was genuinely no change set to protect",
+			wantStage: "writes nothing a lock could protect",
+			why: "the commit stage COMPLETED and runCommitGate short-circuited, so there was " +
+				"genuinely no written set to protect. Since aihub#662 that has TWO causes — an " +
+				"index matching HEAD, and a merge whose every path came unchanged from one parent " +
+				"— and the gate, never having been called, cannot tell which",
 		},
 		{
 			name:      "invoked, refused by another attempt's lock",
@@ -406,12 +408,15 @@ func TestCommitLockGateReport_TellsTheNotCommittedFactsApart(t *testing.T) {
 			if !strings.Contains(detail, tc.wantStage) {
 				t.Errorf("lock_gate_detail = %q, want it to say %q — %s", detail, tc.wantStage, tc.why)
 			}
-			// "no staged changes" is a claim about the index, and it is only
-			// knowable on the one row where the commit stage got far enough to
-			// look. Anywhere else it contradicts the response it sits in.
-			if tc.want != "not_run" && strings.Contains(detail, "no staged changes") {
-				t.Errorf("lock_gate_detail = %q asserts an empty index, but this row either had "+
-					"%d file(s) staged or never found out — %s", detail, tc.gate.checked, tc.why)
+			// "this commit writes nothing" is a claim about the pending commit,
+			// and it is only knowable on the one row where the commit stage got
+			// far enough to look. Anywhere else it contradicts the response it
+			// sits in. (Before aihub#662 the claim was the narrower "no staged
+			// changes"; the guard moved with it, because a guard left pointing at
+			// a sentence nothing says any more is a guard that passes for free.)
+			if tc.want != "not_run" && strings.Contains(detail, "writes nothing") {
+				t.Errorf("lock_gate_detail = %q asserts the commit writes nothing, but this row "+
+					"either had %d file(s) checked or never found out — %s", detail, tc.gate.checked, tc.why)
 			}
 			// Six facts, six DETAILS. Names may repeat where the caller's next
 			// move is the same; the sentence they read must not.

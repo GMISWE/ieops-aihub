@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -159,11 +161,18 @@ func GitStagedPaths(ctx context.Context, worktreePath string) ([]string, error) 
 		"rev-parse", "--verify", "--quiet", "HEAD").Run(); err != nil {
 		base = emptyTreeOID
 	}
+	return gitStagedPathsAgainst(ctx, worktreePath, base)
+}
 
+// gitStagedPathsAgainst is GitStagedPaths' engine with the comparison side made
+// a parameter, so the merge narrowing below can ask the same question of the
+// OTHER parent without a second copy of the flags. Every argument of
+// GitStagedPaths' comment applies verbatim to each call; only the rev changes.
+func gitStagedPathsAgainst(ctx context.Context, worktreePath, rev string) ([]string, error) {
 	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
-		"diff", "--cached", "--name-only", "--no-renames", "-z", base).Output()
+		"diff", "--cached", "--name-only", "--no-renames", "-z", rev).Output()
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached --name-only: %w", err)
+		return nil, fmt.Errorf("git diff --cached --name-only %s: %w", rev, err)
 	}
 
 	seen := make(map[string]bool)
@@ -179,34 +188,212 @@ func GitStagedPaths(ctx context.Context, worktreePath string) ([]string, error) 
 	return paths, nil
 }
 
-// CommitGate is consulted after staging and before committing, with the paths
-// the pending commit would contain (GitStagedPaths). Returning an error aborts
-// the commit; the index is left staged.
+// GitMergeParents returns every commit an in-progress merge will record as a
+// second-or-later parent — all of MERGE_HEAD — and nil when no merge is running.
+// A nil result with a nil error is the ordinary answer, not a failure.
+//
+// 🔴 IT READS THE FILE INSTEAD OF ASKING rev-parse, and that is a measured
+// requirement rather than a preference. Measured on git 2.43.0 against an
+// octopus merge (`git merge --no-commit --no-ff s1 s2`): MERGE_HEAD held TWO
+// object ids, and both `git rev-parse MERGE_HEAD` and
+// `git rev-parse --verify --quiet MERGE_HEAD` printed only the FIRST and exited
+// 0. There is no error to notice — the answer is simply short, and a short
+// parent list makes the intersection below wider (fewer sets to intersect), so
+// the residue is a lock the gate demands over an inherited file. That is the
+// conservative direction and not a hole, but it is also silent, and this call
+// is the only place the difference is visible.
+//
+// ⚠️ AN EMPTY MERGE_HEAD READS AS "NO MERGE", AND THAT MATCHES GIT. It looks
+// like a hole — Merge would be false on a commit whose MERGE_HEAD file exists —
+// so it was measured rather than reasoned about. On git 2.43.0, truncating
+// MERGE_HEAD to zero bytes mid-merge makes `git status` stop reporting a merge
+// and makes the next `git commit` produce a ONE-PARENT commit. So a file with
+// no object ids in it is not a merge to git either, and answering nil here is
+// agreement with git rather than a miss.
+//
+// The path comes from `git rev-parse --git-path`, which is what makes this work
+// in a LINKED worktree: every pf.<project>-<seq>/<repo> tree polyforge creates
+// is one, and its MERGE_HEAD lives under .git/worktrees/<name>/, not in the
+// clone's own .git. Measured: --git-path answers `.git/MERGE_HEAD` in a plain
+// repository and the absolute per-worktree path in a linked one. It prints a
+// path whether or not the file exists, so existence is decided by the read.
+func GitMergeParents(ctx context.Context, worktreePath string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"rev-parse", "--git-path", "MERGE_HEAD").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git rev-parse --git-path MERGE_HEAD: %w", err)
+	}
+	p := strings.TrimSpace(string(out))
+	if p == "" {
+		return nil, fmt.Errorf("git rev-parse --git-path MERGE_HEAD returned nothing")
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(worktreePath, p)
+	}
+
+	raw, err := os.ReadFile(p) //nolint:gosec // path comes from git itself
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no merge in progress: the ordinary case
+		}
+		return nil, fmt.Errorf("read MERGE_HEAD: %w", err)
+	}
+	var parents []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parents = append(parents, line)
+		}
+	}
+	return parents, nil
+}
+
+// PendingCommit is what a CommitGate is asked about: the paths the commit about
+// to be made WRITES, and whether it is a merge commit.
+//
+// Merge rides along rather than being re-derived by the gate because the gate
+// runs on the other side of an HTTP call, where MERGE_HEAD is not observable —
+// and it is not decoration: the remedy a refusal ships is UNSAFE for a merge
+// (see domain.CommitLockMergeRefusalAdvice), so "is this a merge" has to reach
+// the place that chooses the remedy.
+type PendingCommit struct {
+	// Paths are the repo-relative paths this commit writes.
+	Paths []string
+	// Merge reports that a merge is in progress, i.e. the commit about to be
+	// made will have two or more parents.
+	Merge bool
+}
+
+// GitPendingCommitPaths returns what the pending commit WRITES, which is the
+// staged set for an ordinary commit and something strictly smaller for a merge.
+//
+// 🔴 THE MERGE NARROWING IS THE POINT, so it is argued here (aihub#662).
+// GitStagedPaths compares the INDEX against HEAD, and for a merge HEAD is only
+// the FIRST parent — so its answer is "everything the other side brought in",
+// most of which this commit does not write at all, it inherits. Measured in a
+// scratch repo: with the branch adding mine.txt and the other side adding
+// theirs.txt, a clean merge's index-vs-HEAD is [shared.txt theirs.txt] while
+// the merge writes neither.
+//
+// That over-report is not cosmetic. Every extra path is a lock this gate
+// demands, and takes from whoever else declared it: aihub#654 was refused
+// 409 CONFLICT_LOCK_TAKEN over three files it had never touched, which
+// origin/main had merely carried into its merge. The criterion that removes it
+// is the one git itself uses for a combined diff: a merge commit CONTRIBUTES
+// exactly the paths whose content differs from EVERY parent. Anything equal to
+// some parent came from that parent.
+//
+//	clean merge       index-vs-HEAD [shared.txt theirs.txt]
+//	                  index-vs-MERGE_HEAD [mine.txt]        -> writes nothing
+//	conflicted merge  index-vs-HEAD [c.txt theirsonly.txt]
+//	                  index-vs-MERGE_HEAD [c.txt]           -> writes [c.txt]
+//
+// — so the resolution a human actually typed is still locked, and the file the
+// other side carried across untouched is not. Both rows are measured, and the
+// second is the one that matters: this narrowing must not turn a conflicted
+// merge into an unprotected one.
+//
+// ⚠️ THE RESIDUE, stated rather than hidden: a conflict resolved to exactly
+// `--ours` equals HEAD and is therefore NOT counted, even though the merge
+// discards the other side's version of it.
+//
+// The tempting argument for that is "the branch's own commit of it already took
+// the lock", and it is FALSE in two reachable cases, so it is written down here
+// rather than relied on. file_scope locks are released on PAUSE
+// (acquireLocksReleasePausedSQL, internal/domain/run_attempts.go, which retains
+// only git_branch/deploy_env/worktree/tcp_port), and a branch outlives a
+// pause/resume or a takeover while its file_scope locks do not; and a commit
+// made with plain `git commit` never passed through this gate at all. In both,
+// an `--ours` resolution can discard a file another live attempt now holds,
+// unseen.
+//
+// It is ACCEPTED rather than closed, because the alternative — counting every
+// path that differs from ANY parent — is the un-narrowed set this function
+// exists to replace, and that set is what refused aihub#654 over three files it
+// never touched. Narrowing the residue instead of the whole set is its own
+// change; see the work item.
+func GitPendingCommitPaths(ctx context.Context, worktreePath string) (PendingCommit, error) {
+	staged, err := GitStagedPaths(ctx, worktreePath)
+	if err != nil {
+		return PendingCommit{}, err
+	}
+	parents, err := GitMergeParents(ctx, worktreePath)
+	if err != nil {
+		return PendingCommit{}, err
+	}
+	if len(parents) == 0 {
+		return PendingCommit{Paths: staged}, nil
+	}
+
+	writes := staged
+	for _, parent := range parents {
+		vsParent, err := gitStagedPathsAgainst(ctx, worktreePath, parent)
+		if err != nil {
+			return PendingCommit{}, err
+		}
+		writes = intersectPaths(writes, vsParent)
+	}
+	// Merge is reported even when nothing is written. That is for a caller
+	// holding the PendingCommit, not for the gate: runCommitGate's empty-set
+	// short-circuit returns before it hands this to anyone, which is exactly why
+	// commitLockGate.report has to describe both causes of not_run as a
+	// disjunction it cannot resolve.
+	return PendingCommit{Paths: writes, Merge: true}, nil
+}
+
+// intersectPaths returns the paths present in both slices, order preserved from
+// a. Both come from gitStagedPathsAgainst and are already deduplicated.
+func intersectPaths(a, b []string) []string {
+	inB := make(map[string]bool, len(b))
+	for _, p := range b {
+		inB[p] = true
+	}
+	out := make([]string, 0, len(a))
+	for _, p := range a {
+		if inB[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// CommitGate is consulted after staging and before committing, with what the
+// pending commit writes (GitPendingCommitPaths). Returning an error aborts the
+// commit; the index is left staged.
 //
 // It is a function rather than a concrete call so that package coding keeps
 // talking only to git. The one implementation today reconciles the attempt's
 // file_scope locks against those paths over HTTP, which is knowledge this
 // package has no business holding — and a nil gate is a first-class value, used
 // by every caller that has no work item behind it.
-type CommitGate func(ctx context.Context, paths []string) error
-
-// runCommitGate resolves the pending commit's paths and hands them to gate.
 //
-// The empty-index short-circuit is not an optimisation. Nothing staged means no
-// commit will be created (gitCommitStaged errors, Ship skips), so there is no
-// change to protect and no reason to spend a round-trip discovering that.
+// It takes a PendingCommit rather than a bare []string because the gate's
+// ANSWER depends on more than the paths: a refusal's remedy is different, and
+// the ordinary one is destructive, when the commit is a merge (aihub#662). A
+// signature that could only carry the paths would have forced that fact to
+// travel out of band, which is how it came to be missing in the first place.
+type CommitGate func(ctx context.Context, pending PendingCommit) error
+
+// runCommitGate resolves what the pending commit writes and hands it to gate.
+//
+// The empty-set short-circuit is not an optimisation. For an ordinary commit
+// nothing staged means no commit will be created (gitCommitStaged errors, Ship
+// skips), so there is no change to protect and no reason to spend a round-trip
+// discovering that. For a merge it means something different and equally
+// final: the merge inherits every path from one parent or the other and
+// contributes none of its own, so there is no write for a lock to protect —
+// and `git commit` will still create the merge commit from MERGE_HEAD.
 func runCommitGate(ctx context.Context, worktreePath string, gate CommitGate) error {
 	if gate == nil {
 		return nil
 	}
-	paths, err := GitStagedPaths(ctx, worktreePath)
+	pending, err := GitPendingCommitPaths(ctx, worktreePath)
 	if err != nil {
 		return err
 	}
-	if len(paths) == 0 {
+	if len(pending.Paths) == 0 {
 		return nil
 	}
-	return gate(ctx, paths)
+	return gate(ctx, pending)
 }
 
 // GitCommit runs `git -C path commit -m message`. If paths is non-empty,

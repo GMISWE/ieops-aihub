@@ -105,6 +105,76 @@ func roleForUserInMembers(membersRaw []byte, callerUserID string) (role string, 
 	return "", false, decodeErr
 }
 
+// projectOwnerMapRole is the role UserContext.ProjectRoles carries for a caller
+// who OWNS the project, and "maintainer" is a decision rather than the obvious
+// choice of "owner".
+//
+// domain.RoleLevel ranks viewer/writer/maintainer and deliberately does NOT
+// contain "owner": projects.owner_user_id is a column, not a member role, and
+// domain.checkProjectAccess settles the owner at level 2 before any member role
+// is ranked. A string outside that map is level 0, so writing "owner" into this
+// map would make every `roleLevel[userRole] >= roleLevel[minRole]` comparison in
+// this package FAIL for the one caller it was added to admit — aihub#443's
+// defect (a maintainer scored 0 and was answered with less than an anonymous
+// caller) reintroduced under a different name. That is not a hypothetical
+// reading of the ladder; it is what TestRoleLevelIsTheDomainLadder pins.
+//
+// "maintainer" is the top of the ladder that does exist, and it is not a
+// promotion: domain.checkProjectAccess already grants this caller ALL
+// permissions at level 2, so the map is catching up with the DB-backed chain
+// rather than overtaking it.
+const projectOwnerMapRole = "maintainer"
+
+// projectRoleForCaller settles OWNERSHIP before ranking any member role, which
+// is the order domain.checkProjectAccess's documented 5-level chain uses: level
+// 2 is `owner_user_id == caller → pass (all permissions)`, level 3 is the
+// members lookup.
+//
+// 🔴 aihub#668. UserContext.ProjectRoles was derived from projects.members
+// ALONE, at both of the sites TestProjectRolesHaveOneDerivation names. The
+// projects table carries a SECOND relation column and no consumer of the map had
+// ever read it, so a non-admin who OWNED a project but was absent from its
+// members list reached every map-based gate in this package as a stranger and
+// was answered with the membership 404 — in a project that is his. Measured on
+// e34d066 through the real router against a migrated database:
+//
+//	POST /v1/conflicts/predict   404 notVisibleMessage   (the aihub#665 gate)
+//	GET  /v1/work_items/<id>     404 notVisibleMessage   (server.checkProjectAccess)
+//
+// Two routes, one cause: neither of them is where the omission lived.
+//
+// 🔴 THE POPULATION WAS ZERO AND THAT WAS NOT A REASON TO LEAVE IT. Counted on
+// 2026-09-14: 11 projects, 24 users, one admin; ten projects owned by that
+// admin and the eleventh by a non-admin who is in its members. But zero is a
+// fact about who has called pf_create_project, not about what the code permits —
+// POST /v1/projects carries no admin guard, and domain.CreateProject's INSERT
+// does not name `members`, so the row it writes for ANY non-admin caller is
+// exactly this one (`members JSONB NOT NULL DEFAULT '[]'`, migration 0012). The
+// combination is one unprivileged call away, and it makes the created project
+// unusable by its creator.
+//
+// 🔴 THE OVERRIDE IS UNCONDITIONAL, DELIBERATELY. An owner who is ALSO a members
+// entry carrying a lower role — viewer, say — is still ranked as an owner here,
+// because domain.checkProjectAccess returns at level 2 without ever reading
+// level 3. Preferring the member role when one exists would leave the two
+// families disagreeing again, on a smaller and much harder-to-find set of
+// people.
+//
+// The members half stays in roleForUserInMembers, unchanged: its two documented
+// properties are the whole of aihub#315 and are tested against that function.
+func projectRoleForCaller(membersRaw []byte, ownerUserID, callerUserID string) (role string, found bool, decodeErr error) {
+	role, found, decodeErr = roleForUserInMembers(membersRaw, callerUserID)
+	// Guarded on a non-empty caller id for the same reason roleForUserInMembers
+	// is: projects.owner_user_id is NOT NULL with a foreign key to users(id), so
+	// an empty string there needs a users row with an empty id — an upstream
+	// accident rather than a local guarantee, and one that would otherwise hand
+	// project-wide access to any caller whose own id was empty.
+	if callerUserID != "" && callerUserID == ownerUserID {
+		return projectOwnerMapRole, true, decodeErr
+	}
+	return role, found, decodeErr
+}
+
 // malformedMembersWarned records which projects have already had a malformed
 // members element reported, so the warning below is emitted once per project per
 // process rather than once per request.
@@ -183,13 +253,20 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 			uc.ProjectScope = projectScope
 			uc.ProjectRoles = make(map[string]string)
 
-			// Non-admin users: load project memberships from projects.members JSONB.
+			// Non-admin users: load the project relations projects records for them.
 			// Admin users bypass all project checks so we skip the extra query.
+			//
+			// aihub#668: BOTH relation columns, not just members. owner_user_id is
+			// the other one, it is what domain.checkProjectAccess's level 2 reads,
+			// and a project whose members list does not repeat its owner used to
+			// be absent from this result set entirely — so its owner authenticated
+			// with no role in it and every gate in this package refused him.
 			if uc.Role != "admin" {
 				prows, perr := pool.Query(c.Request().Context(), `
-					SELECT name, members
+					SELECT name, members, owner_user_id
 					FROM projects
-					WHERE members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
+					WHERE owner_user_id = $1::text
+					   OR members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
 					uc.UserID,
 				)
 				if perr != nil {
@@ -204,7 +281,8 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 				for prows.Next() {
 					var projName string
 					var membersRaw []byte
-					if perr := prows.Scan(&projName, &membersRaw); perr != nil {
+					var ownerUserID string
+					if perr := prows.Scan(&projName, &membersRaw, &ownerUserID); perr != nil {
 						// aihub#608: this used to `continue`, and the rows.Err()
 						// arm below only LOGGED — the pair authenticated the
 						// caller with a PARTIAL ProjectRoles map (pgx v5's failed
@@ -216,10 +294,14 @@ func BearerAuth(pool *pgxpool.Pool) echo.MiddlewareFunc {
 						prows.Close()
 						return c.JSON(http.StatusInternalServerError, errorResponse(domain.NewErr(domain.ErrInternalError, "database error during auth")))
 					}
-					role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+					role, found, decodeErr := projectRoleForCaller(membersRaw, ownerUserID, uc.UserID)
 					if decodeErr != nil {
 						warnMalformedMembersOnce(projName, decodeErr)
 					}
+					// Still reachable, and no longer only on a query that cannot
+					// return it: the OR above admits rows the caller owns, so a
+					// row can now arrive with the caller in neither column only if
+					// a malformed members element decoded to a zero value.
 					if !found {
 						continue
 					}
@@ -401,11 +483,20 @@ func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string)
 	// string to 0. A role that does not reach viewer is not a membership, so it
 	// must not be told the project exists either.
 	//
-	// What can put an unrecognised string in this map: it is built from
-	// projects.members — by BearerAuth above and by loadUserByAPIKeyID in
-	// ui_handlers_auth.go, both through roleForUserInMembers, which returns the
+	// What can put an unrecognised string in this map: it is built by BearerAuth
+	// above and by loadUserByAPIKeyID in ui_handlers_auth.go, both through
+	// projectRoleForCaller, whose members half (roleForUserInMembers) returns the
 	// JSONB's role verbatim and never checks it against a vocabulary.
 	// TestProjectRolesHaveOneDerivation holds that to the two of them.
+	//
+	// Since aihub#668 that is no longer the map's only source: an OWNER is ranked
+	// projectOwnerMapRole, a constant from this file rather than a value out of
+	// the database. That arm cannot produce an unrecognised string, so it changes
+	// nothing about the paragraph below — but "this map is projects.members" is
+	// now the smaller half of the truth, and three neighbouring comments still
+	// say it (router.go's handleListWorkItems ids= branch, ui_handlers_wi.go's
+	// uiProjectGate, internal/mcp/tools_lifecycle.go's pf_whoami note). Each
+	// remains true about the members half, which is what each is arguing about.
 	// domain.UpdateProject is the only validator, and it is application-level only:
 	// projects.members is JSONB with no CHECK constraint, so any write that does not
 	// go through UpdateProject can store anything. Measured on the fully migrated

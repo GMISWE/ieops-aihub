@@ -94,6 +94,23 @@ const (
 	// that authorizes nobody out, and this whole file would measure nothing.
 	depViewerUID = "u_dep_authz_viewer"
 	depViewerKey = "pfk_dep_authz_viewer_key" //nolint:gosec // fixture credential for a throwaway test DB
+
+	// A fourth identity that never calls anything: projects.owner_user_id has to
+	// name SOME user (NOT NULL, foreign key to users.id) and it must not name one
+	// of the three above.
+	//
+	// 🔴 aihub#668. It used to be depWriterUID, and that was invisible until the
+	// derivation learned to read the column: UserContext.ProjectRoles came from
+	// projects.members alone, so naming the writer as owner changed nothing and
+	// the fixture read as "a project writer". It no longer is one — ownership
+	// outranks a member role, deliberately, because domain.checkProjectAccess
+	// returns at level 2 ("owner → all permissions") without ever reading level
+	// 3. assertRoles caught this by reading the derived identity back through the
+	// real middleware, which is exactly the drift it was written to catch.
+	//
+	// No API key: nothing authenticates as this user, so it cannot silently
+	// become a fourth caller.
+	depOwnerUID = "u_dep_authz_owner"
 )
 
 // depAuthzStack is one wired-up copy of the real thing, with three distinct
@@ -151,6 +168,16 @@ func newDepAuthzStack(t *testing.T) *depAuthzStack {
 		}
 	}
 
+	// The project's owner is a fourth user who calls nothing. See depOwnerUID:
+	// owning the project would make the "writer" a maintainer, which is not the
+	// scenario any test in this file describes.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users(id,email,display_name,user_type,role,api_keys)
+		VALUES($1,$1||'@test.local',$1,'human','writer','[]'::jsonb)
+		ON CONFLICT (id) DO UPDATE SET role='writer'`, depOwnerUID); err != nil {
+		t.Fatalf("seed owner user %s: %v", depOwnerUID, err)
+	}
+
 	members, err := json.Marshal([]map[string]any{
 		{"user_id": depWriterUID, "role": "writer"},
 		{"user_id": depHolderUID, "role": "writer"},
@@ -162,7 +189,7 @@ func newDepAuthzStack(t *testing.T) *depAuthzStack {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO projects(name,owner_user_id,members) VALUES($1,$2,$3)
 		ON CONFLICT (name) DO UPDATE SET members=EXCLUDED.members, owner_user_id=EXCLUDED.owner_user_id`,
-		depProject, depWriterUID, members); err != nil {
+		depProject, depOwnerUID, members); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 

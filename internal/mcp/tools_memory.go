@@ -451,7 +451,20 @@ var recallBoolParams = []string{"include_archived"}
 func recallSchema() json.RawMessage {
 	return objectSchema(map[string]any{
 		"project": prop("string", "Project name"),
-		"query":   prop("string", "Semantic search query"),
+		// aihub#669: the one thing a caller cannot infer from a response. The
+		// prefix is invisible on the wire (it is added inside the embed call,
+		// not echoed anywhere) and it moved every absolute cosine DOWN, so a
+		// threshold calibrated against a server without it now means something
+		// else. No date in the text: this description ships with the binary and
+		// the shift reaches a given server at its deploy, not at the merge. The
+		// measurement, the 0.0607 control margin and the reason the document
+		// side stays bare are in docs/mcp-tools.md, which is not resident.
+		"query": prop("string", "Semantic search query. On the vector path this text is embedded "+
+			"with the model's instruct prefix while stored memories are not, which is the model's "+
+			"designed usage: it lowers ALL similarities and lowers unrelated ones further, so "+
+			"absolute cosines from a server that carries this behaviour are not comparable with "+
+			"readings taken from one that does not. The "+
+			"`lexical` section matches this string verbatim, unprefixed."),
 		// aihub#289: the shape is the whole point of this description. Three
 		// SKILL.md templates taught type="a|b|c", nothing split it, and the
 		// resulting empty set read as "no relevant memory". The model reads this

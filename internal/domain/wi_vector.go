@@ -187,6 +187,11 @@ type SemanticInfo struct {
 // as a pgvector literal together with the emb_model that both sides of the
 // cosine must share.
 //
+// On the query= branch the text handed to the provider carries the aihub#669
+// instruct prefix (QueryEmbedInput). The similar_to branch does not and cannot:
+// it reuses a STORED row's vector, which was written from un-prefixed document
+// text, and prefixing is a query-side operation with nothing to apply it to.
+//
 // The similar_to branch scopes its lookup to the SAME projects the results are
 // scoped to, so no separate access check is needed and none can be forgotten:
 // a source outside the caller's scope is reported as not found, exactly the
@@ -204,7 +209,20 @@ func semanticQuerySource(ctx context.Context, pool *pgxpool.Pool, project string
 	// listWorkItemsFn is a package seam with other call sites in
 	// ui_handlers_*.go, and this file's own header is about exactly this class.
 	if f.SimilarTo == nil || strings.TrimSpace(*f.SimilarTo) == "" {
-		qvec, err := embProvider.Embed(ctx, *f.Query)
+		// aihub#669: instruct prefix on the query, nothing on the stored rows
+		// (QueryEmbedInput, and the asymmetry note above it).
+		//
+		// 🔴 Prefix the ARGUMENT, never the field. ListWorkItemsFilter.Query is a
+		// *string and f is passed by value, so THREE readers share this one
+		// pointer: this embed call, listWorkItemsLexical's lexicalTokens
+		// (wi_lexical.go) and buildListWorkItemsWhere's ILIKE fallback
+		// (work_items.go). Writing `*f.Query = ...` would hit all three, and both
+		// of the others match the query as a literal substring, so both would go
+		// looking for rows containing "Instruct: Given a web search query..." and
+		// return nothing. Swapping in a new pointer on a copy would be safe only
+		// for whichever copy got it; not writing at all is safe for every reader
+		// that exists and every one added later.
+		qvec, err := embProvider.Embed(ctx, QueryEmbedInput(*f.Query))
 		if err != nil {
 			return "", "", "", nil, NewErr(ErrInternalError, fmt.Sprintf("embed query: %v", err))
 		}

@@ -173,10 +173,14 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 	uc.ProjectScope = projectScope
 	uc.ProjectRoles = make(map[string]string)
 	if uc.Role != "admin" {
+		// aihub#668: BearerAuth's twin here too — both relation columns, not just
+		// members. A /ui session for the owner of a members-empty project used to
+		// render that project as invisible to the person who owns it.
 		prows, perr := pool.Query(ctx, `
-			SELECT name, members
+			SELECT name, members, owner_user_id
 			FROM projects
-			WHERE members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
+			WHERE owner_user_id = $1::text
+			   OR members @> jsonb_build_array(jsonb_build_object('user_id', $1::text))`,
 			uc.UserID,
 		)
 		if perr != nil {
@@ -191,7 +195,8 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 		for prows.Next() {
 			var projName string
 			var membersRaw []byte
-			if err := prows.Scan(&projName, &membersRaw); err != nil {
+			var ownerUserID string
+			if err := prows.Scan(&projName, &membersRaw, &ownerUserID); err != nil {
 				// aihub#608: BearerAuth's twin, one row further in — the
 				// `continue` here plus the log-only rows.Err() arm below built
 				// a session with a PARTIAL ProjectRoles map (pgx v5's failed
@@ -202,7 +207,7 @@ func loadUserByAPIKeyID(ctx context.Context, pool *pgxpool.Pool, apiKeyID string
 				prows.Close()
 				return nil, err
 			}
-			role, found, decodeErr := roleForUserInMembers(membersRaw, uc.UserID)
+			role, found, decodeErr := projectRoleForCaller(membersRaw, ownerUserID, uc.UserID)
 			if decodeErr != nil {
 				warnMalformedMembersOnce(projName, decodeErr)
 			}

@@ -15,9 +15,15 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/embedding"
 )
 
-// RecallWithVector embeds req.Query and returns the TopK memories ordered by
-// cosine similarity as the primary key (bucketed to 0.01), with Ebbinghaus
-// effective_strength breaking ties only inside a bucket (aihub#311).
+// RecallWithVector embeds req.Query, with the aihub#669 instruct prefix in
+// front of it, and returns the TopK memories ordered by cosine similarity as
+// the primary key (bucketed to 0.01), with Ebbinghaus effective_strength
+// breaking ties only inside a bucket (aihub#311).
+//
+// The prefix is applied to the ARGUMENT of the embed call, not to req.Query:
+// this function shares that field with recallLexical, which matches it as a
+// literal substring. See QueryEmbedInput (embed_input.go) for the template, the
+// measurement and the reason the document side gets no prefix.
 //
 // 🔴 A miss on this path is NOT evidence of absence, and that is a property of
 // the index shape, not a data defect (aihub#360): each row carries ONE
@@ -65,7 +71,12 @@ import (
 // the caller named no page size, changing nothing the caller sent, which is why
 // the aihub#532 census holds that shape out as a non-clamp.
 func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallRequest) (*RecallResponse, error) {
-	qvec, err := embProvider.Embed(ctx, req.Query)
+	// aihub#669: the QUERY is embedded with the model's instruct prefix; the
+	// stored rows are not (QueryEmbedInput, and the asymmetry note above it).
+	// req.Query itself is NOT rewritten, here or anywhere upstream: recallLexical
+	// tokenizes that same field and the prefix would destroy every one of its
+	// substring matches.
+	qvec, err := embProvider.Embed(ctx, QueryEmbedInput(req.Query))
 	if err != nil {
 		return nil, fmt.Errorf("recallWithVector: embed query: %w", err)
 	}

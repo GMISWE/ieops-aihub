@@ -121,9 +121,12 @@ refusal arm and the repo-only control of
 `internal/domain/conflicts_predict_test.go`
 (`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty`). Mode B's
 `pf_predict_conflicts(work_item_id=<slug>, …)` needed no change, because a
-resolvable `work_item_id` is the other exemption that same
-`internal/domain/conflicts_predict_test.go`
-(`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty`) holds. The
+resolvable `work_item_id` is the other exemption — and that half is held
+elsewhere, by the `byWI` arm of `internal/domain/conflicts_predict_test.go`
+(`TestPredictConflicts_FileScopeProjectScoped`), which passes `WorkItemID` with
+no `Project` and a path payload and requires no error. It has to be that test
+and not this one: the refusal test runs against a **nil pool**, so it can
+resolve no work item and structurally cannot hold a `work_item_id` arm. The
 second reason given here — that plugin text does not ride an ordinary PR — was
 never a rule in this repo: `aihub#641` measured it false with a negative
 control, `docs/onboarding.md` requires the five version stamps to land *with*

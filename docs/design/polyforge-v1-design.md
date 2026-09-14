@@ -1724,9 +1724,12 @@ pf_read_events(work_item_id?, project?, user_id?, types?, since?, limit?, pinned
 
 pf_predict_conflicts(work_item_id?, project?, declared_resources, dry_run?)
   -- ⚠️ 勘误（aihub#662 + aihub#665，2026-09-14）：`project` 原本整个不在这行里。
-  --   它是**条件必填**，不是可选装饰：payload 只要含一条 path / document / section
+  --   它是**条件必填**，不是可选装饰：payload 只要含一条**能派生出 file_scope 键**的
   --   条目，就必须能解析出 project —— 要么直接传 `project`，要么传一个能解析到
   --   **且调用方可见**的 `work_item_id`（wi 自己的 project 优先）。两者皆无 ⇒ 400，
+  --   ⚠️ 判据是 `resourceToLock` 的返回值而不是 `type` 字段本身：path / document /
+  --   section 里 uri 去掉 `file:` 前缀后为空的那种退化条目（aihub#524）派生不出键，
+  --   因此**不**触发本闸——「含 path 条目」比真实条件宽。
   --   error details 带 `paths_needing_project` 逐条点名（internal/domain/conflicts.go
   --   (`PredictConflicts`) 的 effectiveProject=="" 分支）。
   --   原因不是校验洁癖：file_scope 锁键是 `<project>:<repo>:<path>`，空 project 让每个
@@ -4038,13 +4041,16 @@ review/代码审查          → /pf-review
    → 409 DUPLICATE：展示已有 wi，询问"继续新建 / 直接认领已有 / 取消"
    → 409 CANDIDATES：展示候选列表，询问选择
 
-3. 用户确认后 pf_predict_conflicts(work_item_id=<步 2 新建的 wi>, declared_resources, dry_run=true)
+3. 用户确认后 pf_predict_conflicts(work_item_id=<上一步 pf_create_work_item 得到的 wi>,
+                                   declared_resources, dry_run=true)
    → 展示 impact preview（会抢哪些锁、解锁哪些下游）
-   ⚠️ 勘误（aihub#662，2026-09-14）：本行原先两个都不带。wi 在步 2 已建，所以这里
-      `work_item_id` 就够了（它解析到的 wi 自己的 project 优先），顺带还拿到 aihub#510
-      / aihub#564 的自排除。若把预演挪到**建 wi 之前**（`plugins/polyforge/skills/
-      pf-work/SKILL.md` 模式 A 就是这个顺序），则没有 wi 可解析 ⇒ 必须改传 `project`，
-      否则含 path/document/section 的 payload 直接 400。
+   ⚠️ 勘误（aihub#662，2026-09-14）：本行原先两个都不带。wi 在**上一步**
+      （`pf_create_work_item`，返回 `{id, slug}`）已经建好了，所以这里 `work_item_id`
+      就够了：它解析到的 wi 自己的 project 优先，顺带还拿到 aihub#510 / aihub#564 的
+      自排除。⚠️ 本模式的步号有重复（创建与本行都编号 `3.`），所以这里按**步骤名**
+      而不是步号指代。若把预演挪到**建 wi 之前**（`plugins/polyforge/skills/pf-work/
+      SKILL.md` 模式 A 就是那个顺序），则没有 wi 可解析 ⇒ 必须改传 `project`，否则
+      payload 里但凡有一条能派生 file_scope 键的条目就直接 400。
 
 4. pf_claim_work_item(
      id_or_slug=<新建的 wi>,
@@ -4063,13 +4069,23 @@ review/代码审查          → /pf-review
 
 ── 模式 B：认领已有 wi（/pf-work <slug>） ──
 
-1. pf_predict_conflicts(work_item_id=<slug>, dry_run=true) → impact preview
+1. pf_predict_conflicts(work_item_id=<slug>, declared_resources=<该 wi 的声明>, dry_run=true)
+     → impact preview
+   ⚠️ 勘误（aihub#666，2026-09-14）：`declared_resources` 原先不在本行里，而它是**必填**
+      （`tools_conflicts.go` 的 required 清单，外加 handler 里一道显式检查），且服务端
+      **不会**替你从 wi 行里取——`PredictConflicts` 只读 `req.DeclaredResources`。所以
+      原样照抄这行会得到 `declared_resources is required`；录下来的调用语料
+      `internal/mcp/testdata/corpus/pf_predict_conflicts/error.json` 就是这个形状的一次
+      真实失败。
    ⚠️ 勘误（aihub#662，2026-09-14）：参数名原先写的是 `wi_id`，而已发布的参数名是
-      `work_item_id`。MCP 那层把整个参数 map 原样转发，但 `handlePredictConflicts` 的
-      `c.Bind(&req)` 按 `domain.PredictConflictsRequest` 解，`wi_id` 不是它的字段 ⇒
-      被 echo 静默丢弃，`req.WorkItemID` 仍是 nil。于是这次调用退化成匿名形状，含
-      path/document/section 的 payload 按新规则直接 400。写对名字之后本行**不需要**
-      另传 `project`：slug 能解析到 wi，wi 自己的 project 优先。
+      `work_item_id`。MCP 那层把整个参数 map 原样转发（本工具刻意不在 `wireStrippedTools`
+      里），但 `handlePredictConflicts` 的 `c.Bind(&req)` 按 `domain.PredictConflictsRequest`
+      解，`wi_id` 不是它的字段 ⇒ 被 echo 丢弃，`req.WorkItemID` 仍是 nil。于是这次调用
+      退化成匿名形状，含可派生 file_scope 条目的 payload 按新规则直接 400。
+      ⚠️ 丢弃发生在 echo 那一层，但**整次调用并不静默**：aihub#389 之后 `addTool` 会在
+      handler 之前算出未知参数集，往响应里挂 `request_adjusted.unknown_params` 并打一行
+      stderr。写对名字之后本行**不需要**另传 `project`：slug 能解析到 wi，wi 自己的
+      project 优先。
 2. pf_claim_work_item(id_or_slug=<slug>, mode="fresh", ...)
 3. 输出三段式
 

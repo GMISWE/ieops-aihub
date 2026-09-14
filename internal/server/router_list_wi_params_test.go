@@ -113,6 +113,23 @@ func TestListWorkItems_EveryFilterParamReachesTheFilter(t *testing.T) {
 		{"claimed_by", "claimed_by=u_claimer", func(t *testing.T, f domain.ListWorkItemsFilter) {
 			wantStrPtr(t, "filter.ClaimedByUserID", f.ClaimedByUserID, "u_claimer")
 		}},
+		// aihub#656. OwnerDisplay/ReporterDisplay/WatcherUserID were the three
+		// ListWorkItemsFilter fields with zero hop-3 references before this wi —
+		// silently dropped over the MCP-facing /v1/work_items endpoint despite
+		// domain-layer support (buildListWorkItemsWhere) existing for all three.
+		// watcher_user_id is wired here for HTTP-level completeness even though
+		// it is deliberately NOT published in the MCP schema (see
+		// docs/mcp-cards/pf_list_work_items.md's "Open" section) — those are two
+		// different questions and this test only answers the hop-3 one.
+		{"owner_display", "owner_display=xiaokang", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			wantStrPtr(t, "filter.OwnerDisplay", f.OwnerDisplay, "xiaokang")
+		}},
+		{"reporter_display", "reporter_display=xiaokang", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			wantStrPtr(t, "filter.ReporterDisplay", f.ReporterDisplay, "xiaokang")
+		}},
+		{"watcher_user_id", "watcher_user_id=u_alice", func(t *testing.T, f domain.ListWorkItemsFilter) {
+			wantStrPtr(t, "filter.WatcherUserID", f.WatcherUserID, "u_alice")
+		}},
 		{"source", "source=human", func(t *testing.T, f domain.ListWorkItemsFilter) {
 			wantStrPtr(t, "filter.Source", f.Source, "human")
 		}},
@@ -188,7 +205,8 @@ func TestListWorkItems_UnknownParamSetsNoFilter(t *testing.T) {
 		t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if f.WIType != nil || f.Priority != nil || f.Milestone != nil || f.Scenario != nil ||
-		f.Label != nil || f.Source != nil || f.UserID != nil || f.ClaimedByUserID != nil || f.Since != nil ||
+		f.Label != nil || f.Source != nil || f.UserID != nil || f.ClaimedByUserID != nil ||
+		f.OwnerDisplay != nil || f.ReporterDisplay != nil || f.WatcherUserID != nil || f.Since != nil ||
 		len(f.Status) != 0 || len(f.IDs) != 0 || f.ReadyOnly || f.IncludeStepState {
 		t.Errorf("an unrecognised param must leave every filter field unset; got %+v", f)
 	}
@@ -544,6 +562,9 @@ func TestListWorkItems_EveryScalarParamIsTrimmed(t *testing.T) {
 		{"label", func(f domain.ListWorkItemsFilter) *string { return f.Label }},
 		{"user_id", func(f domain.ListWorkItemsFilter) *string { return f.UserID }},
 		{"claimed_by", func(f domain.ListWorkItemsFilter) *string { return f.ClaimedByUserID }},
+		{"owner_display", func(f domain.ListWorkItemsFilter) *string { return f.OwnerDisplay }},
+		{"reporter_display", func(f domain.ListWorkItemsFilter) *string { return f.ReporterDisplay }},
+		{"watcher_user_id", func(f domain.ListWorkItemsFilter) *string { return f.WatcherUserID }},
 		{"source", func(f domain.ListWorkItemsFilter) *string { return f.Source }},
 	} {
 		t.Run(tc.param, func(t *testing.T) {

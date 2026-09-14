@@ -329,25 +329,3 @@ func TestClassifyPreflight_ReasonSurvivesTheHarnessesOwnColourCodes(t *testing.T
 			"or say there was no output", v.Reason)
 	}
 }
-
-// TestFirstHealthy_TakesPreferenceOrder pins the fallback rule: candidates are preference-ordered,
-// so the first that passes wins even when a later one also passed.
-func TestFirstHealthy_TakesPreferenceOrder(t *testing.T) {
-	claude := Channel{Harness: HarnessClaude}
-	pi := Channel{Harness: HarnessPi}
-
-	got, ok := FirstHealthy([]PreflightVerdict{
-		{Channel: claude, OK: false, Reason: "401"},
-		{Channel: pi, OK: true},
-	})
-	if !ok || got != pi {
-		t.Fatalf("FirstHealthy = (%v, %v), want the first passing candidate %v", got, ok, pi)
-	}
-
-	if _, ok := FirstHealthy([]PreflightVerdict{{Channel: claude, OK: false}}); ok {
-		t.Error("FirstHealthy reported a channel when every candidate failed")
-	}
-	if _, ok := FirstHealthy(nil); ok {
-		t.Error("FirstHealthy reported a channel from an empty candidate list")
-	}
-}

@@ -2,6 +2,7 @@ package drain
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -127,14 +128,16 @@ func (h *fakeHub) observe(context.Context) (QueueState, error) {
 		case "queued":
 			if h.unblockedLocked(w) {
 				q.Executable++
-			} else if h.blockedByOutsiderLocked(w, inScope) {
-				q.BlockedByOthers++
+			} else if out := h.outsidersLocked(w, inScope); len(out) > 0 {
+				q.ExternallyBlocked = append(q.ExternallyBlocked,
+					BlockedWorkItem{WorkItemID: w.ID, Slug: w.Slug, Blockers: out})
 			} else {
 				q.BlockedByMine++
 			}
 		case "blocked":
-			if h.blockedByOutsiderLocked(w, inScope) {
-				q.BlockedByOthers++
+			if out := h.outsidersLocked(w, inScope); len(out) > 0 {
+				q.ExternallyBlocked = append(q.ExternallyBlocked,
+					BlockedWorkItem{WorkItemID: w.ID, Slug: w.Slug, Blockers: out})
 			} else {
 				q.BlockedByMine++
 			}
@@ -143,13 +146,16 @@ func (h *fakeHub) observe(context.Context) (QueueState, error) {
 	return q, nil
 }
 
-func (h *fakeHub) blockedByOutsiderLocked(w *fakeWI, inScope map[string]bool) bool {
+// outsidersLocked returns the blockers of w that are outside the scope, which is what the
+// production ObserveQueue reports so the notification has somewhere to land.
+func (h *fakeHub) outsidersLocked(w *fakeWI, inScope map[string]bool) []string {
+	var out []string
 	for _, b := range w.blockedBy {
 		if !inScope[b] {
-			return true
+			out = append(out, b)
 		}
 	}
-	return false
+	return out
 }
 
 func (h *fakeHub) claim(_ context.Context, id, _ string) (*ClaimInfo, *Blocker, error) {
@@ -228,7 +234,16 @@ func (h *fakeHub) completeAttempt(_ context.Context, id, status, _ string) error
 	return nil
 }
 
+// notify mirrors the PRODUCTION seam, including its early return on an empty WorkItemID.
+//
+// That guard is the whole reason this comment exists. The fake used to append unconditionally,
+// so a notification production would have dropped on the floor was recorded here as delivered,
+// and the assertion "a note was recorded" passed while the real run notified nobody. A fake that
+// is more permissive than the thing it stands in for does not test that thing.
 func (h *fakeHub) notify(_ context.Context, n Notification) error {
+	if n.WorkItemID == "" {
+		return nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.notes = append(h.notes, n)
@@ -486,32 +501,49 @@ func TestRun_DerivedWorkItemsWaitForTheNextRound(t *testing.T) {
 func TestRun_DivergenceStopsTheLoop(t *testing.T) {
 	h := newFakeHub([]string{"code_change"})
 	// A generation counter keeps ids unique so the fake can keep spawning forever.
+	// RECURSIVE, so every generation proliferates. The first version of this fixture filled
+	// .spawns with plain fwi() values, whose own .spawns were empty, so exactly one generation
+	// multiplied and the project drained on its own in two rounds. The test still went red when
+	// the detector was deleted, so it was not vacuous — but its comment, its MaxRounds backstop
+	// and its timeout were all defending against a runaway the fixture could not produce.
 	gen := 0
-	spawn := func(id string) fakeWI {
+	var spawn func(id string, depth int) fakeWI
+	spawn = func(id string, depth int) fakeWI {
 		w := fwi(id, "normal", "2026-01-01T00:00:00Z")
+		if depth == 0 {
+			return w
+		}
 		gen++
 		w.spawns = []fakeWI{
-			fwi(fmt.Sprintf("%s-a%d", id, gen), "normal", "2026-01-01T00:00:00Z"),
-			fwi(fmt.Sprintf("%s-b%d", id, gen), "normal", "2026-01-01T00:00:00Z"),
+			spawn(fmt.Sprintf("%s-a%d", id, gen), depth-1),
+			spawn(fmt.Sprintf("%s-b%d", id, gen), depth-1),
 		}
 		return w
 	}
-	root := spawn("root")
+	root := spawn("root", 8) // 2^8 descendants if nothing stops it
 	h.wis["root"] = &root
 	h.wis["root"].status = "queued"
 
-	done := make(chan RunReport, 1)
+	// The result is carried out of the goroutine rather than asserted inside it: on the timeout
+	// branch below the parent t.Fatal's while this goroutine is still live, and a t.Errorf after
+	// that panics with "Log in goroutine after test has completed".
+	type res struct {
+		rep RunReport
+		err error
+	}
+	done := make(chan res, 1)
 	go func() {
 		// A round budget is a backstop only: if divergence detection works, it stops first.
 		rep, err := runnerFor(h, Budget{MaxRounds: 25}).Run(context.Background())
-		if err != nil {
-			t.Errorf("Run: %v", err)
-		}
-		done <- rep
+		done <- res{rep, err}
 	}()
 
 	select {
-	case report := <-done:
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Run: %v", got.err)
+		}
+		report := got.rep
 		if report.StopReason != StopDivergence {
 			t.Fatalf("stop reason = %s, want divergence. A project where every work item files "+
 				"two follow-ups must be caught by the detector, not by the round budget", report.StopReason)
@@ -519,6 +551,22 @@ func TestRun_DivergenceStopsTheLoop(t *testing.T) {
 		if report.Totals.Rounds > 3 {
 			t.Errorf("took %d rounds to notice divergence; the detector runs every round",
 				report.Totals.Rounds)
+		}
+		// Self-check on the fixture, so its depth is load-bearing rather than decorative.
+		// The first version filled .spawns with childless values, so exactly one generation
+		// multiplied and this project would have drained on its own — the comment above, the
+		// MaxRounds backstop and the timeout were all guarding a runaway it could not produce.
+		h.mu.Lock()
+		var grandparents int
+		for id, w := range h.wis {
+			if id != "root" && len(w.spawns) > 0 {
+				grandparents++
+			}
+		}
+		h.mu.Unlock()
+		if grandparents == 0 {
+			t.Error("the fixture cannot proliferate past one generation, so it does not " +
+				"contain the runaway this test claims to stop")
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("Run did not terminate on a diverging project")
@@ -567,10 +615,74 @@ func TestRun_BudgetsStopTheRun(t *testing.T) {
 	})
 }
 
-// TestRun_CancellationLeavesTheAttemptForResumption pins the "T 时间" budget path and, more
-// importantly, what it must NOT do: a cancelled run must not complete the attempt as failed,
-// because nothing failed — the work item should be resumable.
-func TestRun_CancellationLeavesTheAttemptForResumption(t *testing.T) {
+// TestRun_CancellationMidStepLeavesTheAttemptForResumption pins what a Ctrl-C must and must not
+// do, and it cancels MID-STEP rather than before the run.
+//
+// The previous version cancelled the context before calling Run, so Run broke at the
+// top-of-loop ctx.Err() guard and nothing was ever claimed. Its assertion then looped over an
+// EMPTY h.completes: the property it named ("a cancelled run must not complete the attempt as
+// failed") could not fail, and the two code paths that actually implement it had zero coverage.
+//
+// Cancelling from inside Dispatch exercises the real path, and the assertions are the three
+// things that go wrong when it is not handled: the run must still produce a terminal state
+// (rather than an error, which the CLI reports as exit 2 "internal error" for an ordinary
+// interrupt), the attempt must not be completed, and the outcome must be reported as CANCELLED
+// rather than as a pause nobody performed.
+func TestRun_CancellationMidStepLeavesTheAttemptForResumption(t *testing.T) {
+	h := newFakeHub([]string{"code_change", "commit_and_pr"},
+		fwi("a", "normal", "2026-01-01T00:00:00Z"))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := runnerFor(h, Budget{})
+	inner := h.dispatch
+	r.Dispatch = func(dctx context.Context, req DispatchRequest) (DispatchResult, error) {
+		out, err := inner(dctx, req)
+		cancel() // the interrupt lands while this work item is between steps
+		return out, err
+	}
+	// Every server call after the cancellation fails the way a real client would.
+	wrapCtx := func(fn func(context.Context) ([]Candidate, error)) func(context.Context) ([]Candidate, error) {
+		return func(c context.Context) ([]Candidate, error) {
+			if c.Err() != nil {
+				return nil, c.Err()
+			}
+			return fn(c)
+		}
+	}
+	r.AllInScope = wrapCtx(h.allInScope)
+	r.Executable = wrapCtx(h.executable)
+
+	report, err := r.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run returned an error for an ordinary cancellation: %v.\n"+
+			"The CLI reports that as exit 2 (internal error), and finish() never runs, so the "+
+			"snapshot is left Finished=false and watch renders it as DIED.", err)
+	}
+	if report.StopReason != StopCancelled {
+		t.Errorf("stop reason = %s, want cancelled", report.StopReason)
+	}
+	if report.Terminal == "" {
+		t.Fatal("a cancelled run produced no terminal state, so there is no exit code to report")
+	}
+
+	for _, c := range h.completes {
+		if strings.HasPrefix(c, "a:") {
+			t.Errorf("cancellation completed the attempt (%s); nothing failed, and the work "+
+				"item should be resumable", c)
+		}
+	}
+	if report.Totals.Paused != 0 {
+		t.Errorf("paused = %d: an abandoned attempt was reported as a pause, which says a "+
+			"person decided something when nobody did", report.Totals.Paused)
+	}
+	if report.Totals.Cancelled != 1 {
+		t.Errorf("cancelled = %d, want 1; outcomes=%+v", report.Totals.Cancelled, report.Outcomes)
+	}
+}
+
+// TestRun_CancellationBeforeTheFirstRoundStillProducesATerminalState covers the other entry
+// point: the interrupt that lands before anything is claimed.
+func TestRun_CancellationBeforeTheFirstRoundStillProducesATerminalState(t *testing.T) {
 	h := newFakeHub([]string{"code_change"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -582,11 +694,8 @@ func TestRun_CancellationLeavesTheAttemptForResumption(t *testing.T) {
 	if report.StopReason != StopCancelled {
 		t.Fatalf("stop reason = %s, want cancelled", report.StopReason)
 	}
-	for _, c := range h.completes {
-		if strings.HasSuffix(c, ":failed") {
-			t.Errorf("cancellation marked an attempt failed (%s); nothing failed, and the work "+
-				"item should be resumable", c)
-		}
+	if len(h.order) != 0 {
+		t.Errorf("claimed %v after the run was already cancelled", h.order)
 	}
 }
 
@@ -849,6 +958,14 @@ func TestClassifyStepDispatch_ExitZeroWithNoOutputIsNotSuccess(t *testing.T) {
 		{"non-zero exit, ordinary failure", DispatchResult{Output: "--- FAIL: TestX\n"}, fmt.Errorf("exit status 1"), StepFailed},
 		{"non-zero exit, 401", DispatchResult{Output: "Error: Unauthorized: Invalid API key: HTTP 401"}, fmt.Errorf("exit status 1"), StepAuthFailure},
 		{"explicit auth sentinel", DispatchResult{Output: ""}, fmt.Errorf("%w: nope", ErrAuth), StepAuthFailure},
+		// ExitErr carries the sentinel while err is nil. The outer branch used to consult
+		// ExitErr and the inner one did not, so this classified as StepFailed — the opposite
+		// of what the outer test had just detected — and the run blamed the work item for an
+		// expired credential instead of falling to the next channel.
+		{"auth sentinel in ExitErr only", DispatchResult{Output: "something unhelpful", ExitErr: fmt.Errorf("%w: nope", ErrAuth)}, nil, StepAuthFailure},
+		// Negative control: a non-auth ExitErr with a nil err is an ordinary failure, not an
+		// auth failure, and must not burn a healthy channel candidate.
+		{"ordinary failure in ExitErr only", DispatchResult{Output: "--- FAIL: TestX", ExitErr: fmt.Errorf("exit status 1")}, nil, StepFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1024,4 +1141,259 @@ func utf8Valid(s string) bool {
 		}
 	}
 	return true
+}
+
+// ─── regressions from the clean-context review ────────────────────────────────────────────────
+
+// TestRun_BlockedExternalNotifiesBothHalves is the regression test for a notification that the
+// suite used to certify as working while production dropped it on the floor.
+//
+// notifyExternalBlocks built its Notification with NO WorkItemID, and the production Notify seam
+// returns early when the target is empty (a note needs a timeline to land on), so nothing was
+// ever written. The old fake appended unconditionally, so "a note was recorded" passed. The fake
+// now mirrors the production guard, and this asserts BOTH halves the ruling asks for: a note on
+// my blocked work item, and one on the blocker so its holder learns somebody is waiting.
+func TestRun_BlockedExternalNotifiesBothHalves(t *testing.T) {
+	w := fwi("mine", "normal", "2026-01-01T00:00:00Z")
+	w.status = "blocked"
+	w.blockedBy = []string{"someone-elses-wi"}
+	h := newFakeHub([]string{"code_change"}, w)
+
+	report, err := runnerFor(h, Budget{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Terminal != TerminalBlockedExternal {
+		t.Fatalf("terminal = %s, want BLOCKED_EXTERNAL", report.Terminal)
+	}
+
+	var toldMine, toldBlocker bool
+	for _, n := range h.notes {
+		switch n.WorkItemID {
+		case "mine":
+			toldMine = true
+		case "someone-elses-wi":
+			toldBlocker = true
+		}
+	}
+	if !toldMine {
+		t.Errorf("no note on my own blocked work item; notes=%+v", h.notes)
+	}
+	if !toldBlocker {
+		t.Errorf("no note on the blocker; in an unattended run that is the only channel that "+
+			"reaches another person. notes=%+v", h.notes)
+	}
+	if len(h.notes) == 0 {
+		t.Error("BLOCKED_EXTERNAL notified nobody, which is the one thing this state is for")
+	}
+}
+
+// TestRun_FailedWorkItemsDoNotStayInFlight covers the `defer r.clearActive` fix. Seven of the
+// eight exits from executeWorkItem used to leave the work item in Snapshot.Active for the rest
+// of the run, so `polyforge watch` showed phantom "in flight" rows whose age only grew, on the
+// one screen this feature exists to make trustworthy.
+func TestRun_FailedWorkItemsDoNotStayInFlight(t *testing.T) {
+	bad := fwi("bad", "normal", "2026-01-01T00:00:00Z")
+	bad.failAtStep = "code_change"
+	paused := fwi("paused", "normal", "2026-01-02T00:00:00Z")
+	paused.pauseAtStep = "code_change"
+	reviewed := fwi("reviewed", "normal", "2026-01-03T00:00:00Z")
+	reviewed.reviewVerdict = "FAIL"
+	h := newFakeHub([]string{"code_change", "code_review"}, bad, paused, reviewed)
+
+	r := runnerFor(h, Budget{MaxParallel: 1})
+
+	// The invariant, checked on EVERY published snapshot: once a work item has an Outcome it
+	// must never appear as "in flight" again.
+	//
+	// Asserting on the FINAL snapshot proves nothing, and that is how the first version of
+	// this test passed against the bug: finish() sets Active to an empty slice unconditionally,
+	// so the last frame is clean whether or not anything was ever cleared. What a reader of
+	// `polyforge watch` actually sees is the frames in between.
+	var violations []string
+	r.Publish = func(s *Snapshot) {
+		done := map[string]bool{}
+		for _, o := range s.Recent {
+			done[o.Candidate.ID] = true
+		}
+		for _, a := range s.Active {
+			if done[a.Candidate.ID] {
+				violations = append(violations, fmt.Sprintf(
+					"%s is in Recent (%s) and STILL in Active at step %s",
+					a.Candidate.Slug, "finished", a.StepID))
+			}
+		}
+	}
+
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("work items stayed in flight after finishing:\n  %s\n"+
+			"watch would show each one forever, with a step age that only grows.",
+			strings.Join(violations, "\n  "))
+	}
+}
+
+// TestRun_SkippedWorkItemsDoNotSpendTheWorkItemBudget pins the budget's documented meaning:
+// MaxWorkItems "caps how many work items are EXECUTED". A lock-blocked work item was never
+// executed, and charging it let two contended work items exhaust `--max-work-items=2` having run
+// nothing, then report stop_reason=max_work_items as though the cap had done its job.
+func TestRun_SkippedWorkItemsDoNotSpendTheWorkItemBudget(t *testing.T) {
+	l1 := fwi("locked-1", "urgent", "2026-01-01T00:00:00Z")
+	l1.lockHolder = "other-1"
+	l2 := fwi("locked-2", "urgent", "2026-01-02T00:00:00Z")
+	l2.lockHolder = "other-2"
+	h := newFakeHub([]string{"code_change"}, l1, l2,
+		fwi("free-1", "normal", "2026-01-03T00:00:00Z"),
+		fwi("free-2", "normal", "2026-01-04T00:00:00Z"))
+
+	report, err := runnerFor(h, Budget{MaxWorkItems: 2}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Totals.Wrapped != 2 {
+		t.Fatalf("wrapped = %d, want 2: the two lock-blocked work items spent a budget meant "+
+			"for executed work (totals=%+v)", report.Totals.Wrapped, report.Totals)
+	}
+	if !contains(h.order, "free-1") || !contains(h.order, "free-2") {
+		t.Errorf("claim order = %v, want both runnable work items", h.order)
+	}
+}
+
+// TestRun_ARoundThatCouldClaimNothingSaysSo covers the stop reason. "queue_drained" is what a
+// genuinely empty queue reports; a round where every candidate was held by another attempt left
+// the work exactly where it was, and reporting the routine ending for it hides the one fact an
+// operator needs.
+func TestRun_ARoundThatCouldClaimNothingSaysSo(t *testing.T) {
+	a := fwi("a", "normal", "2026-01-01T00:00:00Z")
+	a.lockHolder = "other"
+	h := newFakeHub([]string{"code_change"}, a)
+
+	report, err := runnerFor(h, Budget{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.StopReason != StopNothingClaimable {
+		t.Fatalf("stop reason = %s, want nothing_claimable: the queue was not drained, it was "+
+			"untouchable", report.StopReason)
+	}
+	if report.Terminal != TerminalIdle {
+		t.Errorf("terminal = %s, want IDLE: the work is still there", report.Terminal)
+	}
+}
+
+// TestRun_APauseIsConfirmedWithTheServer is the regression test for an unanchored substring scan
+// that could strand a claimed work item permanently.
+//
+// DetectPause matches "attempt is paused" / "pf_pause_attempt" / "attempt_paused" ANYWHERE in the
+// step agent's combined output, and this repository contains ATTEMPT_PAUSED in fourteen Go files
+// — so a healthy `code_change` step that greps or tests over them trips it. On a false positive
+// the loop returns without completing the attempt (correct for a REAL pause), leaving it running
+// with its locks held by a process that has exited, recoverable only by pf_force_takeover.
+func TestRun_APauseIsConfirmedWithTheServer(t *testing.T) {
+	t.Run("a false positive does not strand the work item", func(t *testing.T) {
+		h := newFakeHub([]string{"code_change", "commit_and_pr"},
+			fwi("greps", "normal", "2026-01-01T00:00:00Z"))
+		r := runnerFor(h, Budget{})
+		inner := h.dispatch
+		r.Dispatch = func(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
+			out, err := inner(ctx, req)
+			if req.Step.ID == "code_change" {
+				// Exactly what a step that greps this repo prints.
+				out.Output += "internal/domain/errors.go:92: ErrAttemptPaused ErrCode = \"ATTEMPT_PAUSED\"\n" +
+					"ran the tests, all green\n"
+			}
+			return out, err
+		}
+		// The server is the authority and says this attempt is not paused.
+		r.AttemptPaused = func(context.Context, string) (bool, error) { return false, nil }
+
+		report, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if report.Totals.Paused != 0 {
+			t.Fatalf("a step that merely MENTIONED a pause was treated as one; the work item "+
+				"would be left claimed with its locks held (totals=%+v)", report.Totals)
+		}
+		if !contains(h.dispatched, "greps/commit_and_pr") {
+			t.Errorf("the loop stopped on a false-positive pause: dispatched=%v", h.dispatched)
+		}
+		if report.Totals.Wrapped != 1 {
+			t.Errorf("wrapped = %d, want 1", report.Totals.Wrapped)
+		}
+	})
+
+	t.Run("a real pause is still honoured", func(t *testing.T) {
+		w := fwi("really-paused", "normal", "2026-01-01T00:00:00Z")
+		w.pauseAtStep = "code_change"
+		h := newFakeHub([]string{"code_change", "commit_and_pr"}, w)
+		r := runnerFor(h, Budget{})
+		r.AttemptPaused = func(context.Context, string) (bool, error) { return true, nil }
+
+		report, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if report.Totals.Paused != 1 {
+			t.Fatalf("a confirmed pause was not honoured: %+v", report.Totals)
+		}
+		for _, c := range h.completes {
+			if strings.HasPrefix(c, "really-paused:") {
+				t.Errorf("a paused attempt was completed (%s); §0e forbids it", c)
+			}
+		}
+	})
+
+	t.Run("an unanswerable check errs towards paused", func(t *testing.T) {
+		w := fwi("unsure", "normal", "2026-01-01T00:00:00Z")
+		w.pauseAtStep = "code_change"
+		h := newFakeHub([]string{"code_change", "commit_and_pr"}, w)
+		r := runnerFor(h, Budget{})
+		r.AttemptPaused = func(context.Context, string) (bool, error) {
+			return false, fmt.Errorf("server unreachable")
+		}
+
+		report, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		// Not completing a live attempt is recoverable; completing one somebody deliberately
+		// paused destroys the hand-off they asked for. When unsure, do the recoverable thing.
+		if report.Totals.Paused != 1 {
+			t.Fatalf("an unconfirmable pause was not treated as a pause: %+v", report.Totals)
+		}
+	})
+}
+
+// TestRun_PublishNeverSeesAnAliasedSlice is the regression test for a data race the suite could
+// not see, because no test set Publish at all.
+//
+// update() handed Publish a shallow struct copy whose Active/Recent slice HEADERS still pointed
+// at the live backing arrays, while setActive writes s.Active[i] in place and clearActive
+// compacts through s.Active[:0]. The production Publish marshals its argument to JSON, so the
+// result was a torn ActiveWI in snapshot.json, or a fault inside reflect on a half-updated
+// string header. Run this with -race.
+func TestRun_PublishNeverSeesAnAliasedSlice(t *testing.T) {
+	var wis []fakeWI
+	for i := 0; i < 10; i++ {
+		wis = append(wis, fwi(fmt.Sprintf("w%02d", i), "normal", "2026-01-01T00:00:00Z"))
+	}
+	h := newFakeHub([]string{"spec", "code_change", "commit_and_pr"}, wis...)
+
+	r := runnerFor(h, Budget{MaxParallel: 8})
+	r.Publish = func(s *Snapshot) {
+		// Exactly what the production Publish does: walk the whole structure.
+		if _, err := json.Marshal(s); err != nil {
+			t.Errorf("marshal published snapshot: %v", err)
+		}
+		for _, a := range s.Active {
+			_ = a.Candidate.Slug + a.StepID
+		}
+	}
+
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }

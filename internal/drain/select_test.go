@@ -159,3 +159,31 @@ func TestScopeMine_NeedsAUserID(t *testing.T) {
 		t.Error("a scoped run with a user id did not report Mine()")
 	}
 }
+
+// TestOrderCandidates_AMissingCreatedAtSortsLastNotFirst pins the fix for an inverted tiebreak.
+//
+// The ready queue omits created_at on its items[] segment, so a mixed batch legitimately
+// contains both. "" is less than every real RFC3339 timestamp, so the naive `a < b` made a
+// DATELESS work item leapfrog every dated peer at the same priority — the exact opposite of the
+// FIFO the age key exists to provide, and worst precisely when the batch is mixed.
+//
+// Mutant watched: removing the empty-string branch puts "no-date" first.
+func TestOrderCandidates_AMissingCreatedAtSortsLastNotFirst(t *testing.T) {
+	in := []Candidate{
+		cand("no-date", "normal", ""),
+		cand("newest", "normal", "2026-09-14T00:00:00Z"),
+		cand("oldest", "normal", "2020-01-01T00:00:00Z"),
+	}
+	got := ids(OrderCandidates(in))
+	want := []string{"oldest", "newest", "no-date"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v\nwant  %v (a dateless work item must not jump ahead of dated peers)", got, want)
+	}
+
+	// Two dateless entries at the same priority still fall back to the id tiebreak, so the
+	// order stays total and reproducible.
+	both := []Candidate{cand("zz", "normal", ""), cand("aa", "normal", "")}
+	if g := ids(OrderCandidates(both)); !reflect.DeepEqual(g, []string{"aa", "zz"}) {
+		t.Errorf("two dateless candidates did not fall back to the id tiebreak: %v", g)
+	}
+}

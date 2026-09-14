@@ -84,7 +84,7 @@ func TestClassify_PrecedenceIsFailedThenExternalThenIdle(t *testing.T) {
 		{
 			name:      "failed wins over every kind of leftover",
 			anyFailed: true,
-			queue:     QueueState{Executable: 3, BlockedByOthers: 2, BlockedByMine: 1, Running: 1, Paused: 1},
+			queue:     QueueState{Executable: 3, ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}, {WorkItemID: "ext1", Blockers: []string{"outsider"}}}, BlockedByMine: 1, Running: 1, Paused: 1},
 			want:      TerminalFailed,
 		},
 		{
@@ -96,7 +96,7 @@ func TestClassify_PrecedenceIsFailedThenExternalThenIdle(t *testing.T) {
 		{
 			name:      "external block wins over my own leftovers",
 			anyFailed: false,
-			queue:     QueueState{BlockedByOthers: 1, BlockedByMine: 5, Executable: 2},
+			queue:     QueueState{ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}}, BlockedByMine: 5, Executable: 2},
 			want:      TerminalBlockedExternal,
 		},
 		{
@@ -145,7 +145,7 @@ func TestQueueStateEmpty_CountsEveryBucket(t *testing.T) {
 	for name, q := range map[string]QueueState{
 		"executable":        {Executable: 1},
 		"blocked by mine":   {BlockedByMine: 1},
-		"blocked by others": {BlockedByOthers: 1},
+		"blocked by others": {ExternallyBlocked: []BlockedWorkItem{{WorkItemID: "ext0", Blockers: []string{"outsider"}}}},
 		"running":           {Running: 1},
 		"paused":            {Paused: 1},
 	} {

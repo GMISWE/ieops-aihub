@@ -80,6 +80,15 @@ var ErrAttemptPaused = errors.New("drain: attempt is paused")
 // the run can fall to the next channel candidate instead of blaming the work item.
 var ErrAuth = errors.New("drain: harness authentication failed")
 
+// ErrNotSupported is what Claim returns when the scheduler STRUCTURALLY cannot do this, as
+// opposed to having lost a race. It exists so such a run is not reported as IDLE.
+//
+// IDLE means "come back later and it will work"; a missing capability never gets better by
+// waiting, and reporting it as the one terminal state that deliberately notifies nobody is the
+// most misleading answer available. A run that hits this ends FAILED, which is what "a human has
+// to act" is spelled as in the exit code.
+var ErrNotSupported = errors.New("drain: this scheduler cannot execute work items yet")
+
 // Runner is the scheduler. Every side effect is an injected function (package doc, "Design
 // rule"), so the whole loop below runs in tests against fakes.
 type Runner struct {
@@ -128,6 +137,10 @@ type Runner struct {
 	Dispatch func(ctx context.Context, req DispatchRequest) (DispatchResult, error)
 	// Cleanup removes the work item's worktrees after wrap (engine.CleanupWorktrees).
 	Cleanup func(ctx context.Context, c ClaimInfo) error
+	// AttemptPaused asks the server whether this work item's attempt is actually paused. It is
+	// the AUTHORITY for that question; DetectPause is only a cheap pre-filter over the step
+	// agent's prose. Optional: when nil, DetectPause's verdict is taken as final.
+	AttemptPaused func(ctx context.Context, wiID string) (bool, error)
 
 	// --- observation -----------------------------------------------------------------------
 
@@ -165,6 +178,7 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 		anyFailed bool
 		stop      = StopQueueDrained
 		round     int
+		executed  int
 	)
 
 	// skipped holds work items this RUN has already declined to execute — ones whose claim lost
@@ -195,23 +209,43 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 		// a work item that spawns a chain of blocked successors.
 		before, err := r.AllInScope(ctx)
 		if err != nil {
+			if r.bailOut(ctx, "list in-scope work items", err) {
+				stop = StopCancelled
+				break
+			}
 			return RunReport{}, fmt.Errorf("list in-scope work items: %w", err)
 		}
 		beforeIDs := IDSet(before)
 
 		candidates, err := r.Executable(ctx)
 		if err != nil {
+			if r.bailOut(ctx, "list executable work items", err) {
+				stop = StopCancelled
+				break
+			}
 			return RunReport{}, fmt.Errorf("list executable work items: %w", err)
 		}
 
-		budgetLeft := r.Budget.RemainingWorkItems(len(outcomes))
+		// Count EXECUTED work items, not every outcome. Budget.MaxWorkItems is documented as
+		// "how many work items are executed", and a lock-blocked or claim-failed work item
+		// was never executed — it was skipped in milliseconds. Charging the budget for those
+		// let two contended work items exhaust `--max-work-items=2` having run nothing at
+		// all, and then report stop_reason=max_work_items as though the cap had done its job.
+		budgetLeft := r.Budget.RemainingWorkItems(executed)
 		if budgetLeft == 0 {
 			stop = StopMaxWorkItems
 			break
 		}
 		frozen, _ := FreezeRound(filterSkipped(candidates, skipped), budgetLeft)
 		if len(frozen) == 0 {
+			// "Drained" and "untouchable" are different endings and must not share a word.
+			// A run that skipped every candidate on a lock race leaves the work exactly where
+			// it was; calling that queue_drained hides the one fact an operator needs, which
+			// is that the work is still there and somebody else is holding it.
 			stop = StopQueueDrained
+			if executed == 0 && len(skipped) > 0 {
+				stop = StopNothingClaimable
+			}
 			break
 		}
 
@@ -230,14 +264,21 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 				tally.Completed++
 			case ResultFailed:
 				tally.Failed++
-				anyFailed = true
 			case ResultLockBlocked:
 				tally.LockBlocked++
 				skipped[o.Candidate.ID] = true
 			case ResultPaused:
 				tally.Paused++
+			case ResultCancelled:
+				tally.Cancelled++
 			case ResultClaimFailed:
 				skipped[o.Candidate.ID] = true
+			}
+			if o.Result.Executed() {
+				executed++
+			}
+			if o.Result.NeedsHuman() {
+				anyFailed = true
 			}
 			r.update(func(s *Snapshot) { s.Totals.Add(o.Result); s.Recent = append(s.Recent, o) })
 		}
@@ -245,6 +286,10 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 		// Re-list to count what came into existence while the round was running.
 		after, err := r.AllInScope(ctx)
 		if err != nil {
+			if r.bailOut(ctx, "re-list in-scope work items", err) {
+				stop = StopCancelled
+				break
+			}
 			return RunReport{}, fmt.Errorf("re-list in-scope work items: %w", err)
 		}
 		tally.Created = CountCreatedDuringRound(beforeIDs, after)
@@ -269,7 +314,12 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 		if tally.Attempted() == 0 {
 			// Nothing in the frozen set could even be attempted. Another round would freeze
 			// the same set and do the same nothing.
-			stop = StopQueueDrained
+			//
+			// This is NOT "queue_drained": the queue was not drained, it was untouchable —
+			// every candidate was held by another attempt or vanished between listing and
+			// claiming. Reporting the routine ending for it hides the one fact an operator
+			// needs, which is that the work is still there and somebody else has it.
+			stop = StopNothingClaimable
 			break
 		}
 	}
@@ -288,7 +338,7 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 	r.finish(terminal, stop, queue)
 
 	if terminal == TerminalBlockedExternal {
-		r.notifyExternalBlocks(ctx)
+		r.notifyExternalBlocks(ctx, queue.ExternallyBlocked)
 	}
 
 	var totals Totals
@@ -395,6 +445,14 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 			})
 		}
 		return res
+	case errors.Is(err, ErrNotSupported):
+		// NOT ResultClaimFailed: that is the "somebody beat me to it" outcome, which is
+		// transient and correctly ends the run IDLE. This is a capability that does not
+		// exist, so waiting accomplishes nothing and a person has to act.
+		r.Logf("drain: %s cannot be executed: %v", c.Slug, err)
+		res.Result = ResultFailed
+		res.Err = err.Error()
+		return res
 	case err != nil:
 		r.Logf("drain: %s claim failed: %v", c.Slug, err)
 		res.Result = ResultClaimFailed
@@ -402,17 +460,24 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 		return res
 	}
 
+	// Every early return below used to leave this work item in Snapshot.Active for the rest of
+	// the run, so `polyforge watch` showed it "in flight" with an age that only grew. A run that
+	// failed forty work items displayed forty phantom ones on the single screen this feature
+	// exists to make trustworthy. A defer covers all eight exits at once, which is the point:
+	// the next person to add a return does not have to remember.
+	defer r.clearActive(c.ID)
+
 	steps, err := r.Startup(ctx, *claim)
 	if err != nil {
 		res.Result = ResultFailed
 		res.Err = fmt.Sprintf("engine startup: %v", err)
-		_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: engine startup: "+err.Error())
+		r.failAttempt(ctx, c.ID, "engine startup: "+err.Error())
 		return res
 	}
 	if len(steps) == 0 {
 		res.Result = ResultFailed
 		res.Err = "engine startup returned no steps"
-		_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: scenario template produced no steps")
+		r.failAttempt(ctx, c.ID, "scenario template produced no steps")
 		return res
 	}
 
@@ -430,14 +495,18 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 		}
 		res.Result = ResultFailed
 		res.Err = fmt.Sprintf("open first step: %v", err)
-		_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: "+res.Err)
+		r.failAttempt(ctx, c.ID, res.Err)
 		return res
 	}
 
 	for i, step := range steps {
 		if ctx.Err() != nil {
-			res.Result = ResultPaused
-			res.Err = "cancelled mid-run; attempt left running for resumption"
+			// NOT ResultPaused. Both leave the attempt claimed and neither completes it, but
+			// a pause was somebody's deliberate hand-off and this is an attempt abandoned
+			// because the scheduler was stopped. Reporting "paused=1" for it tells the
+			// operator a person decided something when nobody did.
+			res.Result = ResultCancelled
+			res.Err = "cancelled mid-run; the attempt is left claimed so it can be resumed"
 			return res
 		}
 
@@ -445,11 +514,11 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 		if rerr != nil {
 			res.Result = ResultFailed
 			res.Err = fmt.Sprintf("resolve role for step %s: %v", step.ID, rerr)
-			_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: "+res.Err)
+			r.failAttempt(ctx, c.ID, res.Err)
 			return res
 		}
 
-		ch := r.currentChannel()
+		ch, _ := r.currentChannel()
 		r.setActive(ActiveWI{
 			Candidate: c, StepID: step.ID, StepIndex: i + 1, StepCount: len(steps),
 			Role: role, Channel: ch, StepStarted: r.Now().UTC().Format(time.RFC3339),
@@ -466,11 +535,11 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 		if derr != nil {
 			res.Result = ResultFailed
 			res.Err = fmt.Sprintf("step %s: %v", step.ID, derr)
-			_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: "+res.Err)
+			r.failAttempt(ctx, c.ID, res.Err)
 			return res
 		}
 
-		if DetectPause(out.Output) {
+		if DetectPause(out.Output) && r.confirmPaused(ctx, c, step.ID) {
 			// engine-native-details.md §0e: stop the loop, no retry, and do NOT call
 			// pf_complete_attempt. The pause already put the work item in the state its
 			// author wanted; completing the attempt here would overwrite that.
@@ -487,10 +556,15 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 				for _, call := range engine.PlanStepBracket(engine.BracketInput{
 					StepID: step.ID, StepAttemptID: saID, Status: "failed", ErrorType: "review_fail",
 				}) {
-					_ = r.UpdateStep(ctx, c.ID, call)
+					if uerr := r.UpdateStep(ctx, c.ID, call); uerr != nil {
+						// §0c is explicit that either call alone leaves a broken state, so a
+						// failure here is not cosmetic: the step would show in_progress
+						// forever while the report says only "review_fail".
+						r.Logf("drain: %s: could not file the failed step %s: %v",
+							c.Slug, step.ID, uerr)
+					}
 				}
-				_ = r.CompleteAttempt(ctx, c.ID, "failed",
-					"failed reason: review_fail at step "+step.ID)
+				r.failAttempt(ctx, c.ID, "review_fail at step "+step.ID)
 				r.Logf("drain: %s review FAIL at step %s", c.Slug, step.ID)
 				res.Result = ResultFailed
 				res.Steps = i
@@ -513,10 +587,10 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 			ArtifactSummary:   SummaryLine(out.Output),
 			NextStepID:        nextID,
 			NextStepAttemptID: nextSA,
-			// The fused form is correct against every server that publishes next_step.
-			// engine.PlanStepBracket owns the fused-vs-degraded choice; drain only reports
-			// what the connected server supports, and a server that does not is older than
-			// this subcommand.
+			// Hardcoded true, and drain does NOT negotiate this: `polyforge drain` shipped
+			// after next_step did, so any server new enough to be drained publishes it.
+			// engine.PlanStepBracket still owns the fused-vs-degraded choice; this is the
+			// caller stating a fact about its own minimum server, not probing for one.
 			SupportsNextStep: true,
 		}) {
 			if err := r.UpdateStep(ctx, c.ID, call); err != nil {
@@ -527,7 +601,7 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 				}
 				res.Result = ResultFailed
 				res.Err = fmt.Sprintf("update step %s: %v", step.ID, err)
-				_ = r.CompleteAttempt(ctx, c.ID, "failed", "failed reason: "+res.Err)
+				r.failAttempt(ctx, c.ID, res.Err)
 				return res
 			}
 		}
@@ -535,7 +609,6 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 		res.Steps = i + 1
 	}
 
-	r.clearActive(c.ID)
 	if err := r.CompleteAttempt(ctx, c.ID, "wrapped", "drained by polyforge drain"); err != nil {
 		res.Result = ResultFailed
 		res.Err = fmt.Sprintf("wrap: %v", err)
@@ -554,13 +627,59 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 	return res
 }
 
+// failAttempt terminates the attempt as failed and REPORTS a bookkeeping failure rather than
+// discarding it.
+//
+// Every one of these calls used to be `_ = r.CompleteAttempt(...)`. The error being dropped is
+// not a detail: if it fails, the work item is left `running` with nobody executing it, holding
+// its locks, and the run's report says only why the STEP failed. A person reading that report
+// would have no way to learn that the bookkeeping itself did not land, and the next drain would
+// quietly skip the work item as already claimed.
+func (r *Runner) failAttempt(ctx context.Context, wiID, reason string) {
+	if err := r.CompleteAttempt(ctx, wiID, "failed", "failed reason: "+reason); err != nil {
+		r.Logf("drain: %s: the attempt could not be marked failed (%v); it is left running and "+
+			"still holds its locks. Original failure: %s", wiID, err, reason)
+	}
+}
+
+// confirmPaused checks with the server before believing DetectPause.
+//
+// DetectPause is an unanchored substring scan over the step agent's whole combined output, and
+// on its own that is dangerous rather than merely imprecise. Drain's first customer is aihub's
+// own work items, and this very repository contains "ATTEMPT_PAUSED" in fourteen Go files: a
+// perfectly healthy `code_change` step that greps or runs tests over them trips the detector. On
+// a false positive the loop returns without calling pf_complete_attempt — correct for a REAL
+// pause — so the attempt is left `running` with its locks held by a process that has exited, and
+// recovering it needs pf_force_takeover.
+//
+// So the scan stays as the cheap pre-filter (it costs nothing and is right almost always) and
+// the server settles it. When the check is unavailable or fails, the answer is YES: not
+// completing a live attempt is recoverable, while completing an attempt somebody deliberately
+// paused destroys the hand-off they asked for.
+func (r *Runner) confirmPaused(ctx context.Context, c Candidate, stepID string) bool {
+	if r.AttemptPaused == nil {
+		return true
+	}
+	paused, err := r.AttemptPaused(ctx, c.ID)
+	if err != nil {
+		r.Logf("drain: %s: step %s looked like a pause and the server could not confirm it (%v); "+
+			"treating it as paused, which leaves the attempt claimed", c.Slug, stepID, err)
+		return true
+	}
+	if !paused {
+		r.Logf("drain: %s: step %s mentioned a pause but the attempt is not paused; continuing",
+			c.Slug, stepID)
+	}
+	return paused
+}
+
 // dispatchWithFallback runs one step, falling to the next channel candidate on an authentication
 // failure — the run-time half of `three_ops_problems` ② ("运行中 401 则靠候选列表自动落到下一条通
 // 道"). It never falls through for an ordinary step failure: only a credential problem is the
 // channel's fault rather than the work's.
 func (r *Runner) dispatchWithFallback(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
 	for {
-		ch := r.currentChannel()
+		ch, idx := r.currentChannel()
 		req.Channel = ch
 		out, err := r.Dispatch(ctx, req)
 		verdict := ClassifyStepDispatch(out, err)
@@ -568,12 +687,12 @@ func (r *Runner) dispatchWithFallback(ctx context.Context, req DispatchRequest) 
 		case StepOK:
 			return out, nil
 		case StepAuthFailure:
-			if !r.demoteChannel(ch) {
+			if !r.demoteChannel(idx) {
 				return out, fmt.Errorf("%w: every channel candidate is unauthenticated (last: %s)",
 					ErrAuth, ch)
 			}
-			r.Logf("drain: channel %s failed authentication; falling back to %s",
-				ch, r.currentChannel())
+			next, _ := r.currentChannel()
+			r.Logf("drain: channel %s failed authentication; falling back to %s", ch, next)
 			continue
 		case StepSilentRefusal:
 			// The measured `claude -p` default-permission shape: exit 0, no work done. Never
@@ -618,8 +737,13 @@ const (
 // far less output than a step, and zero output is never a successful step: §0b requires every
 // agent to return a one-line summary, so silence violates the contract regardless of why.
 func ClassifyStepDispatch(out DispatchResult, err error) StepVerdict {
-	if err != nil || errors.Is(out.ExitErr, ErrAuth) {
-		if IsAuthFailure(out.Output) || errors.Is(err, ErrAuth) {
+	if err != nil || out.ExitErr != nil {
+		// Both error slots are consulted on BOTH sides of this branch. They used to disagree:
+		// the outer test looked at ExitErr and the inner one did not, so a result carrying
+		// ExitErr=ErrAuth with a nil err classified as StepFailed — the opposite of what the
+		// outer test had just detected — and the run would blame the work item for an expired
+		// credential instead of falling to the next channel.
+		if IsAuthFailure(out.Output) || errors.Is(err, ErrAuth) || errors.Is(out.ExitErr, ErrAuth) {
 			return StepAuthFailure
 		}
 		return StepFailed
@@ -735,23 +859,36 @@ func (r *Runner) init() {
 	}
 }
 
-func (r *Runner) currentChannel() Channel {
+// currentChannel returns the channel in use and its index, so a caller that later needs to
+// demote it names the same slot rather than a value that may appear more than once.
+func (r *Runner) currentChannel() (Channel, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A bounds guard, not dead code: demoteChannel never walks past the last index, but this
+	// keeps a future edit to the candidate list from turning a scheduling bug into a panic in
+	// an unattended process.
 	if r.chanIdx >= len(r.Channels) {
-		return r.Channels[len(r.Channels)-1]
+		return r.Channels[len(r.Channels)-1], len(r.Channels) - 1
 	}
-	return r.Channels[r.chanIdx]
+	return r.Channels[r.chanIdx], r.chanIdx
 }
 
-// demoteChannel advances to the next candidate, returning false when there is none left.
-func (r *Runner) demoteChannel(failed Channel) bool {
+// demoteChannel advances past the candidate at index `failedIdx`, returning false when there is
+// none left.
+//
+// It takes an INDEX rather than a Channel value. Comparing by value was wrong whenever the
+// candidate list contains the same (harness, model) pair twice — which `--channel=claude,codex,claude`
+// produces and parseChannels accepts: a worker failing on the FIRST claude, after chanIdx had
+// already reached the second, compared equal, advanced again, and could report "every channel
+// candidate is unauthenticated" without codex ever having been tried.
+//
+// The guard itself is the point: several steps run concurrently and may all hit the same expired
+// credential, so without it each concurrent step burns one healthy candidate.
+func (r *Runner) demoteChannel(failedIdx int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Only advance if nobody already advanced past the channel that failed: several steps run
-	// concurrently and may all hit the same expired credential, and each of them calling this
-	// would otherwise burn one healthy candidate per concurrent step.
-	if r.chanIdx < len(r.Channels) && r.Channels[r.chanIdx] != failed {
+	if r.chanIdx != failedIdx {
+		// Somebody already moved past it; this worker just retries on the current channel.
 		return true
 	}
 	if r.chanIdx+1 >= len(r.Channels) {
@@ -762,10 +899,27 @@ func (r *Runner) demoteChannel(failed Channel) bool {
 	return true
 }
 
+// update mutates the snapshot under the lock and hands Publish a copy that shares NOTHING with
+// the live one.
+//
+// The deep copy is the whole point, and a shallow `cp := *r.snapshot` was a real data race
+// rather than a theoretical one. A struct copy duplicates the slice HEADERS and leaves both
+// pointing at the same backing arrays, while setActive writes `s.Active[i] = a` in place and
+// clearActive compacts through `s.Active[:0]` in place. The production Publish marshals its
+// argument to JSON, so `-race` catches it as a read of an element another worker is writing,
+// and the consequence without the detector is a torn ActiveWI in snapshot.json or a fault
+// inside reflect on a half-updated string header.
+//
+// Copying under the lock and publishing outside it keeps Publish (which does file I/O) off the
+// critical path, which matters because every worker in a round calls this on every step.
 func (r *Runner) update(fn func(*Snapshot)) {
 	r.mu.Lock()
 	fn(r.snapshot)
 	cp := *r.snapshot
+	cp.Active = append([]ActiveWI(nil), r.snapshot.Active...)
+	cp.Recent = append([]Outcome(nil), r.snapshot.Recent...)
+	cp.PreflightRejected = append([]PreflightVerdict(nil), r.snapshot.PreflightRejected...)
+	cp.Queue.ExternallyBlocked = append([]BlockedWorkItem(nil), r.snapshot.Queue.ExternallyBlocked...)
 	r.mu.Unlock()
 	r.Publish(&cp)
 }
@@ -805,17 +959,64 @@ func (r *Runner) finish(t Terminal, stop StopReason, q QueueState) {
 	})
 }
 
-// notifyExternalBlocks writes layer ② notes for a BLOCKED_EXTERNAL ending. Best-effort: the run
-// is over and its exit code already carries the state, so a failure to annotate must not change
-// what the run reports.
-func (r *Runner) notifyExternalBlocks(ctx context.Context) {
-	if r.Notify == nil {
+// notifyExternalBlocks writes layer ② notes for a BLOCKED_EXTERNAL ending: one on each work item
+// of mine that is stuck, and one on each blocker holding it up.
+//
+// It takes the LIST rather than reading a count, and that is the fix for a defect that the test
+// suite actively certified as working. The note used to be built with no WorkItemID at all, and
+// the production Notify seam returns early when the target is empty (a note needs a timeline to
+// land on), so the run emitted nothing — while the fake in the tests appended unconditionally and
+// the assertion "a note was recorded" passed. The single terminal state the design calls "the one
+// that notifies" notified nobody, and the suite said otherwise.
+//
+// Best-effort: the run is over and its exit code already carries the state, so a failure to
+// annotate must not change what the run reports. It is logged rather than swallowed.
+func (r *Runner) notifyExternalBlocks(ctx context.Context, blocked []BlockedWorkItem) {
+	if r.Notify == nil || len(blocked) == 0 {
 		return
 	}
-	if err := r.Notify(ctx, Notification{
-		Note: fmt.Sprintf("polyforge drain stopped with BLOCKED_EXTERNAL on project %s: "+
-			"remaining in-scope work is blocked by work items outside this scope.", r.Project),
-	}); err != nil {
-		r.Logf("drain: warning: could not record the BLOCKED_EXTERNAL note: %v", err)
+	for _, b := range blocked {
+		name := b.Slug
+		if name == "" {
+			name = b.WorkItemID
+		}
+		if err := r.Notify(ctx, Notification{
+			WorkItemID: b.WorkItemID,
+			Note: fmt.Sprintf("polyforge drain stopped on project %s: this work item is blocked by "+
+				"work outside the draining scope (%s), so waiting will not clear it.",
+				r.Project, strings.Join(b.Blockers, ", ")),
+		}); err != nil {
+			r.Logf("drain: warning: could not annotate blocked work item %s: %v", name, err)
+		}
+		// The half the ruling calls "更漂亮的一手": tell the blocker somebody is waiting. In an
+		// unattended run this is the only channel that reaches another person at all.
+		for _, blocker := range b.Blockers {
+			if err := r.Notify(ctx, Notification{
+				WorkItemID: blocker,
+				BlockerID:  b.WorkItemID,
+				Note: fmt.Sprintf("polyforge drain is blocked on %s, which is waiting for this work item.",
+					name),
+			}); err != nil {
+				r.Logf("drain: warning: could not annotate blocker %s: %v", blocker, err)
+			}
+		}
 	}
+}
+
+// bailOut decides whether a failed server call is the run being cancelled rather than a genuine
+// error.
+//
+// It exists because the alternative was measured to be wrong in a way that reaches the operator:
+// a Ctrl-C landing mid-round made the next list call fail with context.Canceled, Run returned an
+// error, and Classify and finish never ran. The CLI then exited 2 ("internal error") for an
+// ordinary interrupt, StopCancelled was never reported for the one case it exists for, and the
+// snapshot was left with Finished=false and a dead pid, which `polyforge watch` renders as
+// "DIED (process gone, run never finished)". Cancellation is an ENDING, not a failure, and has to
+// go through the same terminal-state machinery as every other ending.
+func (r *Runner) bailOut(ctx context.Context, what string, err error) bool {
+	if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	r.Logf("drain: stopping, the run was cancelled during %s", what)
+	return true
 }

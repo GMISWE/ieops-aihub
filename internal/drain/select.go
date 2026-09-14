@@ -70,11 +70,17 @@ func OrderCandidates(in []Candidate) []Candidate {
 		if ri != rj {
 			return ri < rj
 		}
-		if out[i].CreatedAt != out[j].CreatedAt {
-			// Both are RFC3339 from the same server, so lexical order is chronological
-			// order; "" (the ready queue omits created_at on items[]) sorts first, which
-			// keeps a mixed batch stable rather than reordering it arbitrarily.
-			return out[i].CreatedAt < out[j].CreatedAt
+		// Both are RFC3339 from the same server, so lexical order is chronological order.
+		// A MISSING created_at (the ready queue omits it on items[]) sorts LAST rather than
+		// first: "" < every real timestamp, so the naive comparison made an item with no date
+		// leapfrog every dated peer at the same priority — the opposite of the FIFO the age
+		// key exists to provide, and worst exactly when the batch is mixed.
+		ai, aj := out[i].CreatedAt, out[j].CreatedAt
+		if (ai == "") != (aj == "") {
+			return aj == ""
+		}
+		if ai != aj {
+			return ai < aj
 		}
 		return out[i].ID < out[j].ID
 	})

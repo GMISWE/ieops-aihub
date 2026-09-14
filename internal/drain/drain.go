@@ -97,6 +97,10 @@ type StopReason string
 const (
 	// StopQueueDrained: a round found nothing it could execute. The ordinary ending.
 	StopQueueDrained StopReason = "queue_drained"
+	// StopNothingClaimable: the round had candidates and could not claim a single one, because
+	// every last one was held by another live attempt or went terminal between listing and
+	// claiming. Distinct from queue_drained on purpose: the work is still there.
+	StopNothingClaimable StopReason = "nothing_claimable"
 	// StopDivergence: the round created at least as many work items as it completed
 	// (aihub#640 `convergence_divergence_detector`). The queue is growing, not shrinking, so
 	// continuing would not converge. Stop and let a human look.
@@ -105,8 +109,6 @@ const (
 	StopMaxRounds StopReason = "max_rounds"
 	// StopMaxWorkItems: the --max-work-items budget was spent.
 	StopMaxWorkItems StopReason = "max_work_items"
-	// StopDeadline: the --max-duration budget was spent.
-	StopDeadline StopReason = "deadline"
 	// StopCancelled: the context was cancelled (SIGINT/SIGTERM, or `polyforge drain --stop`).
 	StopCancelled StopReason = "cancelled"
 )
@@ -133,7 +135,27 @@ const (
 	// item was claimed by someone else first, or went terminal between listing and claiming).
 	// Skipped, not failed: losing a race is not a defect.
 	ResultClaimFailed Result = "claim_failed"
+	// ResultCancelled: the run was cancelled (SIGINT/SIGTERM) while this work item was mid-step.
+	//
+	// Distinct from ResultPaused, which it used to be reported as, and the distinction matters
+	// to whoever reads the run: a pause was somebody's deliberate hand-off, while this is an
+	// attempt left running because the scheduler was stopped. Both leave the attempt claimed
+	// and neither completes it, but only one of them means "a person decided this".
+	ResultCancelled Result = "cancelled"
 )
+
+// Executed reports whether drain actually ran this work item, as opposed to skipping it before
+// any step began. It is what the --max-work-items budget counts: a lock race resolved in
+// milliseconds is not a work item's worth of execution, and charging the budget for it let two
+// contended work items exhaust a cap having run nothing.
+func (r Result) Executed() bool {
+	switch r {
+	case ResultWrapped, ResultFailed, ResultPaused, ResultCancelled:
+		return true
+	default:
+		return false
+	}
+}
 
 // NeedsHuman reports whether a Result requires a person before that work item can progress.
 // Only a genuine execution failure does. A lock race resolves itself the next time drain runs,

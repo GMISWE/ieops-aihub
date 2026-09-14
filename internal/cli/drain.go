@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -57,6 +58,10 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		fmt.Fprintf(os.Stderr, "drain: %v\n\n%s\n", err, DrainUsage)
 		os.Exit(1)
 	}
+	if opts.Help {
+		fmt.Println(DrainUsage)
+		return
+	}
 	if opts.Project == "" {
 		fmt.Fprintf(os.Stderr, "drain: --project is required\n\n%s\n", DrainUsage)
 		os.Exit(1)
@@ -88,6 +93,13 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		return
 	}
 
+	// Said once, up front, so the operator is not surprised by what follows. The run still
+	// proceeds: preflight, the snapshot and `polyforge watch` are all real and worth
+	// exercising, and the claim itself reports the gap per work item. What must NOT happen is
+	// the run ending IDLE, which would read as "come back later" for a capability that does
+	// not exist — see drain.ErrNotSupported, which is why it ends FAILED instead.
+	fmt.Fprintf(os.Stderr, "drain: WARNING: %v\n", errLifecycleSeamMissing)
+
 	// Ops problem 2, startup half: prove a channel works before claiming anything. Claiming
 	// first and discovering the credential problem afterwards would leave a trail of claimed
 	// work items nobody is executing, each holding locks.
@@ -116,6 +128,8 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 		UpdateStep:      q.UpdateStep,
 		CompleteAttempt: q.CompleteAttempt,
 		Notify:          q.Notify,
+
+		AttemptPaused: q.AttemptPaused,
 
 		Startup:     drainStartup(ctx, wsRoot, opts.Project),
 		ResolveRole: drainResolveRole,
@@ -159,7 +173,7 @@ func printDrainReport(report drain.RunReport, runID, runDir string) {
 		report.Totals.Wrapped, report.Totals.Failed, report.Totals.LockBlocked,
 		report.Totals.Paused, report.Totals.ClaimFailed, report.Totals.Created, report.Totals.Rounds)
 	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d\n",
-		report.Queue.Executable, report.Queue.BlockedByMine, report.Queue.BlockedByOthers,
+		report.Queue.Executable, report.Queue.BlockedByMine, report.Queue.BlockedByOthers(),
 		report.Queue.Running, report.Queue.Paused)
 	if runDir != "" {
 		fmt.Printf("  step output: %s\n", runDir)
@@ -204,7 +218,7 @@ func runDrainPlan(ctx context.Context, q *drainQueries, opts drainOptions) error
 		}
 	}
 	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d\n",
-		queue.Executable, queue.BlockedByMine, queue.BlockedByOthers, queue.Running, queue.Paused)
+		queue.Executable, queue.BlockedByMine, queue.BlockedByOthers(), queue.Running, queue.Paused)
 	fmt.Printf("  if nothing ran, this run would end: %s (exit %d)\n", terminal, drain.ExitCode(terminal))
 	return nil
 }
@@ -223,6 +237,7 @@ type drainOptions struct {
 	All      bool
 	Plan     bool
 	JSON     bool
+	Help     bool
 	Budget   drain.Budget
 	Channels []drain.Channel
 }
@@ -264,8 +279,11 @@ func parseDrainArgs(args []string) (drainOptions, error) {
 			}
 			o.Channels = chs
 		case a == "--help", a == "-h":
-			fmt.Println(DrainUsage)
-			os.Exit(0)
+			// Reported, not executed. os.Exit(0) here would end the PROCESS from inside a
+			// pure-looking parser that four tests call directly, so a future table-driven
+			// case containing "--help" would silently terminate the test binary with status
+			// 0 — a green run that stopped executing partway through.
+			o.Help = true
 		default:
 			// Refuse rather than ignore. An unknown flag on a scheduler that claims and
 			// executes real work items is far more likely to be a typo in a budget cap —
@@ -356,7 +374,14 @@ func preflightChannels(ctx context.Context, candidates []drain.Channel, runDir s
 			continue
 		}
 		if _, err := exec.LookPath(inv.Path); err != nil {
-			continue // not installed on this machine; not a fault
+			// Not a fault — not having codex is an ordinary machine configuration — but it
+			// must still be RECORDED. Skipping silently meant that on a machine with none of
+			// the four installed, `rejected` came back empty and the operator was told only
+			// "every candidate is missing, unauthenticated or refusing" with no indication of
+			// which binaries had been sought.
+			rejected = append(rejected, drain.PreflightVerdict{Channel: ch, OK: false,
+				Reason: fmt.Sprintf("%q is not installed on this machine", inv.Path)})
+			continue
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
 		// One log file PER HARNESS. They all shared `<runDir>/preflight` until a real run
@@ -562,13 +587,19 @@ func drainCleanup(_ context.Context, wsRoot string) func(context.Context, drain.
 // a separate change to files this work item does not own, so it is reported rather than guessed.
 // Until it lands, `--plan` exercises the entire scheduling half, which is what this work item is
 // scoped to.
+var errLifecycleSeamMissing = errors.New(
+	"cannot execute yet: the work-item lifecycle (claim + worktree provisioning + state file + " +
+		"session_secret) has no Go-callable implementation outside internal/mcp, where it lives " +
+		"in six unexported functions reachable only over MCP stdio. " +
+		"`polyforge drain --plan` exercises the whole scheduling half and is fully supported. " +
+		"Fix: extract pf_claim_work_item's lifecycle into a shared package, the way aihub#654 " +
+		"extracted the step engine")
+
 func claimForDrain(_ context.Context, wiID, _ string) (*drain.ClaimInfo, *drain.Blocker, error) {
-	return nil, nil, fmt.Errorf(
-		"cannot claim %s: the work-item lifecycle (claim + worktree provisioning + state file) "+
-			"has no Go-callable implementation outside internal/mcp, so `polyforge drain` cannot "+
-			"execute yet. Use `polyforge drain --plan` to exercise scheduling. "+
-			"Fix: extract pf_claim_work_item's lifecycle into a shared package the way aihub#654 "+
-			"extracted the step engine", wiID)
+	// Wrapped in drain.ErrNotSupported so the run ends FAILED (exit 12, "a human has to act")
+	// rather than IDLE (exit 10, "re-running later makes progress with no human involved").
+	// Re-running never helps here.
+	return nil, nil, fmt.Errorf("%w: %w (work item %s)", drain.ErrNotSupported, errLifecycleSeamMissing, wiID)
 }
 
 // ─── aihub queries ────────────────────────────────────────────────────────────
@@ -706,24 +737,25 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 	inScope := drain.IDSet(mine)
 
 	for _, b := range blocked {
-		external := false
+		var outsiders []string
 		deps, derr := q.c.ListDependencies(ctx, b.ID)
 		if derr != nil {
 			// An unresolvable dependency list must not be read as "blocked by me". Guessing
 			// the reassuring answer here converts a lookup failure into a silent IDLE, and
 			// IDLE is the state that tells nobody. Assume external: the cost of being wrong
 			// is one unnecessary notification, versus a person never hearing about a block.
-			external = true
+			outsiders = append(outsiders, "(dependency lookup failed: "+derr.Error()+")")
 		} else {
 			for _, d := range dependencyIDs(deps) {
 				if !inScope[d] {
-					external = true
-					break
+					outsiders = append(outsiders, d)
 				}
 			}
 		}
-		if external {
-			st.BlockedByOthers++
+		if len(outsiders) > 0 {
+			st.ExternallyBlocked = append(st.ExternallyBlocked, drain.BlockedWorkItem{
+				WorkItemID: b.ID, Slug: b.Slug, Blockers: outsiders,
+			})
 		} else {
 			st.BlockedByMine++
 		}
@@ -781,6 +813,18 @@ func (q *drainQueries) UpdateStep(ctx context.Context, wiID string, call engine.
 func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note string) error {
 	_, err := q.c.CompleteAttempt(ctx, wiID, map[string]any{"status": status, "note": note})
 	return classifyHubError(err)
+}
+
+// AttemptPaused asks the server whether a work item's current attempt is paused. It is the
+// authority behind drain.Runner.confirmPaused: DetectPause scans the step agent's prose for
+// phrases that also appear in fourteen of this repository's own Go files, so a work item whose
+// step greps them must not be abandoned on that evidence alone.
+func (q *drainQueries) AttemptPaused(ctx context.Context, wiID string) (bool, error) {
+	wi, err := q.c.GetWorkItem(ctx, wiID)
+	if err != nil {
+		return false, err
+	}
+	return str(wi["status"]) == "paused", nil
 }
 
 func (q *drainQueries) Notify(ctx context.Context, n drain.Notification) error {

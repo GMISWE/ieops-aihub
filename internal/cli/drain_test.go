@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -356,9 +357,9 @@ func TestObserveQueue_AnUnanswerableDependencyLookupCountsAsExternal(t *testing.
 		t.Fatalf("ObserveQueue: %v", err)
 	}
 
-	if st.BlockedByOthers != 1 {
+	if st.BlockedByOthers() != 1 {
 		t.Fatalf("BlockedByOthers = %d, want 1: an unanswerable dependency lookup must not be "+
-			"read as the reassuring answer (state = %+v)", st.BlockedByOthers, st)
+			"read as the reassuring answer (state = %+v)", st.BlockedByOthers(), st)
 	}
 	if st.BlockedByMine != 0 {
 		t.Errorf("BlockedByMine = %d, want 0", st.BlockedByMine)
@@ -395,7 +396,7 @@ func TestObserveQueue_ABlockerInsideTheScopeIsIdleNotExternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ObserveQueue: %v", err)
 	}
-	if st.BlockedByMine != 1 || st.BlockedByOthers != 0 {
+	if st.BlockedByMine != 1 || st.BlockedByOthers() != 0 {
 		t.Fatalf("state = %+v, want exactly one blocked-by-mine", st)
 	}
 	if got := drain.Classify(false, st); got != drain.TerminalIdle {
@@ -462,4 +463,37 @@ func containsStr(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestClaimForDrain_ReportsAStructuralGapNotATransientOne pins the terminal state the unbuilt
+// lifecycle seam produces.
+//
+// A run that could not claim anything used to end IDLE (exit 10), which `internal/drain/drain.go`
+// documents as "work remains, waiting on my own work items; come back later" and which notifies
+// nobody. Coming back later never helps: the capability does not exist. Wrapping the refusal in
+// drain.ErrNotSupported is what makes the run end FAILED (exit 12) instead, i.e. "a human has to
+// act", which is true.
+//
+// Mutant watched: dropping the ErrNotSupported wrap makes the claim classify as ResultClaimFailed
+// and the run report IDLE again.
+func TestClaimForDrain_ReportsAStructuralGapNotATransientOne(t *testing.T) {
+	_, _, err := claimForDrain(context.Background(), "wi_x", "key")
+	if err == nil {
+		t.Fatal("the unbuilt claim seam returned no error")
+	}
+	if !errors.Is(err, drain.ErrNotSupported) {
+		t.Fatalf("error %v does not wrap drain.ErrNotSupported, so the run would end IDLE "+
+			"(exit 10, \"come back later\") for a capability that does not exist", err)
+	}
+	// The message has to name the work item and the fix; an operator reading it at 3am has
+	// nothing else to go on.
+	for _, needle := range []string{"wi_x", "--plan", "internal/mcp", "aihub#654"} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Errorf("the refusal never mentions %q: %v", needle, err)
+		}
+	}
+	// And the terminal state that error produces must be the one that summons a human.
+	if got := drain.ExitCode(drain.Classify(true, drain.QueueState{Executable: 1})); got != 12 {
+		t.Errorf("a run with a failed work item exits %d, want 12", got)
+	}
 }

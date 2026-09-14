@@ -65,6 +65,7 @@ on:
       - 'internal/coding/**'
       - 'internal/config/**'
       - 'internal/domain/**'
+      - 'internal/drain/**'
       - 'internal/embedding/**'
       - 'internal/engine/**'
       - 'internal/mcp/**'

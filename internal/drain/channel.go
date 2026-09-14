@@ -189,19 +189,6 @@ func ClassifyPreflight(ch Channel, exitErr error, output string) PreflightVerdic
 	return PreflightVerdict{Channel: ch, OK: true}
 }
 
-// FirstHealthy returns the first verdict that passed, which is the channel the run will use.
-// Candidate order is preference order (Channel's doc comment), so "first" is "most preferred
-// that actually works" — the fallback rule from `three_ops_problems` ② ("运行中 401 则靠候选列表
-// 自动落到下一条通道") applied at startup.
-func FirstHealthy(vs []PreflightVerdict) (Channel, bool) {
-	for _, v := range vs {
-		if v.OK {
-			return v.Channel, true
-		}
-	}
-	return Channel{}, false
-}
-
 // IsAuthFailure reports whether a channel's output looks like a credential problem rather than a
 // task failure. It is what lets a mid-run failure fall to the next candidate instead of being
 // recorded as the work item's fault — the run-time half of `three_ops_problems` ②.

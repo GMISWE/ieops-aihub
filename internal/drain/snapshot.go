@@ -98,6 +98,7 @@ type Totals struct {
 	LockBlocked int `json:"lock_blocked"`
 	Paused      int `json:"paused"`
 	ClaimFailed int `json:"claim_failed"`
+	Cancelled   int `json:"cancelled"`
 	Created     int `json:"created"`
 	Rounds      int `json:"rounds"`
 }
@@ -115,6 +116,8 @@ func (t *Totals) Add(r Result) {
 		t.Paused++
 	case ResultClaimFailed:
 		t.ClaimFailed++
+	case ResultCancelled:
+		t.Cancelled++
 	}
 }
 
@@ -137,6 +140,15 @@ func LatestLink(root string) string { return filepath.Join(root, "drain", "lates
 // write hands the reader a half-written file, which parses as a JSON syntax error and reads to a
 // human as "drain has corrupted its state" at exactly the moment they went looking for
 // reassurance. Rename within one directory is atomic on every platform this ships to.
+//
+// The temp file gets a UNIQUE name, and that is not tidiness. Every worker in a round publishes,
+// so several goroutines call this concurrently; with one shared `snapshot.json.tmp` the writers
+// race each other rather than the reader. Measured with 8 publishers: os.WriteFile truncates
+// and then writes, a second goroutine renames that same path mid-write, and the reader gets a
+// prefix — 3 torn reads and 7 "rename: no such file or directory" errors out of 400 writes. That
+// is precisely the corruption the paragraph above promises not to produce, reintroduced one
+// level down. os.CreateTemp gives each writer its own file, so the only shared step is the
+// rename, which is the atomic one.
 func WriteSnapshot(dir string, s *Snapshot) error {
 	s.Version = SnapshotVersion
 	s.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -153,12 +165,29 @@ func WriteSnapshot(dir string, s *Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
-	tmp := filepath.Join(dir, SnapshotFile+".tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, SnapshotFile+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp snapshot in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	// CreateTemp makes the file 0600; the snapshot is meant to be readable by whoever runs
+	// `polyforge watch`, which need not be the same uid in a shared container.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod %s: %w", tmp, err)
 	}
 	final := filepath.Join(dir, SnapshotFile)
 	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s -> %s: %w", tmp, final, err)
 	}
 	return nil

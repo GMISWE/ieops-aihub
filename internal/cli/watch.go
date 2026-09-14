@@ -153,7 +153,7 @@ func printSnapshot(s *drain.Snapshot, dir string) {
 		s.Totals.Wrapped, s.Totals.Failed, s.Totals.LockBlocked, s.Totals.Paused,
 		s.Totals.ClaimFailed, s.Totals.Created)
 	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d\n",
-		s.Queue.Executable, s.Queue.BlockedByMine, s.Queue.BlockedByOthers,
+		s.Queue.Executable, s.Queue.BlockedByMine, s.Queue.BlockedByOthers(),
 		s.Queue.Running, s.Queue.Paused)
 
 	for _, v := range s.PreflightRejected {

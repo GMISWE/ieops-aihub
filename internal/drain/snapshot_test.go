@@ -217,3 +217,84 @@ func TestListRuns_NewestFirst(t *testing.T) {
 		t.Error("a root with no runs returned a non-nil list")
 	}
 }
+
+// TestWriteSnapshot_SurvivesConcurrentWriters is the regression test for a bug the
+// single-writer test above could not see.
+//
+// The temp file used to be a FIXED path (`snapshot.json.tmp`), and Runner publishes from every
+// worker goroutine in a round, so the writers raced each other rather than the reader:
+// os.WriteFile truncates and then writes, a second goroutine renames that same path mid-write,
+// and the reader gets a prefix. Measured with 8 publishers: 3 torn reads and 7
+// "rename: no such file or directory" errors out of 400 writes — exactly the corruption
+// WriteSnapshot's own doc comment promises not to produce, reintroduced one level down.
+//
+// Mutant watched: replacing os.CreateTemp with a fixed `SnapshotFile+".tmp"` path makes this
+// fail with either a write error or a JSON syntax error.
+func TestWriteSnapshot_SurvivesConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	const writers, each = 8, 40
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers*each)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				s := &Snapshot{RunID: "r1", Project: "p", Totals: Totals{Wrapped: i}}
+				// A body whose size varies makes a torn read far likelier.
+				for k := 0; k <= i; k++ {
+					s.Recent = append(s.Recent, Outcome{
+						Candidate: Candidate{ID: "w", Slug: "w", Goal: strings.Repeat("x", 48)},
+						Result:    ResultWrapped,
+					})
+				}
+				if err := WriteSnapshot(dir, s); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(w)
+	}
+
+	readsDone := make(chan struct{})
+	var torn int
+	go func() {
+		defer close(readsDone)
+		for i := 0; i < 2000; i++ {
+			if _, err := ReadSnapshot(dir); err != nil && !os.IsNotExist(err) {
+				torn++
+			}
+		}
+	}()
+
+	wg.Wait()
+	<-readsDone
+	close(errs)
+	for err := range errs {
+		t.Errorf("WriteSnapshot failed under concurrent writers: %v", err)
+	}
+	if torn > 0 {
+		t.Errorf("watch would have seen %d corrupt snapshots", torn)
+	}
+
+	// No temp files may be left behind: the run directory is what an operator lists.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("left a temp file behind: %s", e.Name())
+		}
+	}
+
+	// And the survivor must be readable and complete.
+	got, err := ReadSnapshot(dir)
+	if err != nil {
+		t.Fatalf("final read: %v", err)
+	}
+	if got.RunID != "r1" {
+		t.Errorf("final snapshot run id = %q", got.RunID)
+	}
+}

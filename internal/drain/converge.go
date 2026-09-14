@@ -12,6 +12,8 @@ type RoundTally struct {
 	LockBlocked int
 	// Paused counts work items that paused themselves mid-run.
 	Paused int
+	// Cancelled counts work items abandoned mid-step because the run was cancelled.
+	Cancelled int
 	// Created counts work items that came into existence DURING this round
 	// (CountCreatedDuringRound).
 	Created int
@@ -22,7 +24,7 @@ type RoundTally struct {
 
 // Attempted is how many work items the round actually tried to execute.
 func (t RoundTally) Attempted() int {
-	return t.Completed + t.Failed + t.LockBlocked + t.Paused
+	return t.Completed + t.Failed + t.LockBlocked + t.Paused + t.Cancelled
 }
 
 // Diverging reports whether this round created at least as many work items as it completed,
@@ -44,30 +46,49 @@ func (t RoundTally) Diverging() bool {
 	return t.Created > 0 && t.Created >= t.Completed
 }
 
+// BlockedWorkItem is one in-scope work item held up by dependencies OUTSIDE the scope, together
+// with the blockers responsible. It exists so the BLOCKED_EXTERNAL notification has somewhere to
+// land: notification layer ② writes a note on this work item and on each blocker, and neither is
+// possible from a bare count.
+type BlockedWorkItem struct {
+	WorkItemID string   `json:"work_item_id"`
+	Slug       string   `json:"slug,omitempty"`
+	Blockers   []string `json:"blockers,omitempty"`
+}
+
 // QueueState is what remains in scope after a round, as observed from the server. It is
 // separate from RoundTally because it answers a different question — not "what did I just do"
 // but "is there anything left, and can I do it myself".
 type QueueState struct {
 	// Executable counts in-scope work items that are ready to claim right now.
-	Executable int
+	Executable int `json:"executable"`
 	// BlockedByMine counts in-scope work items blocked by dependencies that are themselves in
 	// scope. Waiting helps: finishing my own work unblocks these.
-	BlockedByMine int
-	// BlockedByOthers counts in-scope work items blocked by dependencies OUTSIDE my scope.
+	BlockedByMine int `json:"blocked_by_mine"`
+	// ExternallyBlocked lists the in-scope work items blocked by dependencies OUTSIDE my scope.
 	// Waiting does not help; only another person acting does.
-	BlockedByOthers int
+	//
+	// This is a LIST rather than the count it used to be, and the change is what makes the
+	// BLOCKED_EXTERNAL notification real. With a count, the run could report the state and had
+	// nothing to write a note on, so the one terminal state the design calls "the one that
+	// notifies" notified nobody. Use BlockedByOthers() when only the number is wanted; there
+	// is now no way for the two to disagree.
+	ExternallyBlocked []BlockedWorkItem `json:"externally_blocked,omitempty"`
 	// Running counts in-scope work items with a live attempt (mine or, under --all, anyone's)
 	// that this run did not start. They are neither executable nor blocked, but they are
 	// certainly not "done", so they must keep COMPLETED from firing.
-	Running int
+	Running int `json:"running"`
 	// Paused counts in-scope paused work items. Drain never resumes them by default
 	// (aihub#640 wi.content "权限边界"), but their existence means the project is not complete.
-	Paused int
+	Paused int `json:"paused"`
 }
 
-// Idle reports whether anything at all is left in scope.
+// BlockedByOthers is how many in-scope work items are blocked from outside the scope.
+func (q QueueState) BlockedByOthers() int { return len(q.ExternallyBlocked) }
+
+// Empty reports whether anything at all is left in scope.
 func (q QueueState) Empty() bool {
-	return q.Executable == 0 && q.BlockedByMine == 0 && q.BlockedByOthers == 0 &&
+	return q.Executable == 0 && q.BlockedByMine == 0 && q.BlockedByOthers() == 0 &&
 		q.Running == 0 && q.Paused == 0
 }
 
@@ -95,7 +116,7 @@ func Classify(anyFailed bool, q QueueState) Terminal {
 	switch {
 	case anyFailed:
 		return TerminalFailed
-	case q.BlockedByOthers > 0:
+	case q.BlockedByOthers() > 0:
 		return TerminalBlockedExternal
 	case !q.Empty():
 		return TerminalIdle

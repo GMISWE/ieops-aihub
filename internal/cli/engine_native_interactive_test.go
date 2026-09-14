@@ -246,12 +246,12 @@ func TestEngineInteractiveHumanGateIsOrdered(t *testing.T) {
 		}
 	}
 
-	if !(dispatchAt < waitAt) {
+	if dispatchAt >= waitAt {
 		t.Errorf("%s: §1 waits for the human at offset %d BEFORE dispatching at %d. Then the "+
 			"human is being asked about work that has not happened, which is the zero-layer "+
 			"loop's question, not this one's.", ixDetailDoc, waitAt, dispatchAt)
 	}
-	if !(waitAt < bracketAt) {
+	if waitAt >= bracketAt {
 		t.Errorf("%s: §1 brackets the step at offset %d BEFORE waiting for the human at %d. The "+
 			"confirmation is then decorative: the step is already filed by the time it is "+
 			"asked for.", ixDetailDoc, bracketAt, waitAt)
@@ -278,6 +278,18 @@ func TestEngineInteractiveHumanGateIsOrdered(t *testing.T) {
 				"started while the gate is still open — the loop has run ahead of the person "+
 				"it is supposed to be waiting for.", ixDetailDoc, n, between)
 		}
+	}
+	// The window above is anchored on ixDispatchLine, which requires the literal
+	// `ROLE_AGENT[role]`. A speculative dispatch spelled `ROLE_AGENT[next_role]` does not match
+	// that anchor, so writing it BEFORE the step's own dispatch puts it outside [dispatchAt,
+	// waitAt) entirely and the in-window count never sees it. Count over the whole loop as well:
+	// §1 dispatches one agent per iteration, so any second call site is running ahead no matter
+	// where it sits or how its subscript is spelled.
+	if n := strings.Count(loop, "dispatch Agent("); n != 1 {
+		t.Errorf("%s: §1 has %d `dispatch Agent(` call sites, expected exactly 1. The loop "+
+			"dispatches one agent per iteration; a second site is the next step started early — "+
+			"and one placed before the step's own dispatch, or subscripted with anything other "+
+			"than `role`, escapes the positional window checked above.\n%s", ixDetailDoc, n, loop)
 	}
 }
 
@@ -321,6 +333,18 @@ func TestEngineInteractiveNonLocalExitsLeaveBothLoops(t *testing.T) {
 		t.Errorf("%s: §1 tests %q at offset %d, AFTER the completed bracket at %d. The bracket "+
 			"has already run by then, which is the exact failure the sentinel exists to stop.",
 			ixDetailDoc, ixHaltExit, haltAt, bracketAt)
+	}
+	// Setting the sentinel and TESTING it are not enough: what the test DOES is the whole
+	// property. `if halt: pass` restores the original defect verbatim, and `if halt: continue`
+	// turns a paused attempt into a dispatch of steps[i+1] — and both satisfy every assertion
+	// above, because those check that the token exists and where it sits, not what follows it.
+	// `continue` is the realistic drift ("skip this step, move on" reads like a fix), which is
+	// why the body is pinned by shape rather than by presence.
+	if !regexp.MustCompile(`(?m)^[ \t]*if halt:[^\n]*\n[ \t]*break\b`).MatchString(loop) {
+		t.Errorf("%s: §1's %q body does not begin with `break`. Only `break` leaves the FOR; "+
+			"`pass` drops both non-local exits into the completed bracket (the original defect) "+
+			"and `continue` dispatches the NEXT step after an exit that §0e requires be left "+
+			"open. The sentinel is only worth setting if testing it exits.", ixDetailDoc, ixHaltExit)
 	}
 }
 
@@ -435,11 +459,18 @@ func TestEngineInteractiveRetryDoesNotRespendTheStepAttemptID(t *testing.T) {
 	// A retried agent's only authority is pf_get_step, and the step is still in_progress — so
 	// completed_steps has no entry for it and the record reads CLEAN while the tree is dirty.
 	// Nothing else in the system can tell it that a previous attempt already edited files.
-	if !strings.Contains(loop, "WORKTREE") && !strings.Contains(loop, "worktree") {
+	// This used to scan the whole loop for "worktree" in either case, which the loop ALREADY
+	// satisfied before this work item: its closing comment reads `# all steps done -> wrap +
+	// worktree cleanup`. So deleting the retry_note explanation outright left the gate green
+	// while its own error message went on describing a property nothing measured. Pin the
+	// sentence that carries the meaning instead of the word that happens to appear in it.
+	const ixWorktreeWarning = "ITS EDITS ARE IN THE WORKTREE"
+	if !strings.Contains(loop, ixWorktreeWarning) {
 		t.Errorf("%s: §1's retry dispatch never tells the agent that a previous attempt's edits "+
-			"are already in the worktree. pf_get_step cannot show them (no completed_steps entry "+
-			"while the step is in_progress), so an agent not told reads the gap as 'nothing has "+
-			"happened yet' and starts over on top of its own earlier edits.", ixDetailDoc)
+			"are already in the worktree (looked for %q). pf_get_step cannot show them (no "+
+			"completed_steps entry while the step is in_progress), so an agent not told reads the "+
+			"gap as 'nothing has happened yet' and starts over on top of its own earlier edits.",
+			ixDetailDoc, ixWorktreeWarning)
 	}
 }
 

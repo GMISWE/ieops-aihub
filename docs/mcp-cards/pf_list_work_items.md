@@ -4,7 +4,7 @@
 {
   "tool": "pf_list_work_items",
   "description_sha256": "4a2154c164801a0713044ec1702711b6535fd0a136fd4e0fd978d7b13809c183",
-  "input_schema_sha256": "7737a24f2e088699bf2a35db5f39bc94205f410c80e108b8a6cf8363c996376e",
+  "input_schema_sha256": "829bee6820dfd3cffc6b21b5403cda9746fef079839b5abdc3d81f16015a4dc1",
   "params": {
     "claimed_by": {
       "type": "string",
@@ -50,6 +50,10 @@
         "desc"
       ]
     },
+    "owner_display": {
+      "type": "string",
+      "required": false
+    },
     "priority": {
       "type": "string",
       "required": false
@@ -64,6 +68,10 @@
     },
     "ready_only": {
       "type": "boolean",
+      "required": false
+    },
+    "reporter_display": {
+      "type": "string",
       "required": false
     },
     "scenario": {
@@ -114,9 +122,9 @@
 
 ## hop 0-1 — what the caller is told
 
-Twenty-two parameters — the largest published surface in the toolset, and the one
+Twenty-four parameters — the largest published surface in the toolset, and the one
 whose InputSchema carries an explicit byte budget
-(`internal/mcp/tools_list_wi_schema_size_test.go`, 5,459 B as of `aihub#652`) because
+(`internal/mcp/tools_list_wi_schema_size_test.go`, 5,798 B as of `aihub#656`) because
 a schema sits in the prefix of every request.
 
 | param | type | required | hop 1 promise |
@@ -132,6 +140,8 @@ a schema sits in the prefix of every request.
 | `label` | string | no | filter by label |
 | `user_id` | string | no | **REPORTER only** — not attempt owner, not watchers |
 | `claimed_by` | string | no | attempt-owner half of `user_id`'s gap: exact match on the CURRENT/LATEST attempt's `run_attempts.actor_user_id`, via `wi.current_attempt_id`; watchers still uncovered (`aihub#652`) |
+| `owner_display` | string | no | display-name CONTAINS match (case-insensitive `ILIKE`) on the CURRENT/LATEST attempt's `run_attempts.actor_display`; shares its `LEFT JOIN` with `claimed_by` (`aihub#656`) |
+| `reporter_display` | string | no | display-name CONTAINS match (case-insensitive `ILIKE`) on `wi.reporter_display` — the display-name analogue of `user_id`'s exact reporter-id match (`aihub#656`) |
 | `source` | string | no | filter by source |
 | `ready_only` | boolean | no | same PREDICATE as the ready queue, different page |
 | `include_step_state` | boolean | no | attaches `step_state`; ABSENT means "no step state" |
@@ -269,6 +279,23 @@ parameter to have a value probe at all
   behind one guard, so setting both filters at once does not double the join:
   `internal/domain/work_items_list_filters_test.go`
   (`TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin`).
+- `owner_display`/`reporter_display` (`aihub#656`) are CONTAINS matches rather than
+  exact matches: `run_attempts.actor_display` and `wi.reporter_display` are each compared with
+  `ILIKE` against a `%`-wrapped value rather than tested for equality, pinned by
+  `internal/domain/work_items_list_filters_test.go`
+  (`TestBuildListWorkItemsWhere_EveryFilterFieldReachesSQL`'s `ReporterDisplay` case
+  and `TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin`'s
+  `OwnerDisplay` assertion). Both reached hop 3 for the first time in `aihub#656`:
+  before it, `internal/server/router.go`'s hop-3 binding table had zero entries for
+  either field (nor for `WatcherUserID` — see the Open section below), so a caller
+  of the raw `/v1/work_items` endpoint got a 200 with an unfiltered page and no
+  error — this wi's own defect, not a repeat of one `aihub#652` had already found.
+  `claimed_by` is a shape worth copying (field, hop-3 wiring and MCP publication
+  landed together in one commit, `b784a18`) but not a precedent for THIS silent-drop:
+  that commit introduced `ClaimedByUserID` as a brand-new field, so there was never
+  a point where it existed in the domain layer unwired at hop 3 — unlike
+  `OwnerDisplay`/`ReporterDisplay`/`WatcherUserID` here, which did.
+  <!-- prose-only: because=history -->
 
 ## hop 5 — what comes back
 
@@ -360,3 +387,49 @@ SELECTs, the paging one and the vector one, and requires neither to project
   (`TestBuildListWorkItemsWhere_ClaimedByAndOwnerDisplaySharesOneJoin`) so the two
   filters never double the `LEFT JOIN` when both are set. Watchers remain
   uncovered by any published filter, a scope decision rather than a defect.
+
+  **Superseded in part by `aihub#656` (2026-09-13) — read this update, not just
+  the paragraph above.** `aihub#656` found that `internal/server/router.go`'s
+  hop-3 binding table had ZERO entries for `OwnerDisplay`, `ReporterDisplay`
+  **and** `WatcherUserID`:
+  all three were silently dropped over the raw `/v1/work_items` endpoint despite
+  full domain-layer support already existing for each (`buildListWorkItemsWhere`).
+  `OwnerDisplay`/`ReporterDisplay` are now both wired at hop 3
+  (`internal/server/router_list_wi_params_test.go`'s
+  `TestListWorkItems_EveryFilterParamReachesTheFilter`) *and* published as
+  `owner_display`/`reporter_display` above, because neither has a contrary scope
+  ruling. `WatcherUserID` is DIFFERENT: it is now wired at hop 3 too — the raw
+  HTTP `watcher_user_id` query param reaches the filter (`buildListWorkItemsWhere`'s
+  `wi_watches` semi-join, `TestBuildListWorkItemsWhere_WatcherIsAndedWithProjectScope`
+  in `internal/domain/work_items_watching_test.go`) and is no longer silently
+  dropped there — but it is deliberately **NOT** added as an `pf_list_work_items`
+  tool parameter. The scope ruling in the paragraph above stands unchanged and is
+  the reason: publishing a watcher filter here was a decision `aihub#652` declined
+  to make, not an oversight it left behind, and fixing the unrelated hop-3 gap is
+  not grounds to reverse that decision by accident.
+  <!-- prose-only: because=judgement -->
+
+  One more thing worth stating explicitly, since it is a fact about the HTTP
+  surface rather than the schema decision above: at raw `/v1/work_items`,
+  `watcher_user_id` now accepts an **arbitrary** user id — any string, not just
+  the caller's own — which is a genuinely NEW capability this wi introduces at
+  hop 3, not a restored one.
+  <!-- prose-only: because=judgement -->
+  No hop-0/1 (MCP schema) contract ever promised
+  watcher-filtering over HTTP, and the only pre-existing consumer (`/ui`'s
+  internal handler) always hardcoded the session's own user id, never an
+  arbitrary one. This follows the same precedent `user_id`/`claimed_by` already
+  set for accepting arbitrary ids at `/v1`, and it is not a privilege escalation:
+  the result is still ANDed with the caller's project-access scope, same as
+  every other filter.
+  <!-- prose-only: because=judgement -->
+  `internal/mcp/tools_list_wi_schema_test.go`
+  (`TestListWorkItemsPublishesDisplayFiltersNotWatcher`) pins both halves of this
+  — `owner_display`/`reporter_display` published, `watcher_user_id` not — so a
+  future accidental addition of the latter shows up as a failing test rather than
+  a silent schema change. See `internal/server/list_wi_filter_completeness_gate_test.go`
+  for the general recurrence gate `aihub#656` added: every `ListWorkItemsFilter`
+  field must be written to by `handleListWorkItems` (hop 3 exists for it), which
+  proves a field is wired to *something* but never that it is wired under the
+  *correct* param name — that half is still this file's and the hop-3/hop-4 test
+  files' job.

@@ -194,6 +194,85 @@ func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 	}
 }
 
+// TestGenerateRoles_OpencodeWritesAllFiles mirrors
+// TestGenerateRoles_PiWritesAllFiles above, but for opencode: exercises
+// LoadRoles -> ResolveModel (fake probe standing in for opencode's live
+// `opencode models` catalog check) -> RenderOpencodeAgentFiles -> write to
+// disk. Asserts all 5 step-<role>.md files land (opencode has no `name:`
+// frontmatter field -- the filename IS the agent's name, per
+// https://opencode.ai/docs/agents/), one resolved model makes it into
+// frontmatter verbatim, and the read-only/write-capable split holds
+// post-generation: explorer/reviewer carry `permission:\n  edit: deny`, the
+// other three carry no permission block at all (aihub#653 AC9).
+func TestGenerateRoles_OpencodeWritesAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{
+		Roles: &config.MachineRoles{
+			Tiers: map[string][]config.RoleCandidate{
+				"default": {{Harness: "opencode", Model: "anthropic/claude-sonnet-4-5"}},
+			},
+		},
+	}
+	probe := &fakeProbe{available: map[string]bool{"anthropic/claude-sonnet-4-5": true}}
+
+	if err := generateRoles(mc, "opencode", dir, probe); err != nil {
+		t.Fatalf("generateRoles(opencode) error: %v", err)
+	}
+
+	for _, name := range []string{"step-executor.md", "step-operator.md", "step-explorer.md", "step-reviewer.md", "step-designer.md"} {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: not written: %v", name, err)
+			continue
+		}
+		content := string(data)
+		if name == "step-executor.md" {
+			if !strings.Contains(content, "model: anthropic/claude-sonnet-4-5") {
+				t.Errorf("step-executor.md: expected resolved model in frontmatter, got:\n%s", content)
+			}
+		}
+	}
+
+	explorer, _ := os.ReadFile(filepath.Join(dir, "step-explorer.md"))
+	if !strings.Contains(string(explorer), "permission:\n  edit: deny") {
+		t.Errorf("step-explorer.md (read_only role) should carry `permission:\\n  edit: deny`, got:\n%s", explorer)
+	}
+	operator, _ := os.ReadFile(filepath.Join(dir, "step-operator.md"))
+	if strings.Contains(string(operator), "permission:") {
+		t.Errorf("step-operator.md (write-capable role) should NOT carry a permission: block, got:\n%s", operator)
+	}
+}
+
+// TestGenerateRoles_OpencodeValidatesAgainstProbe mirrors
+// TestGenerateRoles_CodexValidatesAgainstProbe above, but for opencode: proves
+// opencode generation validates every candidate against a live `opencode
+// models` catalog probe, never writing a model ID the probe does not report
+// as present.
+func TestGenerateRoles_OpencodeValidatesAgainstProbe(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{
+		Roles: &config.MachineRoles{
+			Tiers: map[string][]config.RoleCandidate{
+				"default": {{Harness: "opencode", Model: "not-in-catalog"}},
+			},
+		},
+	}
+	probe := &fakeProbe{available: map[string]bool{"anthropic/claude-sonnet-4-5": true}}
+
+	if err := generateRoles(mc, "opencode", dir, probe); err != nil {
+		t.Fatalf("generateRoles(opencode) error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "step-executor.md"))
+	if err != nil {
+		t.Fatalf("step-executor.md not written: %v", err)
+	}
+	if strings.Contains(string(data), "model:") {
+		t.Errorf("step-executor.md: candidate not in the probe's catalog must NOT be emitted, got:\n%s", data)
+	}
+}
+
 // captureStderr swaps os.Stderr for a pipe for the duration of fn and returns
 // everything written to it. fmt.Fprintf(os.Stderr, ...) reads the os.Stderr
 // variable at call time, so reassigning it here is enough to intercept every
@@ -245,7 +324,7 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 		{"lowest", "operator"},
 	}
 
-	for _, harness := range []string{"pi", "codex"} {
+	for _, harness := range []string{"pi", "codex", "opencode"} {
 		t.Run(harness, func(t *testing.T) {
 			dir := t.TempDir()
 			mc := &config.MachineConfig{} // Roles == nil: no candidates anywhere.
@@ -278,6 +357,8 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 				fileName, modelMarker = "pf-executor.md", "model:"
 			case "codex":
 				fileName, modelMarker = "step-executor.toml", "model ="
+			case "opencode":
+				fileName, modelMarker = "step-executor.md", "model:"
 			}
 			data, err := os.ReadFile(filepath.Join(dir, fileName))
 			if err != nil {
@@ -426,6 +507,53 @@ func TestParsePiModelCatalog_RealFormat(t *testing.T) {
 	}
 	if models["provider"] || models["model"] {
 		t.Errorf("parsePiModelCatalog: header row must not be parsed as a model, got %v", models)
+	}
+}
+
+// TestParseOpencodeModelCatalog_RealFormat pins the actual `opencode models`
+// output shape (aihub#653 measurement, opencode 1.18.30): one bare
+// "provider/model-id" slug per line, no header row, no other stdout noise --
+// the simplest of the three harness catalog formats (contrast codex's
+// single-line JSON blob and pi's aligned header+data-row table). The fixture
+// is a trimmed real capture (`opencode models` run in a clean, isolated
+// sandbox on this box; the box is a GCP VM so google-vertex models appear via
+// ambient metadata-server credentials even with HOME pointed at an empty
+// temp dir) -- 9 of the real ~55 lines, chosen to cover the format's actual
+// variety: a bare "provider/slug" line, one with an "@date"/"@default"
+// version suffix, and two with a nested provider path segment
+// (google-vertex/meta/..., google-vertex/xai/...).
+func TestParseOpencodeModelCatalog_RealFormat(t *testing.T) {
+	data, err := os.ReadFile("testdata/opencode_models_sample.txt")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	models := parseOpencodeModelCatalog(data)
+	for _, want := range []string{
+		"opencode/big-pickle",
+		"google-vertex/claude-opus-5@default",
+		"google-vertex/claude-sonnet-4-5@20250929",
+		"google-vertex/meta/llama-4-maverick-17b-128e-instruct-maas",
+		"google-vertex/xai/grok-4.6",
+	} {
+		if !models[want] {
+			t.Errorf("parseOpencodeModelCatalog: missing slug %q from real fixture, got %v", want, models)
+		}
+	}
+	if len(models) != 9 {
+		t.Errorf("parseOpencodeModelCatalog: got %d models, want 9 (fixture has exactly 9 lines)", len(models))
+	}
+}
+
+// TestParseOpencodeModelCatalog_SkipsBlankLines proves blank lines (a
+// trailing newline in particular, which `exec.Command(...).Output()` always
+// has) do not get parsed as an empty-string "model".
+func TestParseOpencodeModelCatalog_SkipsBlankLines(t *testing.T) {
+	models := parseOpencodeModelCatalog([]byte("opencode/big-pickle\n\n  \nanthropic/claude-opus-5\n"))
+	if len(models) != 2 {
+		t.Errorf("parseOpencodeModelCatalog: got %d models, want 2 (blank/whitespace-only lines must be skipped), got %v", len(models), models)
+	}
+	if models[""] {
+		t.Errorf("parseOpencodeModelCatalog: empty string must never be a key, got %v", models)
 	}
 }
 

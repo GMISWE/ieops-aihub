@@ -41,14 +41,11 @@ is broken.
 ```
 result = pf_complete_attempt(work_item_id=<current>, status="wrapped",
                              note="wrapped: <1-sentence summary of what was accomplished>")
-worktrees = result.get("worktrees", {})
-for repo_name, wt in worktrees.items():
-    git -C <workspace_root>/.repo/<repo_name> worktree remove --force <wt>
-# all of a wi's worktrees live under one parent (pf.<slug>/); remove it once, AFTER the loop -
-# never inside it, or the shared parent vanishes before later repos' removes
-if worktrees:
-    parent = os.path.dirname(next(iter(worktrees.values())))
-    if os.path.isdir(parent): rm -rf <parent>
+# Hand result["worktrees"] (repo name -> path) straight to the engine; do not loop by hand.
+polyforge engine cleanup-worktrees --workspace-root=<workspace_root> \
+  --worktrees='{"<repo_name>": "<worktree_path>", ...}'
+# -> {"removed": ["<repo_name>", ...], "errors": {}}   (exit 0 even when a removal failed:
+#    cleanup is best-effort, so read `errors` rather than the exit code)
 ```
 
 `pf_complete_attempt` returns the state file's `worktrees` map before deleting it, so there is no
@@ -62,13 +59,14 @@ Because the note precedes the completion, a terminal call that fails *at the com
 already recorded it. **Drop `note=` when retrying**, unless the error says the note was not
 recorded either.
 
-This same wrap-cleanup logic also exists as a behavior-preserving Go port for a future headless
-orchestrator: `internal/engine/wrap.go`'s `CleanupWorktrees`, reachable today via
-`polyforge engine cleanup-worktrees --workspace-root=<ws> --worktrees=<json>`. The pseudocode
-above and the Go port agree on both load-bearing details: each removal runs from the repo's main
-clone (`.repo/<repo_name>`), not from inside the worktree being removed, and the shared parent is
-removed once, unconditionally, after every per-repo removal has been attempted, even if one of
-them failed.
+`cleanup-worktrees` is `internal/engine/wrap.go`'s `CleanupWorktrees` (aihub#654), and it exists
+as a verb rather than as pseudocode here because two details of it are easy to get wrong by hand
+and neither is visible in the result: each `git worktree remove --force` runs FROM the repo's
+main clone (`<workspace_root>/.repo/<repo_name>`), never from inside the worktree being removed;
+and all of a wi's worktrees share one parent directory (`pf.<slug>/`), which is removed exactly
+once, AFTER every per-repo removal has been attempted - never inside that loop, or the shared
+parent vanishes before the later repos' removes, and not conditionally on them all succeeding.
+`internal/engine/wrap_test.go` pins both.
 
 ---
 

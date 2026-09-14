@@ -9,20 +9,18 @@
 // createBridge() handlers against the REAL shared hook scripts (pf-commit-guard,
 // pf-chain-hook.cjs), so that mutant fails here.
 //
-// WHERE THIS FILE LIVES, AND WHAT IT DOES NOT COVER (read before extending):
-//   plugins/polyforge/tests/ (a sibling of opencode/) already holds one .test.cjs per bridge
+// WHERE THIS FILE LIVES, AND WHAT ELSE COVERS IT (read before extending):
+//   plugins/polyforge/tests/ (a sibling of opencode/) holds one .test.cjs per bridge
 //   (pi-bridge.test.cjs) plus the cross-harness "hop 2" matcher-routing contract inside
 //   pf-commit-guard.test.sh (the `cases = {...}` table keyed by hooks.json / codex-hooks.json /
-//   copilot-hooks.json / pi-hooks.json). aihub#653's file_scope lock covers EXACTLY
-//   plugins/polyforge/opencode, internal/roles/render_opencode.go, internal/cli/roles_generate.go,
-//   bin -- NOT plugins/polyforge/tests nor .github/workflows/ci.yml, so this wi could not add an
-//   "opencode/opencode-hooks.json" row to that table, nor a CI step invoking this file (ci.yml
-//   hardcodes one `node --test ... plugins/polyforge/tests/<file>` step per bridge, not a glob,
-//   per .github/workflows/ci.yml:4886). Both are real, tracked follow-ups, filed (not just noted
-//   in a comment) as aihub#659 (wi_9csQp7cM) from this wi's code_review step: whoever picks that
-//   up should add the opencode row/step the same shape as pi's. Until it lands, this file is run
-//   manually (`node --test plugins/polyforge/opencode/tests/opencode-bridge.test.cjs`) and by
-//   this wi's own local gate, not by CI.
+//   copilot-hooks.json / pi-hooks.json / opencode/opencode-hooks.json). aihub#653's file_scope
+//   lock covered EXACTLY plugins/polyforge/opencode, internal/roles/render_opencode.go,
+//   internal/cli/roles_generate.go, bin -- NOT plugins/polyforge/tests nor
+//   .github/workflows/ci.yml, so that wi could not add an "opencode/opencode-hooks.json" row to
+//   that table, nor a CI step invoking this file. aihub#659 (wi_9csQp7cM) closed both gaps: CI
+//   now runs `node --test plugins/polyforge/opencode/tests/opencode-bridge.test.cjs` as its own
+//   step in .github/workflows/ci.yml, and pf-commit-guard.test.sh's matcher table has an
+//   opencode row alongside cc/codex/pi/copilot.
 //
 // SCOPE. This wi deliberately wires only tool.execute.before / tool.execute.after (see
 // plugin/polyforge-hooks.js's own header comment for why session_start/input-router
@@ -103,25 +101,58 @@ test('tool.execute.before: the as-shipped MCP tool id ("polyforge_pf_commit") is
   }
 });
 
-// KNOWN GAP, asserted honestly rather than papered over: this bridge's matcher is
-// permissive on purpose (any *_pf_commit shape reaches pf-commit-guard even if a project
-// renames the `mcp.polyforge` server entry), but pf-commit-guard's OWN prefix strip
-// (hooks/pf-commit-guard, out of aihub#653's file_scope lock) does not recognize an
-// arbitrary renamed key: it strips any `__`-terminated prefix, then checks literal
-// `polyforge-` / `polyforge_` -- none of which matches `my_polyforge_server_`. So a renamed
-// server entry reaches the guard but is NOT scanned, and the guard fails open (no fields ->
-// exit 0, allow). This test pins that current, real behaviour rather than assuming the
-// earlier (wrong) "downstream already strips any prefix" claim this file's comment used to
-// make before this test caught it -- and rather than the second, subtler overclaim this
-// comment itself made ("exactly three literal forms" for the `__`-strip case), caught by
-// aihub#653's code_review.
-test('tool.execute.before: a RENAMED server key currently fails OPEN (tracked gap, not this wi\'s fix)', async (t) => {
+// FIXED (aihub#659, MEASURED_2026_09_14_renamed_server_key_fails_open): this bridge's
+// matcher was always permissive on purpose (any *_pf_commit shape reaches pf-commit-guard
+// even if a project renames the `mcp.polyforge` server entry), but pf-commit-guard's OWN
+// prefix strip (hooks/pf-commit-guard) used to recognize only an UNCHANGED `mcp.polyforge`
+// key: it strips any `__`-terminated prefix, then checked literal `polyforge-` /
+// `polyforge_` at the very front of what was left -- neither of which matched
+// `my_polyforge_server_`. A renamed server entry reached the guard but was NOT scanned, and
+// the guard failed open (no fields -> exit 0, allow), silently. Fixed by adding a fallback
+// to pf-commit-guard: once "polyforge" is found ANYWHERE in what's left after the
+// `__`-strip, the real tool name is recovered from its known trailing verb
+// (pf_commit/pr/wrap/ship) instead of assuming where the server-key portion ends. The four
+// tests below pin that ROUND-1 fix: PREFIX and INFIX are the two shapes that actually flip
+// ALLOW->BLOCK; the __-bearing case was already blocked before this fix (rsplit("__") plus
+// the literal `polyforge_` strip already caught it) and is kept as a regression pin, not
+// because it discriminates this fix. Plus a negative control proving the fallback did not
+// degenerate into "match anything ending in pf_commit" (a genuinely unrelated server key
+// must stay unrecognized).
+test('tool.execute.before: a renamed server key is still recognized as polyforge\'s (PREFIX rename)', async (t) => {
+  if (!HAVE_PY) return t.skip('python3 unavailable, guard is inert by design');
+  await assert.rejects(before('my_polyforge_server_pf_commit', { message: BANNED }));
+});
+
+test('tool.execute.before: a renamed server key is still recognized as polyforge\'s (INFIX rename)', async (t) => {
+  if (!HAVE_PY) return t.skip('python3 unavailable, guard is inert by design');
+  await assert.rejects(before('x_polyforge_y_pf_commit', { message: BANNED }));
+});
+
+test('tool.execute.before: a renamed server key is still recognized as polyforge\'s (__-bearing rename)', async (t) => {
+  if (!HAVE_PY) return t.skip('python3 unavailable, guard is inert by design');
+  await assert.rejects(before('pfx__polyforge_pf_commit', { message: BANNED }));
+});
+
+// Negative control: without it, "match anything ending in pf_commit" would trivially pass
+// the three cases above while being wrong -- this key never contains the substring
+// "polyforge" at all, so it must stay unrecognized, same as before the fix.
+test('tool.execute.before: a genuinely unrelated server key is NOT misclassified as polyforge\'s', async (t) => {
   if (!HAVE_PY) return t.skip('python3 unavailable');
-  await assert.doesNotReject(
-    before('my_polyforge_server_pf_commit', { message: BANNED }),
-    'if this now rejects, pf-commit-guard has learned to strip arbitrary server keys — ' +
-      'promote this to a "must reject" case and delete this comment',
-  );
+  await assert.doesNotReject(before('github_pf_commit', { message: BANNED }));
+});
+
+// FOUND by aihub#659's code_review (round 2, mem_PaxJGGES) and closed here: the round-1 fix
+// above recovered the real tool name via an `elif "polyforge" in base_tool` branch that was
+// mutually exclusive with the two literal-prefix strips higher up in pf-commit-guard. A
+// rename that KEEPS the literal `polyforge_`/`polyforge-` prefix and appends a suffix (e.g.
+// `polyforge_v2_pf_commit`) has that prefix eaten by the literal strip, leaving a non-verb
+// remainder (`v2_pf_commit`) that the `elif` never sees because the strip already fired --
+// same fail-OPEN bug, one layer deeper, measured OLD=ALLOW NEW=ALLOW before this round.
+// Fixed by capturing "polyforge" presence BEFORE the literal strips run and making the
+// recovery an unconditional post-pass, not an elif.
+test('tool.execute.before: a renamed server key is still recognized as polyforge\'s (prefix-kept, suffix-appended)', async (t) => {
+  if (!HAVE_PY) return t.skip('python3 unavailable, guard is inert by design');
+  await assert.rejects(before('polyforge_v2_pf_commit', { message: BANNED }));
 });
 
 test('tool.execute.before: the built-in bash tool is gated by its confirmed bare id "bash"', async (t) => {

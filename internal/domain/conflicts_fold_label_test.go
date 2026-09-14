@@ -24,6 +24,7 @@ package domain
 // the fixture is doing.
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -149,4 +150,82 @@ func TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee(t *testing.T) {
 			}
 		}
 	})
+
+	// ── what the fold does NOT clear ─────────────────────────────────────────
+
+	t.Run("the_fold_clears_five_fields_and_last_active_age_is_not_one_of_them",
+		func(t *testing.T) {
+			// 🔴 THIS ARM EXISTS BECAUSE THE OBVIOUS SUMMARY IS FALSE. "The fold
+			// withholds the counterparty" reads as total and is not: the fold
+			// assigns exactly five fields, and LastActiveAgeSeconds survives while
+			// rules 2, 4 and 6 set it on the very predictions that set WIID — so a
+			// folded prediction still publishes the invisible holder's heartbeat
+			// age. A clean-context review of aihub#679 caught that sentence in this
+			// file's own constant doc, which is why the residue is now pinned
+			// rather than described.
+			//
+			// It is pinned in BOTH directions on purpose. Asserting only "these
+			// five are cleared" would stay green if someone added a sixth; asserting
+			// only "age is not cleared" would stay green if the fold stopped
+			// clearing anything. The set is compared exactly, so EITHER change
+			// reddens this and sends the author to
+			// docs/mcp-cards/pf_predict_conflicts.md, which publishes the same list
+			// as the contract.
+			src := stripComments(t, sourceOf(t, conflictsSourceFile))
+			body := bodyOf(t, src, "PredictConflicts")
+
+			// ⚠️ THE LEADING BOUNDARY GROUP IS A BUG FIX, NOT DEFENSIVE STYLE. RE2
+			// has no lookbehind, so `p\.(\w+) =` with nothing in front of it matched
+			// `dep.kind = 'blocks'` inside rule 6's will_unlock SQL — "dep" ends in
+			// "p" — and this arm reported a phantom sixth cleared field named
+			// `kind`. Requiring a non-identifier character before the `p` is what
+			// makes the receiver a whole identifier rather than a suffix.
+			assign := regexp.MustCompile(`(^|[^A-Za-z0-9_.])p\.([A-Za-z]+) =[^=]`)
+			got := map[string]bool{}
+			for _, m := range assign.FindAllStringSubmatch(body, -1) {
+				got[m[2]] = true
+			}
+
+			// The control: the matcher must find assignments at all, or "the set is
+			// empty" would agree with "nothing is cleared" and this arm would be
+			// green on a fold that had been deleted outright.
+			if len(got) == 0 {
+				t.Fatal("no `p.<Field> =` assignment found anywhere in PredictConflicts — the " +
+					"matcher is broken or the fold is gone; either way the comparison below " +
+					"is between two things that are not the fold")
+			}
+
+			want := map[string]bool{
+				"ActorDisplay": true, "WIID": true, "WISlug": true,
+				"AttemptID": true, "Description": true,
+			}
+			for field := range want {
+				if !got[field] {
+					t.Errorf("the fold no longer clears p.%s. Every field in this set is an "+
+						"identifier of a holder the caller may not see; dropping one "+
+						"re-opens the aihub#665 disclosure through a different field.", field)
+				}
+			}
+			for field := range got {
+				if !want[field] {
+					t.Errorf("the fold now also clears p.%s, which is a WIDENING this file and "+
+						"docs/mcp-cards/pf_predict_conflicts.md both describe as not happening. "+
+						"If that is intended, update the constant's doc comment and the card's "+
+						"published list in the same change — the card states the cleared set as "+
+						"the contract.", field)
+				}
+			}
+
+			// 🔴 NAMED EXPLICITLY, not left to the set comparison. This is the one
+			// the review found stated wrongly, so it gets an assertion whose failure
+			// message says what it means rather than "unexpected field".
+			if got["LastActiveAgeSeconds"] {
+				t.Error("the fold now clears p.LastActiveAgeSeconds. That is a real narrowing " +
+					"and may well be right — a folded prediction names a holder the caller " +
+					"cannot see or take over, so a heartbeat age has no use to them — but " +
+					"aihub#679 deliberately left it, and both the FoldedConflictDescription " +
+					"doc comment and docs/mcp-cards/pf_predict_conflicts.md publish that it " +
+					"SURVIVES. Close the residue in all three places or none.")
+			}
+		})
 }

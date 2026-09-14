@@ -156,7 +156,10 @@ break   # stop the whole loop, skip the completed report; output the review issu
 ```
 
 Both calls, in that order. `pf_update_step(failed)` alone leaves the attempt running;
-`pf_complete_attempt(failed)` alone leaves the step showing `in_progress` forever.
+`pf_complete_attempt(failed)` alone is REFUSED - 409 `CONFLICT_STEP_IN_PROGRESS`, "a step is
+still in_progress; set force_terminate_step=true or update step first" - so the attempt does
+not end either. (The server refuses rather than stranding the step: only `status="paused"` or
+an explicit `force_terminate_step=true` may end an attempt over an in-progress step.)
 `pf_complete_attempt` is deliberately NOT part of `bracket-plan`'s output: it is terminal
 attempt state, once per wi, outside the per-step bracket that verb models.
 

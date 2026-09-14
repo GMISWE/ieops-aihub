@@ -47,6 +47,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// docSegment returns the document (convergence-bearing) segment of an
+// emb_pipeline stamp — the same cut cmd/aihub-embed-backfill's SQL makes with
+// split_part(emb_pipeline, '|', 1), so the two agree by construction. An empty
+// stamp — NULL in the row, coalesced to the empty string by the SELECT in main — has no
+// segment: it is a row written before migration 0041, whose pipeline identity
+// is unknown rather than known-different, and main reports it as such.
+func docSegment(stamp string) string {
+	seg, _, _ := strings.Cut(stamp, embedding.StampSegmentSep)
+	return seg
+}
+
 // cosineOKThreshold is the pass/fail line printed in the verdict. Re-embedding
 // the exact same text twice through the same provider is expected to be
 // deterministic (or so close to it that floating-point noise rounds to
@@ -116,6 +127,8 @@ func main() {
 		os.Exit(1)
 	}
 	curModel, curDims := prov.ModelID(), prov.Dims()
+	curPipeline := domain.EmbedPipelineID(curModel, curDims)
+	curPipelineDoc := domain.EmbedPipelineDoc(curModel, curDims)
 
 	pool, err := db.New(ctx, dsn)
 	if err != nil {
@@ -134,18 +147,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("aihub-embed-verify: current provider model=%q dims=%d, checking %d row(s)\n\n", curModel, curDims, len(targets))
+	fmt.Printf("aihub-embed-verify: current provider model=%q dims=%d, checking %d row(s)\n", curModel, curDims, len(targets))
+	// Printed once, not per row: it is a property of this process's
+	// configuration, and every row would say the same thing.
+	if strings.Contains(curPipelineDoc, "s="+embedding.ServingUndeclared) {
+		fmt.Printf("warn: EMBEDDING_SERVING_ID is unset, so the emb_pipeline stamp covers neither pooling nor " +
+			"attention direction — a backend swap will NOT show up in the per-row pipeline comparison below (aihub#661)\n")
+	}
+	fmt.Println()
 
 	var mismatches, inconclusive, errored int
 	for _, id := range targets {
 		var (
-			memProject, memType, content, storedModel string
-			storedDims                                int
+			memProject, memType, content, storedModel, storedPipeline string
+			storedDims                                                int
 		)
 		if err := pool.QueryRow(ctx,
-			`SELECT project, type, content, coalesce(emb_model,''), coalesce(emb_dims,0) FROM memories WHERE id = $1`,
+			`SELECT project, type, content, coalesce(emb_model,''), coalesce(emb_dims,0), coalesce(emb_pipeline,'') FROM memories WHERE id = $1`,
 			id,
-		).Scan(&memProject, &memType, &content, &storedModel, &storedDims); err != nil {
+		).Scan(&memProject, &memType, &content, &storedModel, &storedDims, &storedPipeline); err != nil {
 			fmt.Printf("id=%s: FAILED to load row: %v\n\n", id, err)
 			errored++
 			continue
@@ -163,10 +183,26 @@ func main() {
 		}
 
 		fmt.Printf("id=%s project=%s type=%s content_len=%d_runes%s\n", id, memProject, memType, contentRunes, truncNote(truncated, embInputRunes))
-		fmt.Printf("  stored : emb_model=%q emb_dims=%d\n", storedModel, storedDims)
-		fmt.Printf("  current: emb_model=%q emb_dims=%d\n", curModel, curDims)
+		fmt.Printf("  stored : emb_model=%q emb_dims=%d emb_pipeline=%q\n", storedModel, storedDims, storedPipeline)
+		fmt.Printf("  current: emb_model=%q emb_dims=%d emb_pipeline=%q\n", curModel, curDims, curPipeline)
 		if storedModel != curModel {
 			fmt.Printf("  ! stored emb_model differs from the currently configured provider (expected if the provider was swapped since this row was embedded and it has not been backfilled since)\n")
+		}
+		// aihub#661: the DOCUMENT segment is what decides whether this row is in
+		// the current vector space, and it is what cmd/aihub-embed-backfill
+		// compares — so report drift on exactly that, not on the whole stamp.
+		//
+		// An EMPTY stored stamp is reported separately and in weaker words,
+		// because it means something weaker: a row written before migration 0041
+		// has an UNKNOWN pipeline, not a known-different one. Calling it
+		// "different" would manufacture the same provenance the migration
+		// deliberately declined to guess.
+		switch storedDoc := docSegment(storedPipeline); {
+		case storedPipeline == "":
+			fmt.Printf("  ! this row records no pipeline identity (written before migration 0041) — unknown, not necessarily different; cmd/aihub-embed-backfill re-embeds it on its next run\n")
+		case storedDoc != curPipelineDoc:
+			fmt.Printf("  ! stored pipeline segment %q differs from the current %q — this row is in a DIFFERENT vector space and cmd/aihub-embed-backfill will re-embed it on its next run\n",
+				storedDoc, curPipelineDoc)
 		}
 		if storedDims != len(freshVec) {
 			fmt.Printf("  ! stored emb_dims=%d differs from freshly computed dims=%d — cosine cannot be computed (pgvector requires equal dimensions)\n\n", storedDims, len(freshVec))

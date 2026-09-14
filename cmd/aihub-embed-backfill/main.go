@@ -22,25 +22,39 @@
 // selected under either mode, and the work_items pass is unaffected: it
 // already covers all statuses.
 //
-// # Pre-run check when the embedding pipeline may have changed
+// # When the embedding pipeline changes (aihub#661)
 //
-// Rows that already carry embedded_len escape this tool's convergence clause,
-// so an embedding-pipeline change (pooling, prompt, truncation) that is
-// invisible to emb_model needs a manual
+// A pipeline change is now SELECTED AUTOMATICALLY, and retiring the manual
+// pre-clear that used to be required is the whole point of aihub#661. Every
+// vector writer stamps memories.emb_pipeline / work_items.emb_pipeline with the
+// identity of the pipeline that produced the vector (migration 0041,
+// domain.EmbedPipelineID), and the two selections below compare the stored
+// stamp's document segment against the current one. So:
 //
-//	UPDATE memories SET embedded_len = NULL;
-//	UPDATE work_items SET embedded_len = NULL;
+//   - change the model, the dimensions, the input budget, or
+//     EMBEDDING_SERVING_ID, and every row written under the previous value
+//     lands in the re-embed set on the next run, with nothing done by hand;
+//   - rows written before migration 0041 carry emb_pipeline IS NULL — identity
+//     unknown — and are selected by that clause explicitly. One run converges
+//     them and the clause never matches them again.
 //
-// BEFORE the run, or the already-embedded rows stay a stale population under
-// the same emb_model string. That pre-clear is conditional, not a fixed step
-// of every handover: prove the pipeline actually changed by embedding the
-// same probe string through the endpoint before and after the change. Only a
-// cosine well below 1 means two incompatible populations that need the
-// NULL-out; a cosine of ~1.0 means one population and nothing to converge.
-// Measured 2026-09-13 (tei container rebuild): the probe returned cosine
-// 1.000000, pooling was last-token on both sides, and the pre-clear was
-// deliberately skipped. The measured record and the same conditional rule
-// live in docs/deployment.md under "The tei service".
+// WHAT THIS REPLACED, AND WHY IT WAS EXPENSIVE. Until aihub#661 the only
+// clauses here were emb_vector / emb_model / embedded_len, none of which can
+// see a pipeline change: on 2026-09-13 text-embeddings-inference went 1.7.2 ->
+// 1.9.3, the attention direction for Qwen/Qwen3-Embedding-0.6B went
+// bidirectional -> causal (measured cosine between the two spaces: 0.139-0.348,
+// aihub#648), and emb_model stayed byte-identical. Converging the corpus needed
+// a human to run `UPDATE memories SET embedded_len = NULL` (1671 rows) and the
+// same over work_items (2525 rows) BEFORE this tool, forging a "no provenance"
+// state to name rows the schema could not otherwise name (aihub#650).
+//
+// 🔴 THE ONE THING STILL DONE BY HAND. aihub cannot observe pooling or
+// attention direction, so those reach the stamp only through
+// EMBEDDING_SERVING_ID, which an operator sets. Change the serving side without
+// bumping it and this tool is blind again, exactly as it was on 2026-09-13 —
+// which is why docs/deployment.md makes bumping it part of the change, not a
+// follow-up. The manual embedded_len NULL-out survives only as the recovery
+// path for a serving change that already shipped without the bump.
 package main
 
 import (
@@ -83,6 +97,7 @@ func main() {
 		os.Exit(1)
 	}
 	model, dims := prov.ModelID(), prov.Dims()
+	pipeline, pipelineDoc := currentPipeline(model, dims)
 
 	pool, err := db.New(ctx, dsn)
 	if err != nil {
@@ -91,7 +106,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	memSQL, memArgs := memoriesQuery(model, *includeArchived)
+	memSQL, memArgs := memoriesQuery(model, pipelineDoc, *includeArchived)
 	rows, err := pool.Query(ctx, memSQL, memArgs...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "query:", err)
@@ -117,7 +132,8 @@ func main() {
 	if *includeArchived {
 		population = "active+archived"
 	}
-	fmt.Printf("backfill: %d memories to embed with model=%q dims=%d population=%s\n", len(todo), model, dims, population)
+	fmt.Printf("backfill: %d memories to embed with model=%q dims=%d population=%s pipeline=%q\n",
+		len(todo), model, dims, population, pipeline)
 	var ok, fail int
 	for i, it := range todo {
 		// opt3 / aihub#361: the truncation this loop used to spell out inline lives in
@@ -132,8 +148,8 @@ func main() {
 			continue
 		}
 		if _, err := pool.Exec(ctx,
-			`UPDATE memories SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4, updated_at = clock_timestamp() WHERE id = $5`,
-			vecLiteral(vec), model, dims, len([]rune(embInput)), it.id,
+			`UPDATE memories SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4, emb_pipeline = $5, updated_at = clock_timestamp() WHERE id = $6`,
+			vecLiteral(vec), model, dims, len([]rune(embInput)), pipeline, it.id,
 		); err != nil {
 			fail++
 			fmt.Fprintf(os.Stderr, "  update failed id=%s: %v\n", it.id, err)
@@ -151,11 +167,7 @@ func main() {
 	// work, which is mostly wrapped/cancelled rows.
 	type wiRow struct{ id, goal, content string }
 	var wtodo []wiRow
-	// embedded_len IS NULL: same provenance-convergence clause as the memories
-	// query above.
-	wrows, err := pool.Query(ctx, `
-		SELECT id, goal, COALESCE(content, '') FROM work_items
-		WHERE emb_vector IS NULL OR emb_model IS DISTINCT FROM $1 OR embedded_len IS NULL`, model)
+	wrows, err := pool.Query(ctx, workItemsSelectSQL, model, pipelineDoc)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "query work_items:", err)
 		os.Exit(1)
@@ -191,8 +203,8 @@ func main() {
 		// No updated_at bump: work_items.updated_at keys nothing here and a
 		// backfill must not look like a content edit.
 		if _, err := pool.Exec(ctx,
-			`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4 WHERE id = $5`,
-			vecLiteral(vec), model, dims, len([]rune(embInput)), r.id,
+			`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4, emb_pipeline = $5 WHERE id = $6`,
+			vecLiteral(vec), model, dims, len([]rune(embInput)), pipeline, r.id,
 		); err != nil {
 			wfail++
 			fmt.Fprintf(os.Stderr, "  update failed id=%s: %v\n", r.id, err)
@@ -235,13 +247,30 @@ func main() {
 // the mixed-population defect embed_input.go documents. Re-embedding it here
 // converges the corpus: after one run every embedded row carries the budget
 // it was embedded under, and the clause never matches again.
-func memoriesQuery(model string, includeArchived bool) (string, []any) {
+//
+// `emb_pipeline IS NULL OR split_part(emb_pipeline, '|', 1) IS DISTINCT FROM`
+// (aihub#661): the clause that makes a PIPELINE change select itself, so the
+// manual `UPDATE ... SET embedded_len = NULL` of 2026-09-14 never has to be run
+// again. pipelineDoc is domain.EmbedPipelineDoc — the DOCUMENT segment of the
+// current stamp, not the whole stamp, and the split is what keeps the two
+// apart. The second segment records the query composition, which provably moves
+// no stored vector (Qwen3-Embedding ships prompts.document = ""; see
+// domain/embed_input.go and embed_pipeline.go), so comparing the whole stamp
+// would re-embed the entire corpus every time the instruct prefix is touched —
+// work the evidence says is unnecessary.
+//
+// The IS NULL arm is written out rather than left to `split_part(NULL, ...) IS
+// DISTINCT FROM` (which does select the row): "a row whose pipeline identity is
+// unknown is re-embedded" is the rule migration 0041 turns on, and a rule that
+// only holds as a side effect of three-valued logic is one refactor from being
+// lost.
+func memoriesQuery(model, pipelineDoc string, includeArchived bool) (string, []any) {
 	statusPred := "status = 'active'"
 	if includeArchived {
 		statusPred = "status IN ('active', 'archived')"
 	}
 	embClauses := make([]string, 0, len(domain.EmbeddablePrefixes))
-	args := []any{model}
+	args := []any{model, pipelineDoc}
 	for _, pfx := range domain.EmbeddablePrefixes {
 		args = append(args, pfx+"%")
 		embClauses = append(embClauses, fmt.Sprintf("type LIKE $%d", len(args)))
@@ -250,9 +279,57 @@ func memoriesQuery(model string, includeArchived bool) (string, []any) {
 		SELECT id, content FROM memories
 		WHERE %s
 		  AND (%s)
-		  AND (emb_vector IS NULL OR emb_model IS DISTINCT FROM $1 OR embedded_len IS NULL)`,
+		  AND (emb_vector IS NULL
+		       OR emb_model IS DISTINCT FROM $1
+		       OR embedded_len IS NULL
+		       OR emb_pipeline IS NULL
+		       OR split_part(emb_pipeline, '|', 1) IS DISTINCT FROM $2)`,
 		statusPred, strings.Join(embClauses, " OR "))
 	return sql, args
+}
+
+// workItemsSelectSQL picks the work_item rows to (re)embed. $1 is the current
+// model, $2 the current pipeline DOCUMENT segment.
+//
+// All statuses on purpose — see the call site: the point of wi semantic search
+// is finding similar HISTORICAL work, which is mostly wrapped/cancelled rows.
+//
+// It carries the same convergence clauses memoriesQuery does, and that is
+// load-bearing rather than tidy: a pipeline change that selected one table and
+// not the other would leave half the index in the old vector space with nothing
+// saying so — the aihub#661 defect, reintroduced at half scale and harder to
+// notice, because recall would still return plausible-looking rows.
+//
+// A named const rather than an inline literal so a test can reach it (a
+// predicate no test can reach is a predicate that can be weakened without going
+// red), and a const rather than a builder function because
+// internal/citest/slugres traces `r.id` back to this `SELECT id ... FROM
+// work_items` to prove it is a canonical work-item id and not a slug — moving
+// the text behind a function call breaks that trace and the gate goes red
+// (measured on this change, 2026-09-14). One is a real guard; the other is
+// reach for a test. A const satisfies both.
+const workItemsSelectSQL = `
+		SELECT id, goal, COALESCE(content, '') FROM work_items
+		WHERE emb_vector IS NULL
+		   OR emb_model IS DISTINCT FROM $1
+		   OR embedded_len IS NULL
+		   OR emb_pipeline IS NULL
+		   OR split_part(emb_pipeline, '|', 1) IS DISTINCT FROM $2`
+
+// currentPipeline returns the two aihub#661 values this run needs, and they are
+// NOT the same string: `write` is the full stamp every row this run touches is
+// given, `compare` is only its document segment — what both selections match
+// the stored stamp against.
+//
+// One function rather than two call-site expressions, because the difference
+// between them is the entire design and picking the wrong one at the call site
+// is invisible: passing the full stamp as `compare` still type-checks, still
+// runs, and simply re-embeds the whole corpus every time the query-side
+// instruct prefix is edited — writing back byte-identical vectors, since
+// Qwen3-Embedding applies no prompt to documents (aihub#660). A function is a
+// thing a test can hold; an expression inside main() is not.
+func currentPipeline(model string, dims int) (write, compare string) {
+	return domain.EmbedPipelineID(model, dims), domain.EmbedPipelineDoc(model, dims)
 }
 
 // vecLiteral formats a float32 vector as a pgvector text literal "[f,f,...]".

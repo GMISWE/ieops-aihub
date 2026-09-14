@@ -1,4 +1,4 @@
-package mcp
+package lifecycle
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 //
 // These drive real git against real repositories on disk rather than asserting
 // on a name string, because the risk this change carries is not "the derivation
-// is wrong" — that is covered in branchname_test.go — it is "the claim computes
+// is wrong" — that is covered in branch_test.go — it is "the claim computes
 // a name that is not where the work is". A unit test of the derivation cannot
 // see that failure at all: both the old and the new code return a perfectly
 // well-formed name, and only git knows one of them has no ref behind it, or has
@@ -473,7 +473,7 @@ func TestAddClaimWorktree_HalfStemDoesNotGlobTheWholeProject(t *testing.T) {
 // TestAddClaimWorktree_HalfStemDoesNotGlobBySeqAlone is review finding 3 — the
 // same root cause reached through the other component.
 //
-// A non-ASCII project name (branchname_test.go explicitly blesses one) reduced
+// A non-ASCII project name (branch_test.go explicitly blesses one) reduced
 // the stem to "polyforge/528", whose glob matched the hand-made
 // polyforge/528-stagesconfig-wiring. That branch shape is not hypothetical: it
 // is the ieops-datachain convention this change was modelled on.

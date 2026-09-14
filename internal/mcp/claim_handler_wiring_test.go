@@ -2,7 +2,7 @@ package mcp_test
 
 // The claim HANDLER hop for the task-branch work (aihub#322).
 //
-// WHY THIS FILE EXISTS, given claim_worktree_test.go already has fifteen tests:
+// WHY THIS FILE EXISTS, given internal/lifecycle/worktree_test.go already has fifteen tests:
 // all of those call addClaimWorktree directly. Removing the `mode` parameter
 // made the bug unrepresentable INSIDE that function — but it says nothing about
 // the caller. Re-gating one level up,
@@ -132,7 +132,7 @@ func claimResponse(wiID, slug, project, goal string) map[string]any {
 //
 // MUTANT: replace the branch-lookup result in resolveClaimBranch with the
 // freshly computed name, i.e. never attach to an existing branch. Every test in
-// claim_worktree_test.go stays green; this one goes red on the load-bearing
+// internal/lifecycle/worktree_test.go stays green; this one goes red on the load-bearing
 // assertion — the prior agent's commit is nowhere, because the claim started a
 // new branch off origin/main instead of picking up the legacy one.
 func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
@@ -194,7 +194,7 @@ func TestClaimHandlerCreatesTheWorktreeOnANonResumeClaim(t *testing.T) {
 // MUTANT (for the three hops it does pin): delete the
 // `wiGoal, _ := result["goal"].(string)` line and pass "". The branch becomes
 // polyforge/aihub-322 and this goes red, while every derivation test in
-// branchname_test.go stays green because they call newClaimBranchNames directly.
+// internal/lifecycle/branch_test.go stays green because they call newClaimBranchNames directly.
 func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 	const wiID = "wi_01JGOALWIREDXYZ99"
 
@@ -228,7 +228,7 @@ func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 // TestClaimHandlerRepairsAnExistingWorktreeUpstream is the aihub#257 wiring
 // assertion, and the one that decides whether that change reaches anybody.
 //
-// WHY IT CANNOT BE A claim_worktree_test.go TEST. Every test in that file calls
+// WHY IT CANNOT BE AN internal/lifecycle/worktree_test.go TEST. Every test there calls
 // addClaimWorktree directly, and its fixture FATALS when the worktree directory
 // already exists (claimRepo.add) — because "the directory is absent" is the
 // precondition addClaimWorktree needs. But the 199 hazardous worktrees measured
@@ -240,7 +240,7 @@ func TestClaimHandlerNamesTheBranchAfterTheGoal(t *testing.T) {
 // instances the work item was filed about.
 //
 // MUTANT: delete the repairReusedWorktreeUpstream call from the claim handler's
-// reuse branch. Every test in claim_worktree_upstream_test.go stays green and
+// reuse branch. Every test in internal/lifecycle/worktree_upstream_test.go stays green and
 // this one reports upstream=origin/main.
 func TestClaimHandlerRepairsAnExistingWorktreeUpstream(t *testing.T) {
 	const wiID = "wi_01JREUSEUPSTREAM1"

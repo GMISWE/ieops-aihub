@@ -259,7 +259,11 @@ var clampsOutsideTheConvention = map[string]ScopeNote{
 		Origin: "len(texts), used only to scale a context timeout; floored at 1 so an empty " +
 			"batch does not compute a budget that has already expired",
 	},
-	"internal/mcp/tools_lifecycle.go:newClaimBranchNames:budget": {
+	// Re-keyed by aihub#667: the function did not change, the file it lives in did —
+	// the claim lifecycle moved out of internal/mcp into internal/lifecycle. The gate
+	// fails on an entry naming a site that no longer exists, which is how this move
+	// announced itself rather than leaving a waiver pointing at nothing.
+	"internal/lifecycle/branch.go:newClaimBranchNames:budget": {
 		Origin: "the characters left for a branch-name suffix after the stem, computed from " +
 			"claimBranchMaxTotal; a git ref-length budget, not a request parameter",
 	},

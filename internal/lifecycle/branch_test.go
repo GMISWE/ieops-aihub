@@ -1,4 +1,4 @@
-package mcp
+package lifecycle
 
 import (
 	"os/exec"
@@ -229,7 +229,7 @@ func TestNewClaimBranchNames_LegacyAndStem(t *testing.T) {
 // cannot over-match.
 //
 // MUTANT: restore the Trim-join. The Stem assertions in the first two cases go
-// red, and so do the two behavioural tests in claim_worktree_test.go.
+// red, and so do the two behavioural tests in worktree_test.go.
 func TestNewClaimBranchNames_StemRequiresBothComponents(t *testing.T) {
 	cases := []struct {
 		name       string

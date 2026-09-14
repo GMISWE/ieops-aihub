@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -457,17 +456,18 @@ func isAihubCode(err error, code string) bool {
 	return client.IsCode(err, code)
 }
 
-// isNotFound reports whether err is an aihub APIError carrying HTTP 404.
+// isNotFound is DELETED, not moved (aihub#667).
 //
-// Keyed on the STATUS, not on an error code, and that is the point: a request to
-// a route the server does not have at all is answered by the router, not by a
-// handler, so it carries no aihub error code to match on. This is how a newer
-// client detects "that server predates this capability" as distinct from "the
-// thing I asked about does not exist" — both are 404, and a caller that must
-// tell them apart has to look at what it asked for, not at the answer.
+// It existed for exactly one caller — the repo-pin recording hop, which is
+// best-effort and must stay silent against a server that has no /repo_pins route
+// (aihub#416) — and that hop left this package with the rest of the claim. What
+// it wrapped is one line of pkg/client, so internal/lifecycle calls
+// client.IsStatus(err, http.StatusNotFound) directly rather than carrying a
+// one-line helper across a package boundary.
 //
-// Added by aihub#416 for the repo-pin recording hop, which is best-effort and
-// must stay silent against a server that has no /repo_pins route.
-func isNotFound(err error) bool {
-	return client.IsStatus(err, http.StatusNotFound)
-}
+// The reasoning it documented is worth keeping and now lives at the call site: a
+// request to a route the server does not have at all is answered by the ROUTER,
+// so it carries no aihub error code to match on. Keying on the status is how a
+// newer client tells "that server predates this capability" from "the thing I
+// asked about does not exist" — both are 404, and only what you asked for
+// separates them.

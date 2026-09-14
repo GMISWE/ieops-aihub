@@ -28,13 +28,19 @@ type MachineConfig struct {
 	Binary *MachineBinary `toml:"binary,omitempty"`
 
 	// Roles configures per-tier candidate model lists consumed by
-	// `polyforge roles generate` for the pi and codex harnesses (aihub#642
-	// design decision #5). Claude Code does not read this: it uses the portable
-	// sonnet/opus/haiku aliases in internal/roles/definitions/cc_aliases.yaml
-	// instead, since a CC alias means the same thing on every machine. pi and
-	// codex agent files carry machine-local concrete model IDs, which is why
+	// `polyforge roles generate` for the pi, codex and opencode harnesses
+	// (aihub#642 design decision #5; opencode added by aihub#653). Claude Code
+	// does not read this: it uses the portable sonnet/opus/haiku aliases in
+	// internal/roles/definitions/cc_aliases.yaml instead, since a CC alias means
+	// the same thing on every machine. The other three carry machine-local
+	// concrete model IDs -- for pi and opencode a "<provider>/<model>" pair
+	// whose provider half the machine's owner named themselves -- which is why
 	// this lives in machine config rather than in the repo. Optional; a machine
 	// that never sets it gets each harness's built-in defaults.
+	//
+	// This table decides MODELS only. It cannot redefine a role: there is no
+	// user-override layer over internal/roles/definitions (see
+	// UnreadRolesOverrideDir).
 	Roles *MachineRoles `toml:"roles,omitempty"`
 }
 
@@ -167,13 +173,95 @@ func sortedKeys(m map[string]*RolesPreset) []string {
 
 // RoleCandidate is one (harness, model) pair in a tier's candidate list.
 type RoleCandidate struct {
-	// Harness is "pi" or "codex". "cc" is not valid here: Claude Code is
-	// generated from cc_aliases.yaml, never from machine config.
+	// Harness is one of ConfigurableHarnesses: "pi", "codex" or "opencode"
+	// (opencode since aihub#653; the doc here said "pi or codex" until
+	// aihub#676, while `polyforge roles generate opencode` had been shipping
+	// and plugins/polyforge/opencode/install.sh had been calling it). "cc" is
+	// not valid here: Claude Code is generated from cc_aliases.yaml at build
+	// time, never from machine config.
+	//
+	// Run this through ValidateCandidates before acting on it. A misspelled
+	// harness is not rejected by the TOML decoder and matches no candidate, so
+	// without that check it looks exactly like "your model is unavailable".
 	Harness string `toml:"harness"`
-	// Model is the harness-native model identifier to try, e.g. a pi model ID
-	// or a codex catalog slug. Never emitted verbatim if it fails to resolve --
-	// see Tiers' doc comment.
+	// Model is the harness-native model identifier to try.
+	//
+	// 🔴 For pi and opencode this MUST carry the provider prefix
+	// ("<provider>/<model>", e.g. "sub2api-anthropic/claude-fable-5"). A bare
+	// model id is not a shorter spelling of the same thing: aihub#676 measured
+	// pi 0.85.1 rejecting a bare id outright when several authenticated
+	// providers offer it, and, when only one visibly does, resolving it to a
+	// DIFFERENT channel than intended. The provider name is chosen by whoever
+	// configured that harness on that machine, which is exactly why this table
+	// lives here and not in the repo.
+	//
+	// Never emitted verbatim if it fails to resolve -- see Tiers' doc comment.
 	Model string `toml:"model"`
+}
+
+// ConfigurableHarnesses are the harness keys a RoleCandidate may name. It
+// matches `polyforge roles generate <harness>`'s accepted positional argument,
+// and deliberately excludes "cc".
+var ConfigurableHarnesses = []string{"codex", "opencode", "pi"}
+
+// ValidateCandidates reports human-readable problems with a resolved tier
+// table, in a stable order. An empty result means "nothing to say"; it is a
+// WARNING source, not a hard gate, because a machine may legitimately carry a
+// candidate for a harness this binary does not know yet.
+//
+// It exists because a harness string had NO validation anywhere in the repo
+// (aihub#676 finding 6). `harness = "claude"`, or a trailing space in
+// `"opencode "`, silently matched nothing forever and surfaced only as the
+// generic "no resolvable <harness> model candidate" warning -- which sends the
+// operator to check the MODEL, the one part of the line that was fine.
+func ValidateCandidates(tiers map[string][]RoleCandidate) []string {
+	known := make(map[string]bool, len(ConfigurableHarnesses))
+	for _, h := range ConfigurableHarnesses {
+		known[h] = true
+	}
+
+	names := make([]string, 0, len(tiers))
+	for tier := range tiers {
+		names = append(names, tier)
+	}
+	sort.Strings(names)
+
+	var problems []string
+	for _, tier := range names {
+		for i, c := range tiers[tier] {
+			switch {
+			case c.Harness == "":
+				problems = append(problems, fmt.Sprintf(
+					"tier %q candidate %d declares no harness; it can never match. Known harnesses: %s",
+					tier, i, strings.Join(ConfigurableHarnesses, ", ")))
+			case !known[c.Harness]:
+				hint := ""
+				if c.Harness != strings.TrimSpace(c.Harness) {
+					hint = " (note the leading/trailing whitespace)"
+				} else if c.Harness == "cc" || c.Harness == "claude" || c.Harness == "claude-code" {
+					hint = " (Claude Code is not configurable here: its models come from the " +
+						"repo-committed internal/roles/definitions/cc_aliases.yaml)"
+				}
+				problems = append(problems, fmt.Sprintf(
+					"tier %q candidate %d names unknown harness %q%s; it can never match. Known harnesses: %s",
+					tier, i, c.Harness, hint, strings.Join(ConfigurableHarnesses, ", ")))
+			}
+			if c.Model == "" {
+				problems = append(problems, fmt.Sprintf(
+					"tier %q candidate %d (harness %q) declares no model", tier, i, c.Harness))
+				continue
+			}
+			if (c.Harness == "pi" || c.Harness == "opencode") && !strings.Contains(c.Model, "/") {
+				problems = append(problems, fmt.Sprintf(
+					"tier %q candidate %d declares the BARE %s model id %q. Write \"<provider>/%s\": "+
+						"%s decides ambiguity against its whole built-in catalog, so a bare id can be "+
+						"refused outright even when it looks unique locally, and generation will not "+
+						"write one (aihub#676, measured on pi 0.85.1)",
+					tier, i, c.Harness, c.Model, c.Model, c.Harness))
+			}
+		}
+	}
+	return problems
 }
 
 type MachineAuth struct {
@@ -206,6 +294,72 @@ func MachineConfigDir() string {
 // MachineConfigPath returns ~/.polyforge/config.toml.
 func MachineConfigPath() string {
 	return filepath.Join(MachineConfigDir(), "config.toml")
+}
+
+// RolesOverrideDir returns ~/.polyforge/roles -- a path polyforge does NOT
+// read. See UnreadRolesOverrideDir.
+func RolesOverrideDir() string {
+	return filepath.Join(MachineConfigDir(), "roles")
+}
+
+// UnreadRolesOverrideDir reports whether ~/.polyforge/roles exists and holds
+// anything, so a caller can say out loud that it is being ignored.
+//
+// 🔴 WITHDRAWN, not merely unimplemented. aihub#642's design
+// (design_notes_addendum_2026_09_13.roles_source_location) ended with "用户自定义
+// 走 ~/.polyforge/roles/ 覆盖" -- a user-override layer over the role
+// definitions. aihub#676 measured that nothing in the repo had ever read that
+// path (`git grep -c '\.polyforge/roles'` = 0, against 13 hits in 5 Go files
+// for the sibling cc_aliases as a negative control), and the promise is not
+// implementable as stated, for a reason that is structural rather than a
+// missing afternoon of work:
+//
+//   - Claude Code's agent files are generated at BUILD time and committed
+//     (aihub#642 two_generation_times: a CC plugin agent must live inside the
+//     plugin directory to keep its namespaced id, and the plugin directory is a
+//     distribution artifact). A user override could therefore never reach CC in
+//     a released plugin -- it would silently apply to three harnesses of four,
+//     which is a worse contract than having none.
+//   - internal/roles.LoadRoles is the single loader behind BOTH the build-time
+//     CC generator and internal/roles' cc_staleness_gate, which byte-diffs the
+//     regenerated files against the committed ones. Teaching THAT loader to read
+//     an override would turn `go test ./internal/roles/` red on any machine that
+//     had one, and make `go generate` capable of committing a user's private
+//     prompt into the repo.
+//
+// ⚠️ Only the first bullet is structural. The second argues against one
+// implementation, not against the feature: a second loader, used only by the
+// three install-time harnesses, would leave the gate alone -- at the cost of two
+// loaders that can disagree, which is the "同一台机器两个口径" hazard aihub#673
+// exists to prevent. That is a trade to put to the owner, not a fact.
+//
+// So reopening this needs an owner decision about what "override" should mean
+// for a build-time-generated harness, not a patch. Until then the honest
+// behaviour is the one implemented here: the directory is never read, and the
+// operator is TOLD it is never read rather than watching their edits have no
+// effect.
+func UnreadRolesOverrideDir() (path string, present bool) {
+	path = RolesOverrideDir()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return path, false
+	}
+	return path, len(entries) > 0
+}
+
+// RolesOverrideIgnoredWarning is the exact notice every role-generating entry
+// point prints when UnreadRolesOverrideDir reports a populated directory. One
+// string, so the entry points cannot describe the same non-feature differently.
+func RolesOverrideIgnoredWarning(path string) string {
+	return fmt.Sprintf(
+		"polyforge: WARNING: %s exists and is NOT read. A user-override layer over the role "+
+			"definitions was described in aihub#642's design but was never implemented, and "+
+			"aihub#676 withdrew it: Claude Code's agent files are generated at build time and "+
+			"committed, so an override could only ever reach 3 of the 4 harnesses, and the one "+
+			"loader it would have to hook is the same one the cc_staleness_gate diffs against the "+
+			"repo. Role definitions come only from internal/roles/definitions/*.yaml; the models "+
+			"they resolve to are what %s configures.\n",
+		path, MachineConfigPath())
 }
 
 // LoadMachineConfig reads ~/.polyforge/config.toml.
@@ -249,13 +403,30 @@ func SaveMachineConfig(mc *MachineConfig) error {
 		"# and the default, so you normally leave this out entirely):\n" +
 		"# [binary]\n" +
 		"# channel = \"dev\"\n" +
-		"\n# Per-tier candidate models for `polyforge roles generate` (pi and codex\n" +
-		"# only -- Claude Code uses built-in portable aliases and ignores this table).\n" +
-		"# Optional; omit entirely to accept each harness's defaults. Each tier lists\n" +
-		"# candidates in priority order, and generation uses the first one that\n" +
-		"# resolves in that harness's local model catalog:\n" +
+		"\n# Per-tier candidate models for `polyforge roles generate` (pi, codex and\n" +
+		"# opencode -- Claude Code uses built-in portable aliases and ignores this\n" +
+		"# table). Optional; omit entirely to accept each harness's defaults. Each\n" +
+		"# tier lists candidates in priority order, and generation uses the first\n" +
+		"# one that resolves in that harness's local model catalog.\n" +
+		"#\n" +
+		"# WRITE THE FULL \"<provider>/<model>\" FOR pi AND opencode, never the bare\n" +
+		"# model id. The bare form is not a shorter spelling of the same thing:\n" +
+		"# aihub#676 measured pi 0.85.1 refusing `claude-fable-5` outright with\n" +
+		"# \"ambiguous across providers\", and naming providers that are not even in\n" +
+		"# `pi --list-models` -- pi decides ambiguity against its whole built-in\n" +
+		"# catalog, so a bare id can be refused even when it looks unique here.\n" +
+		"# Generation therefore never writes a bare id; it warns and omits the model.\n" +
+		"# The provider name is whatever YOU called it when you set that harness up,\n" +
+		"# which is why this table is here and not in the repo. Run `pi --list-models`.\n" +
 		"# [roles.tiers]\n" +
-		"# default = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n" +
+		"# default = [{ harness = \"pi\", model = \"<your-provider>/claude-sonnet-4-5\" }]\n" +
+		"# codex slugs carry no provider prefix; write them verbatim:\n" +
+		"# raised  = [{ harness = \"codex\", model = \"gpt-6-astra\" }]\n" +
+		"#\n" +
+		"# There is NO ~/.polyforge/roles/ override directory. Role definitions --\n" +
+		"# which step runs as which role, at which tier, read-only or not -- come\n" +
+		"# only from the polyforge binary's embedded internal/roles/definitions.\n" +
+		"# This table decides only which MODEL each tier resolves to (aihub#676).\n" +
 		"\n# Presets are NAMED SNAPSHOTS of that whole table. Selecting one SWAPS the\n" +
 		"# entire table -- it does not merge tier-by-tier with [roles.tiers] above.\n" +
 		"# `polyforge roles generate`, the serve-startup codex profile generation and\n" +
@@ -264,10 +435,10 @@ func SaveMachineConfig(mc *MachineConfig) error {
 		"# [roles]\n" +
 		"# preset = \"frugal\"           # this machine's active preset\n" +
 		"# [roles.presets.frugal.tiers]\n" +
-		"# default = [{ harness = \"pi\", model = \"claude-haiku-4-5\" }]\n" +
-		"# raised  = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n" +
+		"# default = [{ harness = \"pi\", model = \"<your-provider>/claude-haiku-4-5\" }]\n" +
+		"# raised  = [{ harness = \"pi\", model = \"<your-provider>/claude-sonnet-4-5\" }]\n" +
 		"# [roles.presets.max.tiers]\n" +
-		"# default = [{ harness = \"pi\", model = \"claude-opus-4-1\" }]\n" +
+		"# default = [{ harness = \"pi\", model = \"<your-provider>/claude-opus-4-6\" }]\n" +
 		"# Override for one run with `polyforge drain --preset=<name>` or\n" +
 		"# `polyforge roles generate <harness> --out <dir> --preset=<name>`.\n"
 	return os.WriteFile(MachineConfigPath(), append(append([]byte(header), b...), []byte(footer)...), 0600)

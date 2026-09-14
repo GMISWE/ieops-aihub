@@ -31,14 +31,19 @@ func RenderPiAgentFiles(roleList []Role, resolvedModels map[string]string) (map[
 		name := mustAgentName("pi", r.Name)
 		fmt.Fprintf(&b, "name: %s\n", name)
 		fmt.Fprintf(&b, "description: %s\n", r.Description)
-		if model := resolvedModels[r.Name]; model != "" {
+		model := resolvedModels[r.Name]
+		if model != "" {
 			fmt.Fprintf(&b, "model: %s\n", model)
 		}
 		if shape.PiTools != "" {
 			fmt.Fprintf(&b, "tools: %s\n", shape.PiTools)
 		}
 		b.WriteString("---\n\n")
-		b.WriteString(r.Prompt)
+		prompt, err := ExpandPrompt(r.Prompt, "pi", r.Capability.ReadOnly, model != "")
+		if err != nil {
+			return nil, fmt.Errorf("role %q: %w", r.Name, err)
+		}
+		b.WriteString(prompt)
 
 		out[name+".md"] = b.String()
 	}

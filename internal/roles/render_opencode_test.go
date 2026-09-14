@@ -132,8 +132,15 @@ func TestRenderOpencodeAgentFiles_ModeSubagentAlways(t *testing.T) {
 }
 
 // TestRenderOpencodeAgentFiles_PromptBodyVerbatim pins that the role's Prompt
-// is carried through unmodified as the file body (same contract render_pi.go/
-// render_cc.go/render_codex.go pin for their own harnesses).
+// is carried through as the file body, with exactly one transformation applied:
+// ExpandPrompt's placeholder substitution (aihub#676). Before that existed this
+// asserted `HasSuffix(content, r.Prompt)` with no expansion at all, which was
+// the same contract render_pi.go/render_cc.go/render_codex.go pin -- and which
+// is precisely how a prompt describing Claude Code's tool names came to be
+// shipped verbatim to three harnesses that do not have them.
+//
+// The assertion is still exact-suffix, not "contains": nothing may be appended
+// after the body, and nothing but the two placeholders may be rewritten.
 func TestRenderOpencodeAgentFiles_PromptBodyVerbatim(t *testing.T) {
 	roleList, err := LoadRoles()
 	if err != nil {
@@ -145,8 +152,16 @@ func TestRenderOpencodeAgentFiles_PromptBodyVerbatim(t *testing.T) {
 	}
 	for _, r := range roleList {
 		content := out["step-"+r.Name+".md"]
-		if !strings.HasSuffix(content, r.Prompt) {
-			t.Errorf("role %q: output does not end with the role's Prompt verbatim", r.Name)
+		// nil resolvedModels above, so no model is declared for any role.
+		want, expErr := ExpandPrompt(r.Prompt, "opencode", r.Capability.ReadOnly, false)
+		if expErr != nil {
+			t.Fatalf("role %q: ExpandPrompt() error: %v", r.Name, expErr)
+		}
+		if !strings.HasSuffix(content, want) {
+			t.Errorf("role %q: output does not end with the opencode-expanded Prompt", r.Name)
+		}
+		if strings.Contains(content, "{{") {
+			t.Errorf("role %q: rendered file still contains an unexpanded placeholder:\n%s", r.Name, content)
 		}
 	}
 }

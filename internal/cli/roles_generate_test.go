@@ -26,6 +26,29 @@ func (p *fakeProbe) HasModel(model string) (bool, error) {
 	return p.available[model], nil
 }
 
+// catalogProbe is a CatalogProbe backed by a REAL parsed `pi --list-models`
+// catalog, so a test can exercise pi's actual resolution policy (provider/model
+// only) instead of a hand-set boolean. fakeProbe cannot do that: it answers
+// whatever the test seeded, which is right for testing the plumbing and wrong
+// for testing the policy (aihub#676 review B1 -- the first version of
+// TestGenerateRoles_WarnsBareModelIDAndUnknownHarness used fakeProbe and so
+// asserted a bare id was refused while the fake happily accepted it).
+type catalogProbe struct{ c piModelCatalog }
+
+func (p catalogProbe) HasModel(model string) (bool, error) {
+	ok, _ := p.c.Resolve(model)
+	return ok, nil
+}
+
+func realPiCatalogProbe(t *testing.T) catalogProbe {
+	t.Helper()
+	data, err := os.ReadFile("testdata/pi_list_models_sample.txt")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return catalogProbe{c: parsePiModelCatalog(data)}
+}
+
 // erroringProbe always returns an error, proving a probe error is treated as
 // "not available" (never guessed) rather than propagated as a generation
 // failure.
@@ -100,11 +123,14 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 	mc := &config.MachineConfig{
 		Roles: &config.MachineRoles{
 			Tiers: map[string][]config.RoleCandidate{
-				"default": {{Harness: "pi", Model: "claude-sonnet-4-5"}},
+				// Qualified, because that is the only form generation writes
+				// since aihub#676; a bare id here would be refused by the real
+				// probe and this test would be asserting an impossible state.
+				"default": {{Harness: "pi", Model: "anthropic/claude-sonnet-4-5"}},
 			},
 		},
 	}
-	probe := &fakeProbe{available: map[string]bool{"claude-sonnet-4-5": true}}
+	probe := realPiCatalogProbe(t)
 
 	if err := generateRoles(mc, "pi", dir, probe, ""); err != nil {
 		t.Fatalf("generateRoles(pi) error: %v", err)
@@ -119,7 +145,7 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 		}
 		content := string(data)
 		if name == "pf-executor.md" {
-			if !strings.Contains(content, "model: claude-sonnet-4-5") {
+			if !strings.Contains(content, "model: anthropic/claude-sonnet-4-5") {
 				t.Errorf("pf-executor.md: expected resolved model in frontmatter, got:\n%s", content)
 			}
 		}
@@ -337,7 +363,11 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 			})
 
 			for _, c := range cases {
-				want := `no resolvable ` + harness + ` model candidate for tier "` + c.tier + `" (role "` + c.role + `")`
+				// mc has NO candidates at all, so the honest diagnosis is
+				// "this tier names no candidate for this harness", not "the
+				// candidates did not resolve" (aihub#676 finding 5: the one
+				// message used to be printed for every cause).
+				want := `tier "` + c.tier + `" (role "` + c.role + `") has no candidate naming harness "` + harness + `"`
 				if !strings.Contains(stderr, want) {
 					t.Errorf("%s: stderr does not contain a warning naming BOTH tier %q and harness %q "+
 						"(role %q); want substring %q, got:\n%s", harness, c.tier, harness, c.role, want, stderr)
@@ -499,14 +529,102 @@ func TestParsePiModelCatalog_RealFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	models := parsePiModelCatalog(data)
-	for _, want := range []string{"claude-sonnet-4-5", "claude-opus-5", "gpt-6-astra"} {
-		if !models[want] {
-			t.Errorf("parsePiModelCatalog: missing model %q from real fixture, got %v", want, models)
+	c := parsePiModelCatalog(data)
+	for _, want := range []string{
+		"anthropic/claude-sonnet-4-5",
+		"anthropic/claude-opus-5",
+		"sub2api-openai/gpt-6-astra",
+		"sub2api-grok/grok-4.6",
+	} {
+		if !c.Qualified[want] {
+			t.Errorf("parsePiModelCatalog: missing qualified model %q from real fixture, got %v", want, c.Qualified)
 		}
 	}
-	if models["provider"] || models["model"] {
-		t.Errorf("parsePiModelCatalog: header row must not be parsed as a model, got %v", models)
+	if c.Qualified["provider/model"] {
+		t.Errorf("parsePiModelCatalog: header row must not be parsed as a model, got %v", c.Qualified)
+	}
+	if _, ok := c.ProvidersByModel["model"]; ok {
+		t.Errorf("parsePiModelCatalog: header row must not be parsed as a model, got %v", c.ProvidersByModel)
+	}
+	// The provider column is the whole point of the type: a bare model id is
+	// NOT a key of Qualified, because pi does not resolve one deterministically
+	// (aihub#676 measurement, see piModelCatalog's doc comment).
+	if c.Qualified["claude-sonnet-4-5"] {
+		t.Error("parsePiModelCatalog: a BARE model id must not be a Qualified key -- keying on the " +
+			"model column alone is the aihub#676 defect this type exists to prevent")
+	}
+}
+
+// TestPiModelCatalogResolve pins the three-way verdict aihub#676's live pi
+// measurement requires, against the real captured fixture.
+func TestPiModelCatalogResolve(t *testing.T) {
+	data, err := os.ReadFile("testdata/pi_list_models_sample.txt")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	c := parsePiModelCatalog(data)
+
+	cases := []struct {
+		name       string
+		model      string
+		wantOK     bool
+		wantAdvice bool
+		// adviceHas, when non-empty, must appear in the advice: it is what
+		// makes the diagnostic actionable rather than merely present.
+		adviceHas string
+	}{
+		{
+			// The form the design measured as the only reliable one. It is
+			// also the form that used to resolve FALSE.
+			name: "qualified pair resolves with nothing to say", model: "sub2api-anthropic/claude-fable-5",
+			wantOK: true, wantAdvice: false,
+		},
+		{
+			// Measured live: `pi -p --model claude-fable-5` exits with
+			// `Model "claude-fable-5" is ambiguous across providers`. It used
+			// to resolve TRUE.
+			name: "ambiguous bare id is refused and names the providers", model: "claude-fable-5",
+			wantOK: false, wantAdvice: true, adviceHas: "sub2api-anthropic/claude-fable-5",
+		},
+		{
+			// Unique in this table -- and still refused. The table cannot decide
+			// ambiguity (pi weighs its whole built-in catalog, including
+			// providers that are neither listed nor authenticated), so a count
+			// of one here proves nothing about what pi would do. Refusing routes
+			// into aihub#642 AC7's observable degradation instead of writing an
+			// id that may not dispatch.
+			name: "unique bare id is ALSO refused, and told what to write", model: "claude-opus-5",
+			wantOK: false, wantAdvice: true, adviceHas: "anthropic/claude-opus-5",
+		},
+		{
+			// The refusal for an ambiguous id must offer EVERY qualified
+			// alternative, not just the first: picking for the operator is how
+			// the aihub#642 design says a silent misroute starts.
+			name: "ambiguous bare id refusal lists every qualified alternative", model: "claude-fable-5",
+			wantOK: false, wantAdvice: true, adviceHas: "anthropic/claude-fable-5, sub2api-anthropic/claude-fable-5",
+		},
+		{
+			name: "qualified pair for a provider that does not offer it", model: "sub2api-grok/claude-opus-5",
+			wantOK: false, wantAdvice: false,
+		},
+		{
+			name: "absent model", model: "no-such-model", wantOK: false, wantAdvice: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, advice := c.Resolve(tc.model)
+			if ok != tc.wantOK {
+				t.Errorf("Resolve(%q) ok = %v, want %v", tc.model, ok, tc.wantOK)
+			}
+			if (advice != "") != tc.wantAdvice {
+				t.Errorf("Resolve(%q) advice = %q, want non-empty=%v", tc.model, advice, tc.wantAdvice)
+			}
+			if tc.adviceHas != "" && !strings.Contains(advice, tc.adviceHas) {
+				t.Errorf("Resolve(%q) advice must contain %q so the operator knows what to write instead; got %q",
+					tc.model, tc.adviceHas, advice)
+			}
+		})
 	}
 }
 
@@ -557,18 +675,296 @@ func TestParseOpencodeModelCatalog_SkipsBlankLines(t *testing.T) {
 	}
 }
 
-// TestParsePiModelCatalog_SameModelUnderMultipleProviders proves the
-// set-based return collapses a model slug that legitimately repeats under
-// multiple providers, rather than erroring or double-counting.
-// "claude-fable-5" appears under both "anthropic" and "sub2api-anthropic" in
-// the real fixture.
+// TestUnresolvedModelWarning_NamesTheActualCause pins aihub#676 finding 5. The
+// generator used to print ONE sentence for three different causes, and that
+// sentence ended "Configure ~/.polyforge/config.toml [roles.tiers] to fix
+// this" -- so `pi` merely not being installed, or not being logged in, sent the
+// operator to edit a config file that was never wrong. Worse, the probe error
+// that would have said so was discarded inside ResolveModel before the caller
+// could see it.
+//
+// Three arms, each asserting the message DISCRIMINATES: it must say the thing
+// that is true of its own cause and must NOT say the thing that is true of
+// another. The negative halves are the load-bearing ones -- a message that
+// merely mentions everything would pass a positives-only test.
+func TestUnresolvedModelWarning_NamesTheActualCause(t *testing.T) {
+	const tierSource = `preset "frugal" (via ~/.polyforge/config.toml [roles] preset)`
+
+	t.Run("probe error is not reported as a config problem", func(t *testing.T) {
+		_, ok, why := ResolveModelWithCause(
+			[]config.RoleCandidate{{Harness: "pi", Model: "sub2api-anthropic/x"}}, "pi", erroringProbe{})
+		if ok {
+			t.Fatal("ResolveModelWithCause resolved against an always-erroring probe")
+		}
+		if why.ProbeErr == nil {
+			t.Fatal("ResolveFailure.ProbeErr is nil: the probe error was swallowed again, which is " +
+				"exactly the aihub#676 defect -- the caller then has nothing to report but the config")
+		}
+		msg := UnresolvedModelWarning("pi", "raised", "reviewer", tierSource, why)
+		if !strings.Contains(msg, "could not read pi's model catalog") {
+			t.Errorf("message does not say the catalog could not be read; got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "NOT a configuration problem") {
+			t.Errorf("message does not disclaim the config; got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "install pi") {
+			t.Errorf("message does not name the actionable fix (install/authenticate the CLI); got:\n%s", msg)
+		}
+		// The discriminator: this cause must NOT tell the operator to go fix
+		// the tier table.
+		if strings.Contains(msg, "Fix the tier table") {
+			t.Errorf("message still blames the tier table for a probe failure; got:\n%s", msg)
+		}
+	})
+
+	t.Run("no candidate for this harness names the harness, not the models", func(t *testing.T) {
+		_, ok, why := ResolveModelWithCause(
+			[]config.RoleCandidate{{Harness: "codex", Model: "gpt-6-astra"}}, "pi", &fakeProbe{})
+		if ok {
+			t.Fatal("ResolveModelWithCause resolved a codex-only candidate list for harness pi")
+		}
+		if len(why.Candidates) != 0 {
+			t.Fatalf("ResolveFailure.Candidates = %v, want empty: no candidate named harness pi", why.Candidates)
+		}
+		msg := UnresolvedModelWarning("pi", "raised", "reviewer", tierSource, why)
+		if !strings.Contains(msg, `has no candidate naming harness "pi"`) {
+			t.Errorf("message does not say the tier names no pi candidate; got:\n%s", msg)
+		}
+		if !strings.Contains(msg, `raised = [{ harness = "pi"`) {
+			t.Errorf("message does not show the line to add; got:\n%s", msg)
+		}
+		if strings.Contains(msg, "could not read") {
+			t.Errorf("message blames the catalog for a config gap; got:\n%s", msg)
+		}
+	})
+
+	t.Run("candidates that all missed name themselves", func(t *testing.T) {
+		_, ok, why := ResolveModelWithCause([]config.RoleCandidate{
+			{Harness: "pi", Model: "sub2api-anthropic/gone"},
+			{Harness: "pi", Model: "sub2api-anthropic/also-gone"},
+		}, "pi", &fakeProbe{available: map[string]bool{}})
+		if ok {
+			t.Fatal("ResolveModelWithCause resolved against a probe that reports nothing available")
+		}
+		if why.ProbeErr != nil {
+			t.Fatalf("ResolveFailure.ProbeErr = %v, want nil: a probe answering false is not an error", why.ProbeErr)
+		}
+		msg := UnresolvedModelWarning("pi", "raised", "reviewer", tierSource, why)
+		for _, want := range []string{"sub2api-anthropic/gone", "sub2api-anthropic/also-gone", "Fix the tier table"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q; got:\n%s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "NOT a configuration problem") {
+			t.Errorf("message disclaims the config for a cause that IS the config; got:\n%s", msg)
+		}
+	})
+
+	t.Run("the example model shape is the one the named harness actually uses", func(t *testing.T) {
+		// aihub#676 review W2: this builder serves the codex path too
+		// (cmd/polyforge's generateCodexProfiles), and a shared
+		// "<provider>/<model>" example contradicted this same binary's --help
+		// and config footer -- on every `polyforge serve` boot, five times.
+		codex := UnresolvedModelWarning("codex", "raised", "reviewer", tierSource, ResolveFailure{})
+		if strings.Contains(codex, "<provider>/") {
+			t.Errorf("the codex example teaches a provider prefix, which codex slugs do not carry:\n%s", codex)
+		}
+		if !strings.Contains(codex, "<codex-slug>") {
+			t.Errorf("the codex example does not show a codex slug:\n%s", codex)
+		}
+		for _, harness := range []string{"pi", "opencode"} {
+			msg := UnresolvedModelWarning(harness, "raised", "reviewer", tierSource, ResolveFailure{})
+			if !strings.Contains(msg, "<provider>/<model>") {
+				t.Errorf("%s's example omits the provider prefix, which %s REQUIRES:\n%s", harness, harness, msg)
+			}
+		}
+	})
+
+	t.Run("every cause names the tier table actually in force", func(t *testing.T) {
+		// The second half of finding 5: the old message said "[roles.tiers]"
+		// unconditionally, which is the wrong section whenever a preset is
+		// selected -- the operator edits a table nothing reads.
+		for name, why := range map[string]ResolveFailure{
+			"probe error":  {ProbeErr: os.ErrClosed},
+			"no candidate": {},
+			"all missed":   {Candidates: []string{"sub2api-anthropic/gone"}},
+		} {
+			msg := UnresolvedModelWarning("pi", "raised", "reviewer", tierSource, why)
+			if !strings.Contains(msg, tierSource) {
+				t.Errorf("%s: message does not name the tier table in force (%q); got:\n%s", name, tierSource, msg)
+			}
+			if strings.Contains(msg, "[roles.tiers]") {
+				t.Errorf("%s: message hardcodes [roles.tiers] while a preset is in force; got:\n%s", name, msg)
+			}
+		}
+	})
+}
+
+// TestParsePiModelCatalog_SameModelUnderMultipleProviders keeps this test's
+// original INTENT and corrects its assertion.
+//
+// The intent, verbatim from the version aihub#676 replaced, was to prove the
+// parser "collapses a model slug that legitimately repeats under multiple
+// providers, rather than erroring or double-counting" -- a statement about the
+// parser being robust to a duplicate model column. That intent is still worth
+// pinning and is still pinned below: parsing the fixture must not error, must
+// not lose either row, and must not count either row twice.
+//
+// The ASSERTION it used to make, `models["claude-fable-5"] == true`, is the
+// thing that was wrong. Keying on the bare model column is not "collapsing a
+// duplicate"; it is discarding the provider, which is the half of the
+// identifier pi actually resolves on. Measured live on 2026-09-14 (pi 0.85.1),
+// the bare form this test blessed is the form pi REFUSES:
+//
+//	$ pi -p --model claude-fable-5 ...
+//	Error: Model "claude-fable-5" is ambiguous across providers: anthropic/...,
+//	cloudflare-ai-gateway/..., github-copilot/..., opencode/...,
+//	sub2api-anthropic/... Use --provider or provider/model.
+//
+// while `--model sub2api-anthropic/claude-fable-5` -- which the old parser
+// reported as UNAVAILABLE -- ran and answered. So this was not a pin protecting
+// something real that aihub#676 traded away: it was a correct-sounding
+// observation about a map, asserted as if it were a statement about pi.
 func TestParsePiModelCatalog_SameModelUnderMultipleProviders(t *testing.T) {
 	data, err := os.ReadFile("testdata/pi_list_models_sample.txt")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	models := parsePiModelCatalog(data)
-	if !models["claude-fable-5"] {
-		t.Errorf("parsePiModelCatalog: claude-fable-5 (appears under 2 providers in the fixture) missing, got %v", models)
+	c := parsePiModelCatalog(data)
+
+	// Neither row is lost: both providers that offer claude-fable-5 survive as
+	// distinct, individually resolvable entries.
+	for _, want := range []string{"anthropic/claude-fable-5", "sub2api-anthropic/claude-fable-5"} {
+		if !c.Qualified[want] {
+			t.Errorf("parsePiModelCatalog: %q missing; a model offered by 2 providers must yield 2 entries, got %v",
+				want, c.Qualified)
+		}
+	}
+
+	// Neither row is double-counted: the provider list for the shared model id
+	// has exactly the two providers the fixture shows, once each.
+	got := c.ProvidersByModel["claude-fable-5"]
+	want := []string{"anthropic", "sub2api-anthropic"}
+	if len(got) != len(want) {
+		t.Fatalf("ProvidersByModel[claude-fable-5] = %v, want exactly %v (no duplicates, nothing dropped)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ProvidersByModel[claude-fable-5][%d] = %q, want %q (first-seen order)", i, got[i], want[i])
+		}
+	}
+
+	// And the correction itself: the bare id the old assertion demanded be
+	// TRUE must now be unresolvable, because pi refuses it.
+	if ok, _ := c.Resolve("claude-fable-5"); ok {
+		t.Error("Resolve(\"claude-fable-5\") = true, but pi rejects that bare id as ambiguous across " +
+			"providers (measured, pi 0.85.1). Reporting it as available is the aihub#676 defect.")
+	}
+}
+
+// TestGenerateRoles_WarnsAboutOrphanAgentFiles pins the generator half of
+// aihub#676 finding 4. generateRoles writes files but never reconciles, so a
+// renamed or deleted role leaves a stale agent file behind that the harness
+// will still happily load and dispatch to.
+//
+// It WARNS rather than deletes, and that is deliberate: --out is an argument,
+// so it may be a directory the operator keeps their own files in ($CODEX_HOME
+// is exactly that). The two negative assertions below are what make the
+// warning safe to trust -- an untouched real file, and an unrelated file that
+// merely lives in the same directory.
+func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{}
+	probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
+
+	orphan := filepath.Join(dir, "pf-zombie.md")
+	if err := os.WriteFile(orphan, []byte("---\nname: pf-zombie\n---\n"), 0o644); err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+	// Same directory, not this generator's naming: must be left alone AND
+	// unmentioned.
+	bystander := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(bystander, []byte("mine\n"), 0o644); err != nil {
+		t.Fatalf("seed bystander: %v", err)
+	}
+
+	stderr := captureStderr(t, func() {
+		if err := generateRoles(mc, "pi", dir, probe, ""); err != nil {
+			t.Fatalf("generateRoles(pi) error: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "pf-zombie.md") {
+		t.Errorf("stderr does not name the orphan pf-zombie.md; a deleted role's agent file stays "+
+			"dispatchable and nothing says so. got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "no longer exists") {
+		t.Errorf("stderr does not say WHY pf-zombie.md is a problem; got:\n%s", stderr)
+	}
+	// Warned, never removed.
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("the orphan was DELETED (%v). --out may be a directory the operator also uses; this "+
+			"generator must not remove files it did not write", err)
+	}
+	// Files it DID just write are not orphans.
+	if strings.Contains(stderr, "pf-executor.md looks like") {
+		t.Errorf("a file generated by this very run was reported as an orphan; got:\n%s", stderr)
+	}
+	// A file that does not match the naming this generator owns is not its business.
+	if strings.Contains(stderr, "notes.md") {
+		t.Errorf("an unrelated file in --out was reported; got:\n%s", stderr)
+	}
+	if _, err := os.Stat(bystander); err != nil {
+		t.Errorf("an unrelated file in --out was removed (%v)", err)
+	}
+}
+
+// TestGenerateRoles_WarnsBareModelIDAndUnknownHarness pins that the two
+// config-side checks aihub#676 added actually reach an operator running
+// `polyforge roles generate`, rather than only existing as a library function
+// nothing calls (which is what `~/.polyforge/roles/` had been for a year).
+func TestGenerateRoles_WarnsBareModelIDAndUnknownHarness(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{
+		Roles: &config.MachineRoles{
+			Tiers: map[string][]config.RoleCandidate{
+				// Bare id: pi would reject or misroute this at dispatch time.
+				"default": {{Harness: "pi", Model: "claude-sonnet-4-5"}},
+				// Typo: matches nothing, forever, silently.
+				"raised": {{Harness: "claude", Model: "opus"}},
+			},
+		},
+	}
+	// The REAL catalog, not a fake: "claude-sonnet-4-5" is genuinely present in
+	// the fixture (under anthropic), so this asserts the bare form is refused on
+	// policy, not merely absent from a seeded map.
+	probe := CatalogProbe(realPiCatalogProbe(t))
+
+	stderr := captureStderr(t, func() {
+		if err := generateRoles(mc, "pi", dir, probe, ""); err != nil {
+			t.Fatalf("generateRoles(pi) error: %v", err)
+		}
+	})
+
+	for _, want := range []string{"BARE pi model id", `unknown harness "claude"`} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr does not contain %q; got:\n%s", want, stderr)
+		}
+	}
+	// And the warning is not the whole of it: the bare id must not be WRITTEN.
+	// A generator that warns twice and then emits the id anyway would leave the
+	// operator with a file that reads as configured and does not dispatch --
+	// exactly what aihub#642 AC7 exists to prevent (aihub#676 review B1).
+	executor, readErr := os.ReadFile(filepath.Join(dir, "pf-executor.md"))
+	if readErr != nil {
+		t.Fatalf("pf-executor.md not written: %v", readErr)
+	}
+	if strings.Contains(string(executor), "model:") {
+		t.Errorf("pf-executor.md declares a model despite the candidate being a refused bare id:\n%s", executor)
+	}
+	// And the provenance is attached, so an operator with several tables knows
+	// which one to edit.
+	if !strings.Contains(stderr, "[roles.tiers]") {
+		t.Errorf("stderr does not name the tier table the problem is in; got:\n%s", stderr)
 	}
 }

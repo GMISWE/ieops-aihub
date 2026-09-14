@@ -347,18 +347,31 @@ func generateCodexProfiles(mc *config.MachineConfig) error {
 	}
 	fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
 
+	// Same two pre-flight checks internal/cli.generateRoles runs, and for the
+	// same reason -- this path and that one are the machine's two model
+	// resolvers, so a diagnosis available on one and not the other is a
+	// diagnosis an operator gets or misses depending on which one happened to
+	// run (aihub#676 findings 2 and 6).
+	for _, problem := range config.ValidateCandidates(tiers) {
+		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
+	}
+	if path, present := config.UnreadRolesOverrideDir(); present {
+		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
+	}
+
 	probe := &codexProfileCatalogProbe{}
 	resolved := make(map[string]string, len(roleList))
 	for _, r := range roleList {
-		model, ok := cli.ResolveModel(tiers[r.Tier], "codex", probe)
+		model, ok, why := cli.ResolveModelWithCause(tiers[r.Tier], "codex", probe)
 		if !ok {
 			// Loud and non-suppressible by design (AC7 parity with
-			// internal/cli.generateRoles): no flag gates this line.
-			fmt.Fprintf(os.Stderr,
-				"polyforge: WARNING: no resolvable codex model candidate for tier %q (role %q) -- "+
-					"generated profile will have NO model field and will inherit codex's own default "+
-					"model instead. Configure ~/.polyforge/config.toml [roles.tiers] to fix this.\n",
-				r.Tier, r.Name)
+			// internal/cli.generateRoles): no flag gates this line. The MESSAGE
+			// is now built by the same function that path uses, rather than
+			// being a hand-kept copy of the same sentence -- aihub#676 found
+			// the two copies had already diverged, and that both of them
+			// blamed the config even when the real cause was that `codex debug
+			// models` could not be run at all.
+			fmt.Fprint(os.Stderr, cli.UnresolvedModelWarning("codex", r.Tier, r.Name, tierSource, why))
 			continue // resolved[r.Name] stays unset, read back as "".
 		}
 		resolved[r.Name] = model
@@ -574,17 +587,24 @@ Artifact viewer:
   artifact view <memory_id>   Fetch spec/plan HTML and open in browser
 
 Role/tier agent generation (aihub#642):
-  roles generate <pi|codex> --out <dir> [--preset=<name>]
+  roles generate <pi|codex|opencode> --out <dir> [--preset=<name>]
                               Render per-role agent files (pf-<role>.md for pi,
-                              step-<role>.toml for codex) from
-                              internal/roles/definitions/*.yaml and this
-                              machine's ~/.polyforge/config.toml [roles.tiers]
-                              candidate lists. Claude Code's step-<role>.md
-                              files are generated at build time instead
-                              (committed via "go generate ./internal/roles/...")
-                              -- this subcommand never touches them.
+                              step-<role>.md for opencode, step-<role>.toml for
+                              codex) from internal/roles/definitions/*.yaml and
+                              this machine's ~/.polyforge/config.toml
+                              [roles.tiers] candidate lists. Claude Code's
+                              step-<role>.md files are generated at build time
+                              instead (committed via
+                              "go generate ./internal/roles/...") -- this
+                              subcommand never touches them.
                               --preset generates from a named tier table
                               instead of the machine's configured selection.
+                              NOTE: the codex form writes files nothing loads
+                              (codex has no agent-file auto-discovery,
+                              aihub#655) -- see the profile section below.
+                              ~/.polyforge/roles/ is NOT read: there is no
+                              user-override layer over the role definitions
+                              (aihub#676).
 
 Tier-table presets (aihub#673): a preset is a NAMED SNAPSHOT of the whole
 tier->model table, and selecting one SWAPS the table rather than merging with
@@ -594,8 +614,18 @@ cannot resolve different models depending on which entry point ran:
     [roles]
     preset = "frugal"              # this machine's default
     [roles.presets.frugal.tiers]
-    default = [{ harness = "pi", model = "claude-haiku-4-5" }]
+    default = [{ harness = "pi", model = "sub2api-anthropic/claude-haiku-4-5" }]
 An unknown preset name is refused, never silently ignored.
+
+Model identifiers here are HARNESS-NATIVE and, for pi and opencode,
+MACHINE-LOCAL: write the full "<provider>/<model>", never the bare model id.
+aihub#676 measured pi 0.85.1 rejecting a bare id outright once more than one
+authenticated provider offers it, and -- worse -- resolving a bare id that only
+one provider visibly offers to a DIFFERENT channel than the intended one. The
+provider name is whatever you called it when you configured that harness, which
+is why this table lives in ~/.polyforge/config.toml and not in the repo.
+"polyforge roles generate" warns about a bare id rather than silently writing
+an agent file that cannot start.
 
 Codex profile auto-generation (aihub#655, serve startup only, not a
 subcommand): when the codex CLI is on PATH, every "polyforge serve" boot

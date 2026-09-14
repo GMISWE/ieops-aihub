@@ -674,3 +674,182 @@ func TestSaveMachineConfigDocumentsPresets(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return indexOf(s, sub) >= 0 }
+
+// TestValidateCandidates pins aihub#676 finding 6: a harness string had no
+// validation anywhere in the repo, so `harness = "claude"` or a trailing space
+// in `"opencode "` matched nothing forever and surfaced only as the generic
+// "no resolvable <harness> model candidate" warning -- which sends the operator
+// to check the MODEL, the one part of the line that was fine.
+//
+// It also pins the bare-model-id check, which is the config-side half of
+// finding 1: aihub#676 measured pi 0.85.1 refusing an ambiguous bare id
+// outright and resolving a seemingly-unique one to a different provider.
+func TestValidateCandidates(t *testing.T) {
+	tests := []struct {
+		name string
+		in   map[string][]RoleCandidate
+		// wantEach: every string must appear in SOME problem.
+		wantEach []string
+		// wantNone: no problem may contain any of these.
+		wantNone []string
+		wantLen  int
+	}{
+		{
+			name: "a fully correct table has nothing to say",
+			in: map[string][]RoleCandidate{
+				"default": {{Harness: "pi", Model: "sub2api-anthropic/claude-sonnet-4-5"}},
+				"raised":  {{Harness: "codex", Model: "gpt-6-astra"}},
+				"low":     {{Harness: "opencode", Model: "anthropic/claude-haiku-4-5"}},
+			},
+			wantLen: 0,
+		},
+		{
+			name:     "unknown harness is named, with the known set",
+			in:       map[string][]RoleCandidate{"default": {{Harness: "claude", Model: "x/y"}}},
+			wantEach: []string{`unknown harness "claude"`, "codex, opencode, pi", `tier "default" candidate 0`},
+			wantLen:  1,
+		},
+		{
+			name:     "cc gets the specific reason it is not configurable here",
+			in:       map[string][]RoleCandidate{"raised": {{Harness: "cc", Model: "opus"}}},
+			wantEach: []string{"cc_aliases.yaml"},
+			wantLen:  1,
+		},
+		{
+			name: "whitespace in a harness name is called out explicitly",
+			in:   map[string][]RoleCandidate{"low": {{Harness: "opencode ", Model: "a/b"}}},
+			// The discriminator: a bare "unknown harness" message would leave
+			// the operator staring at a string that LOOKS right.
+			wantEach: []string{"whitespace"},
+			wantLen:  1,
+		},
+		{
+			name:     "empty harness",
+			in:       map[string][]RoleCandidate{"lowest": {{Harness: "", Model: "a/b"}}},
+			wantEach: []string{"declares no harness"},
+			wantLen:  1,
+		},
+		{
+			name:     "empty model",
+			in:       map[string][]RoleCandidate{"lowest": {{Harness: "pi", Model: ""}}},
+			wantEach: []string{"declares no model"},
+			// Must NOT also complain about the missing provider prefix: an
+			// empty model has one problem, not two.
+			wantNone: []string{"BARE"},
+			wantLen:  1,
+		},
+		{
+			name:     "bare pi model id is flagged with the form to write instead",
+			in:       map[string][]RoleCandidate{"default": {{Harness: "pi", Model: "claude-sonnet-4-5"}}},
+			wantEach: []string{"BARE pi model id", `"<provider>/claude-sonnet-4-5"`, "aihub#676"},
+			wantLen:  1,
+		},
+		{
+			name:     "bare opencode model id is flagged too",
+			in:       map[string][]RoleCandidate{"low": {{Harness: "opencode", Model: "claude-haiku-4-5"}}},
+			wantEach: []string{"BARE opencode model id"},
+			wantLen:  1,
+		},
+		{
+			name: "a codex slug is NOT flagged for lacking a provider prefix",
+			// The negative control for the check above: codex slugs are bare by
+			// design, so a rule that flagged every prefix-less model would be
+			// noise on the one harness where bare is correct.
+			in:       map[string][]RoleCandidate{"raised": {{Harness: "codex", Model: "gpt-6-astra"}}},
+			wantNone: []string{"BARE"},
+			wantLen:  0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValidateCandidates(tc.in)
+			if len(got) != tc.wantLen {
+				t.Fatalf("ValidateCandidates() returned %d problems, want %d: %v", len(got), tc.wantLen, got)
+			}
+			joined := ""
+			for _, p := range got {
+				joined += p + "\n"
+			}
+			for _, want := range tc.wantEach {
+				if !contains(joined, want) {
+					t.Errorf("no problem mentions %q; got:\n%s", want, joined)
+				}
+			}
+			for _, never := range tc.wantNone {
+				if contains(joined, never) {
+					t.Errorf("a problem mentions %q, which should not apply here; got:\n%s", never, joined)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateCandidatesIsDeterministic pins the stable ordering the callers
+// print in: two runs over the same table must produce the same sequence, or a
+// machine's warnings reshuffle between invocations for no reason.
+func TestValidateCandidatesIsDeterministic(t *testing.T) {
+	in := map[string][]RoleCandidate{
+		"raised":  {{Harness: "nope", Model: "a"}},
+		"default": {{Harness: "nope", Model: "b"}},
+		"low":     {{Harness: "nope", Model: "c"}},
+		"lowest":  {{Harness: "nope", Model: "d"}},
+	}
+	first := ValidateCandidates(in)
+	for i := 0; i < 20; i++ {
+		if !reflect.DeepEqual(ValidateCandidates(in), first) {
+			t.Fatalf("ValidateCandidates() is not order-stable across runs: %v vs %v", ValidateCandidates(in), first)
+		}
+	}
+	// And the order is the documented one (tier name, ascending), not map order.
+	want := []string{"default", "low", "lowest", "raised"}
+	for i, tier := range want {
+		if !contains(first[i], `tier "`+tier+`"`) {
+			t.Errorf("problem %d is %q, want it to concern tier %q", i, first[i], tier)
+		}
+	}
+}
+
+// TestUnreadRolesOverrideDir pins aihub#676 finding 2. aihub#642's design
+// promised a `~/.polyforge/roles/` user-override layer that was never
+// implemented; aihub#676 withdrew it (see UnreadRolesOverrideDir's doc comment
+// for the structural reason) and replaced the silent no-op with a notice.
+//
+// The assertion that matters is the middle one: an EMPTY directory must not
+// warn. A check that fired on mere existence would nag every machine that ever
+// ran `mkdir` there, and a warning nobody can silence by doing the right thing
+// gets ignored.
+func TestUnreadRolesOverrideDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path, present := UnreadRolesOverrideDir()
+	if present {
+		t.Errorf("UnreadRolesOverrideDir() = (%q, true) with no such directory", path)
+	}
+
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if _, present = UnreadRolesOverrideDir(); present {
+		t.Error("UnreadRolesOverrideDir() reports present for an EMPTY directory; nothing is being ignored yet")
+	}
+
+	if err := os.WriteFile(path+"/reviewer.yaml", []byte("name: reviewer\n"), 0o644); err != nil {
+		t.Fatalf("write override file: %v", err)
+	}
+	got, present := UnreadRolesOverrideDir()
+	if !present {
+		t.Fatalf("UnreadRolesOverrideDir() = (%q, false) with a file in it; the operator's edits would "+
+			"go unmentioned, which is the aihub#676 defect", got)
+	}
+
+	// The notice has to say the thing the operator needs: that it is ignored,
+	// and where role definitions really come from.
+	msg := RolesOverrideIgnoredWarning(got)
+	for _, want := range []string{got, "NOT read", "internal/roles/definitions"} {
+		if !contains(msg, want) {
+			t.Errorf("RolesOverrideIgnoredWarning() does not mention %q; got:\n%s", want, msg)
+		}
+	}
+}

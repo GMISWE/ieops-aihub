@@ -142,13 +142,27 @@ fi
 if [ -z "$src_lowest" ] || [ -z "$src_low" ]; then
   echo "  FAIL: step-operator.md / step-explorer.md no longer declare a model: frontmatter line — aihub#642's two new tier sources are missing" >&2
   fails=$((fails+1))
+else
+  # aihub#676: the pointer now names all FOUR tiers, so these two are assertable against the
+  # SHIPPED prose instead of only through the injected fixture further down. Same pairing
+  # discipline as the two checks above: anchored on each bullet's closing words, because a hook
+  # that derived all four names but shuffled them would still contain every substring.
+  ck "$o" "publish -> model: $src_lowest"           "execute pointer lowest tier matches agents/step-operator.md"
+  ck "$o" "context gathering -> model: $src_low"    "execute pointer low tier matches agents/step-explorer.md"
+  # And the defect itself: "explore/search code" used to be steered to the DEFAULT tier while
+  # explorer.yaml declares `tier: low`. If the low tier ever resolves to the same model as the
+  # default one this check goes vacuous rather than wrong, so it is skipped in that case.
+  if [ "$src_low" != "$src_default" ]; then
+    ck_not "$o" "explore/search code, read-only investigation, context gathering -> model: $src_default" \
+      "explore/search code is NOT steered to the default tier (aihub#676)"
+  fi
 fi
 ck_not "$o" "@@DEFAULT_TIER@@" "no unsubstituted default-tier placeholder leaks"
 ck_not "$o" "@@RAISED_TIER@@"  "no unsubstituted raised-tier placeholder leaks"
-# aihub#642: the pointer prose does not reference the two new tiers today (no lowest/low-tier
-# advice for a superpowers subagent dispatch exists yet, and adding that prose is out of this
-# step's scope), but the router's TIERS dict now derives all 4 — so a stray raw placeholder
-# would leak if a future fragment referenced one without going through subst() correctly.
+# aihub#642 wired all 4 tiers into the router's TIERS dict; aihub#676 made the shipped pointer
+# prose actually USE all 4 (it had steered explore/search code to the default tier while
+# explorer.yaml declares `tier: low`). These two therefore now guard real shipped text, not only
+# a hypothetical future fragment.
 ck_not "$o" "@@LOWEST_TIER@@" "no unsubstituted lowest-tier placeholder leaks"
 ck_not "$o" "@@LOW_TIER@@"    "no unsubstituted low-tier placeholder leaks"
 
@@ -259,10 +273,11 @@ STRIP_LOWEST
 ck_empty "$(run polyforge:pf-execute "$ws_on" "$fx4")" "step-operator.md missing model: -> whole superpowers payload inert (only the new LOWEST-tier source is broken; default/raised are untouched)"
 
 echo "== aihub#642: @@LOWEST_TIER@@/@@LOW_TIER@@ substitute end-to-end through the real subst() path =="
-# No shipped fragment references the two new tokens yet (plan step 9 only wires the mechanism;
-# authoring lowest/low-tier steering prose is out of this step's scope), so a fixture that
-# injects a reference into the router's own pointer text is the only way to exercise the new
-# replacements through the real code path rather than re-deriving TIERS by hand in bash.
+# Since aihub#676 the shipped pointer DOES reference both new tokens (asserted directly, far
+# above), so this block is no longer the only coverage of them. It is kept because it exercises
+# a DIFFERENT thing: that subst() substitutes a token appearing in text it has never seen before,
+# which is what protects the next fragment someone adds. The patch below still anchors on the
+# RAISED_TIER row, which aihub#676 deliberately left byte-identical.
 fx3="$tmp/plugin_fx3"; rm -rf "$fx3"; cp -r "$plugin_root" "$fx3"
 python3 - "$fx3/hooks/pf-skill-router" <<'PATCH'
 import sys

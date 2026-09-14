@@ -44,7 +44,15 @@ func RenderCCAgentFiles(roleList []Role, aliases CCAliases) (map[string]string, 
 			fmt.Fprintf(&b, "disallowedTools: %s\n", shape.CCDisallowedTools)
 		}
 		b.WriteString("---\n\n")
-		b.WriteString(r.Prompt)
+		// CC always declares a model: aliases come from the repo-committed
+		// cc_aliases.yaml and the loop above already errored on a missing one,
+		// so modelDeclared is unconditionally true here -- unlike the three
+		// install-time harnesses, CC has no omit-and-warn fallback path.
+		prompt, err := ExpandPrompt(r.Prompt, "cc", r.Capability.ReadOnly, true)
+		if err != nil {
+			return nil, fmt.Errorf("role %q: %w", r.Name, err)
+		}
+		b.WriteString(prompt)
 
 		out[name+".md"] = b.String()
 	}

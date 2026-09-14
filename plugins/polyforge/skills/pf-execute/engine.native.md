@@ -56,5 +56,6 @@ different parameter sharing the key name. §0f has the contract, the mapping and
 
 ## Execute (rhs=true, interactive mode)
 
-Same bracket and completion call; you present each step instead of dispatching. **`Read` §1
-first** - `skip` **completes** the step (§1b), and §0d has the startup three-segment values.
+One layer (aihub#644): dispatch as above, then STOP - present the result and wait for the human
+before bracketing or dispatching next. **`Read` §1 first** - the verbs, `skip` **completes**
+(§1b), the human adjudicates a reviewer verdict (§1c), §0d the startup values.

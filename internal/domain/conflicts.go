@@ -240,6 +240,13 @@ const notCallersOwnLockHolderSQL = ` AND ra.work_item_id <> `
 // dry_run predict over a held path answered
 // "[conflict in project aihub, no visibility]".
 //
+// ⚠️ THAT QUOTED LABEL IS HISTORY, NOT THE CURRENT ANSWER, and so are the two
+// other copies of it below (the aihub#665 measurement table and rule 4's
+// comment). aihub#679 removed the project name from the fold: the label is now
+// the constant FoldedConflictDescription and names nothing. The measurements are
+// left worded as they were taken, because a measurement rewritten to match
+// today's code is no longer evidence of what it caught.
+//
 // callerProjectScope is the api key's project_scope confinement (nil = unscoped),
 // and it is here for the same reason callerRole is: since aihub#665 this function
 // DECIDES project visibility rather than only folding it, and hasProjectAccess —
@@ -917,7 +924,7 @@ fold:
 				p.WIID = ""
 				p.WISlug = ""
 				p.AttemptID = ""
-				p.Description = "[conflict in project " + wiProject + ", no visibility]"
+				p.Description = FoldedConflictDescription
 			}
 		}
 		foldedPredictions = append(foldedPredictions, p)
@@ -926,6 +933,65 @@ fold:
 
 	return result, nil
 }
+
+// FoldedConflictDescription is the description every folded prediction carries,
+// and it is a CONSTANT so that no caller-invisible value can reach it.
+//
+// 🔴 IT USED TO NAME THE PROJECT, and that was the last field the H7 fold
+// published about a holder the caller may not see. aihub#665 stripped
+// actor_display, work_item_id, work_item_slug and attempt_id and left
+// `"[conflict in project " + wiProject + ", no visibility]"` standing, so a
+// redaction whose whole purpose is "you may not see that project" answered by
+// naming it. The label was not aihub#665's: it arrived with the fold itself in
+// c5a4f1c (2026-05-21, "H7: PredictConflicts folds cross-project predictions for
+// unauthorized projects"), and aihub#662/#665 only re-punctuated it and made the
+// fold the single exit. Four months, not one day.
+//
+// Why that matters more than it reads. This endpoint is pf-work's PRE-CLAIM
+// GATE, so any key holding a role in ANY ONE project may call it, repeatedly,
+// about paths every repo has (README.md, go.mod, Makefile) — and each hit that
+// folded returned one project name. Project names are `^[a-z][a-z0-9_-]{0,39}$`
+// and in this deployment they are frequently CUSTOMER names, so the fold was a
+// working enumeration oracle for the customer list, reachable by every
+// authenticated caller. The holder's identity was withheld and the tenant it
+// belonged to was not.
+//
+// 🔴 A CONSTANT RATHER THAN A SHORTER STRING EXPRESSION, on purpose. The defect
+// class here is "the redaction is built by concatenating something the caller
+// cannot see", and the only repair that cannot be re-introduced by the next
+// person improving the wording is one where the fold has no interpolation site
+// at all. TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee holds the
+// fold's assignment to exactly this identifier for that reason, rather than
+// asserting on the text.
+//
+// What the caller is still told is deliberately everything that is theirs:
+// severity, rule number, resource_type and resource_key all survive the fold, so
+// a blocked caller still learns it is blocked, by which rule, and on which of
+// ITS OWN declared resources. A "fix" that dropped the prediction instead would
+// have satisfied every absence assertion in
+// predict_conflicts_visibility_db_test.go while removing the hard gate pf-work
+// branches on.
+//
+// 📎 THE FOLD CLEARS FIVE FIELDS AND NOT SIX, and the sixth is worth naming
+// because "only the counterparty is withheld" is the obvious reading of the
+// paragraph above and it is not true. ActorDisplay, WIID, WISlug, AttemptID and
+// Description are cleared; LastActiveAgeSeconds is NOT, and rules 2, 4 and 6 set
+// it on the same predictions that set WIID — so a folded prediction still
+// publishes the invisible holder's heartbeat age.
+//
+// Left alone deliberately, not overlooked. It carries no identity, it predates
+// aihub#665, and the field's own doc says it exists so a human can judge
+// wait-versus-takeover; clearing it is a behaviour change no work item has asked
+// for, and aihub#679's brief was the project name. It is a residue, recorded
+// here so the next person reading this constant does not conclude the fold is
+// total. If it is ever closed, close it here and in
+// docs/mcp-cards/pf_predict_conflicts.md, which now says the same thing.
+//
+// ⚠️ THE `, no visibility]` TAIL IS LOAD-BEARING TEXT, not decoration: the
+// every_rule_is_folded arm counts occurrences of it to prove all three rules
+// folded rather than one rule folding and two returning nothing. Changing the
+// tail means changing that count's needle in the same commit.
+const FoldedConflictDescription = "[conflict in another project, no visibility]"
 
 // canSeeProject reports whether the caller may be told who holds a lock in
 // project.

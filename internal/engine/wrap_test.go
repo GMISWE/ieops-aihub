@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -220,5 +221,131 @@ func TestCleanupWorktrees_NilRmParentSkipsParentRemoval(t *testing.T) {
 	}
 	if len(removed) != 1 {
 		t.Errorf("removed = %v, want 1 entry", removed)
+	}
+}
+
+// TestCleanupWorktrees_RefusesAParentThatIsNotAPolyforgeWorktreeDir is the
+// aihub#679 guard: rmParent is an unconditional recursive delete and the path it
+// is handed comes from data nobody validated, so the parent's basename is
+// checked before it is used.
+//
+// 🔴 THE RECORDING rmParent IS THE INSTRUMENT, not a stand-in. In production
+// rmParent is os.RemoveAll behind an is-a-directory guard (internal/cli/engine.go
+// and internal/cli/drain.go both spell the same closure), so "was rmParent
+// called" IS "was the tree deleted". Asserting on the log rather than on a
+// temporary directory is what makes the destructive case safe to test at all:
+// the arm below hands it $HOME-shaped paths, and a test that actually deleted
+// them to prove the point would be the defect.
+func TestCleanupWorktrees_RefusesAParentThatIsNotAPolyforgeWorktreeDir(t *testing.T) {
+	// The corruptions this exists for. Each is one plausible way the worktree map
+	// stops describing a pf.<slug>/ directory: a truncated or hand-edited state
+	// file, and a hand-typed `engine cleanup-worktrees --worktrees` (which takes
+	// the map straight off argv with no validation whatsoever).
+	for _, tc := range []struct {
+		name string
+		path string
+		dir  string
+	}{
+		{"home directory", "/root/aihub", "/root"},
+		{"workspace root itself", "/ws/aihub", "/ws"},
+		{"filesystem root", "/aihub", "/"},
+		{"a sibling repo checkout", "/ws/.repo/aihub", "/ws/.repo"},
+		{"a pf-ish name that is not the prefix", "/ws/mypf.aihub-1/aihub", "/ws/mypf.aihub-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var log []string
+			removed, repoErrs, parentErr := CleanupWorktrees(
+				recordingGit(&log, nil), recordingRmParent(&log, ""), "/ws",
+				map[string]string{"aihub": tc.path})
+
+			// 🔴 THE ASSERTION THAT MATTERS. Everything else here is reporting;
+			// this is the deletion not happening.
+			for _, entry := range log {
+				if entry == "rm "+tc.dir {
+					t.Fatalf("CleanupWorktrees called rmParent(%q) — in production that is "+
+						"os.RemoveAll and %q is gone. The worktree path was %q, which is not "+
+						"under a pf.<slug>/ directory.", tc.dir, tc.dir, tc.path)
+				}
+			}
+
+			// Refusing has to be LOUD. The per-repo `git worktree remove` above it
+			// has already run, so a silent skip leaves a half-finished cleanup with
+			// no reason given, and cleanup is best-effort enough that nobody would
+			// look.
+			if parentErr == nil {
+				t.Fatal("CleanupWorktrees returned no parentErr. It declined to remove the " +
+					"shared parent and said nothing, which is indistinguishable from having " +
+					"removed it successfully.")
+			}
+			if !strings.Contains(parentErr.Error(), tc.dir) {
+				t.Errorf("parentErr = %v, and it does not name the directory %q it refused. "+
+					"The operator has to be able to tell which path was wrong.", parentErr, tc.dir)
+			}
+
+			// The per-repo work still happened and is still reported: the guard is
+			// on the shared parent only, and a refusal there must not be read as
+			// "nothing was cleaned up".
+			if len(removed) != 1 || removed[0] != "aihub" {
+				t.Errorf("removed = %v, want [aihub] — the per-repo `git worktree remove` runs "+
+					"before the parent guard and its result is still the caller's answer",
+					removed)
+			}
+			if len(repoErrs) != 0 {
+				t.Errorf("repoErrs = %v, want empty", repoErrs)
+			}
+		})
+	}
+}
+
+// TestCleanupWorktrees_StillRemovesLegitimatePfParents is the guard's negative
+// control, and it is the half that decides whether the guard is a fix or an
+// outage.
+//
+// 🔴 "NOTHING WAS DELETED" IS ALSO WHAT A GUARD THAT REFUSES EVERYTHING
+// PRODUCES. Every arm in the test above is satisfied by `return parentErr` as
+// the first line of the function. These rows are the real shapes — the workspace
+// layout, the seq-and-ulid form pf.<seq>.<ulid8>, and the absolute path outside
+// the workspace root that internal/cli/drain_test.go already pins as legitimate
+// input — and they must all still be removed.
+func TestCleanupWorktrees_StillRemovesLegitimatePfParents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		dir  string
+	}{
+		{"the ordinary workspace shape", "/ws/pf.aihub-679/aihub", "/ws/pf.aihub-679"},
+		{"the seq.ulid shape doctor.go also accepts", "/ws/pf.7.aBcD1234/aihub", "/ws/pf.7.aBcD1234"},
+		// 🔴 NOT under --workspace-root, and deliberately so. This is why the
+		// guard is on the basename and not on a workspaceRoot prefix: a prefix
+		// rule would refuse this, and internal/cli/drain_test.go pins
+		// /elsewhere/pf.aihub-667/aihub as a path the drain path really passes in.
+		{"an absolute path outside the workspace root", "/elsewhere/pf.aihub-667/aihub", "/elsewhere/pf.aihub-667"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var log []string
+			removed, repoErrs, parentErr := CleanupWorktrees(
+				recordingGit(&log, nil), recordingRmParent(&log, ""), "/ws",
+				map[string]string{"aihub": tc.path})
+			if parentErr != nil {
+				t.Fatalf("CleanupWorktrees refused a legitimate polyforge worktree parent: %v. "+
+					"The aihub#679 guard may only reject directories that are not named "+
+					"pf.<something>; refusing this one strands the parent directory of every "+
+					"wrapped work item.", parentErr)
+			}
+			found := false
+			for _, entry := range log {
+				if entry == "rm "+tc.dir {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("rmParent(%q) was never called; log = %v. The parent of a real "+
+					"pf.<slug>/ worktree must still be removed once, after the per-repo "+
+					"removals.", tc.dir, log)
+			}
+			if len(removed) != 1 || len(repoErrs) != 0 {
+				t.Errorf("removed = %v, repoErrs = %v, want [aihub] and empty", removed, repoErrs)
+			}
+		})
 	}
 }

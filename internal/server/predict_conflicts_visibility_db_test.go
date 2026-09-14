@@ -669,7 +669,7 @@ func TestPredictConflictsVisibilityAcrossProjects(t *testing.T) {
 		// pf-work branches on.
 		for _, want := range []string{
 			`"severity":"hard_block"`, `"rule":1`, `"resource_type":"file_scope"`,
-			"[conflict in project " + s.home + ", no visibility]",
+			domain.FoldedConflictDescription,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("the folded hard_block lost %q — the caller must still learn it is "+
@@ -683,6 +683,64 @@ func TestPredictConflictsVisibilityAcrossProjects(t *testing.T) {
 					"caller cannot see — that is the aihub#665 fold bypass. Body: %s",
 					secret, body)
 			}
+		}
+
+		// 🔴 THE aihub#679 ARM. Everything above this line was already here, and
+		// the fold was STILL naming the project — because the absence list two
+		// clauses up enumerates the secrets aihub#665 remembered (actor, wi id,
+		// slug, attempt id) and the project name was not one of them. The `want`
+		// list even pinned the leak in place: it required the literal
+		// "[conflict in project " + s.home + ", no visibility]" to be PRESENT, so
+		// the one arm covering this code path asserted the disclosure rather than
+		// refusing it. That is why this is added here and not in a new file: a
+		// census that is read as complete has to be corrected where it is read.
+		//
+		// The caller is s.memberKey, a maintainer of `victim` and NOTHING in
+		// `home` — see the fixture's members rows. The holder of s.crossPath is an
+		// attempt in `home` holding a key namespaced to `victim`, which is the
+		// only shape that makes an AUTHORIZED predict report a holder from an
+		// invisible project. So the caller is entitled to the call and not
+		// entitled to the tenant.
+		//
+		// Why a project name is worth an arm of its own. pf_predict_conflicts is
+		// the pre-claim gate every agent calls, any key with a role in any one
+		// project may call it, and the payload that reaches this branch is just a
+		// path. Paths that exist in every repo (README.md, go.mod, Makefile) turn
+		// the fold into an oracle that returns one project name per hit, and in
+		// this deployment project names are frequently customer names.
+		if strings.Contains(body, s.home) {
+			t.Errorf("the folded hard_block still names %q — the project the caller has no "+
+				"role in. The fold withholds WHO holds the lock and then says WHERE, which "+
+				"makes it an enumeration oracle for the project list: this endpoint is "+
+				"reachable by every authenticated caller, takes an arbitrary path, and "+
+				"project names here are frequently customer names. Body: %s", s.home, body)
+		}
+		// 🔴 THE CONTROL FOR THE ARM ABOVE, and it is not ceremony: an absence
+		// assertion is satisfied by a needle that appears in NO response at all.
+		// The discriminating control is in this same body — it carries TWO project
+		// names' worth of opportunity and must carry exactly one. `victim` is the
+		// caller's own project and reaches the wire in resource_key
+		// ("<project>:<repo>:<path>"); `home` is the holder's and must not appear
+		// anywhere. One response, one code path, one redaction: that is what tells
+		// "the fold withheld it" from "project names never appear in predictions".
+		//
+		// The degeneracy guard comes first because both halves are fixture-derived
+		// ("p_<sanitized name>v" / "…h"): if a rename ever made one a substring of
+		// the other, the presence arm and the absence arm would contradict each
+		// other and the absence arm would be the one that silently won.
+		if len(s.home) < 3 || s.home == s.victim ||
+			strings.Contains(s.victim, s.home) || strings.Contains(s.home, s.victim) {
+			t.Fatalf("the needles are degenerate: home=%q victim=%q. The absence assertion "+
+				"above proves nothing unless home is a distinctive string that neither "+
+				"contains nor is contained by the project the caller CAN see.",
+				s.home, s.victim)
+		}
+		if !strings.Contains(body, s.victim) {
+			t.Errorf("the caller's OWN project name %q does not appear in this response "+
+				"either, so `!Contains(body, %q)` above is satisfied by the fact that no "+
+				"project name ever reaches the wire, not by the fold. resource_key is "+
+				"\"<project>:<repo>:<path>\" and the caller is entitled to its own half of "+
+				"it. Body: %s", s.victim, s.home, body)
 		}
 	})
 }

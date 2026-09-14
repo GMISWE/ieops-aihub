@@ -88,6 +88,28 @@ type ReconcileCommitLocksRequest struct {
 
 	// Paths are the repo-relative paths the pending commit WRITES, as produced
 	// by coding.GitPendingCommitPaths.
+	//
+	// ⚠️ "WRITES" IS NARROWER THAN "CHANGES", and on a merge the difference is a
+	// gap this gate cannot see. GitPendingCommitPaths intersects the staged set
+	// against every parent, so a path resolved with `--ours` — whose index entry
+	// EQUALS HEAD — is absent from this slice, and a merge that discards a file
+	// another live attempt holds passes the gate unexamined. That is stated here,
+	// on the field the gate consumes, because the gate's own refusals are read
+	// here and its blind spots are documented one package away.
+	//
+	// It is ACCEPTED, and re-confirmed as accepted by aihub#679's review rather
+	// than rediscovered by it: coding.GitPendingCommitPaths' doc comment already
+	// names this residue, names the two cases that make it reachable (file_scope
+	// locks are released on PAUSE while the branch survives, and a plain `git
+	// commit` never passes through the gate at all), and records why the
+	// alternative is worse — "counting every path that differs from ANY parent is
+	// the un-narrowed set this function exists to replace, and that set is what
+	// refused aihub#654 over three files it never touched". Widening it back is a
+	// change with a measured false-positive cost, not a correction.
+	//
+	// The direction is the reason it can wait: this is the gate seeing LESS than
+	// the whole staged set, which is strictly narrower than the behaviour it
+	// replaced. A residue, not a regression.
 	Paths []string `json:"paths"`
 
 	// Merge reports that the pending commit is a merge commit — a merge is in

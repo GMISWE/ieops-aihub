@@ -5465,6 +5465,19 @@ jobs:
       # reaches rule 1 past the new gate and checks the redaction itself, using a
       # holder in another project that took a cross-namespace key through
       # requested_locks. Reverting `goto fold` to `return result, nil` reddens it.
+      #
+      # 🔴 aihub#679 EXTENDED THAT SAME FOLD ARM, and the reason is a lesson about
+      # this whole step: every arm listed below passed on a tree where the fold
+      # still published the invisible project's NAME. The absence list enumerated
+      # actor_display / work_item_id / work_item_slug / attempt_id — the secrets
+      # aihub#665 had in mind — and the presence list REQUIRED the literal
+      # "[conflict in project <home>, no visibility]", so the one arm covering
+      # this code path asserted the disclosure. Measured: origin/main's
+      # conflicts.go plus origin/main's copy of this test file = 17/17 subtests
+      # PASS. The fold now carries domain.FoldedConflictDescription, which names
+      # nothing, and the arm asserts the project name is ABSENT with the caller's
+      # OWN project name required PRESENT in the same body as its control.
+      # An absence census is only as complete as the list someone remembered.
       # The DB-free halves (canSeeProject's table, the refusal before any query,
       # and the AST arm that no `return result` may precede the fold) run in the
       # "Unit tests" step and need no step here.
@@ -5493,6 +5506,42 @@ jobs:
           done
           ! grep -q -- '--- SKIP' predict_visibility.log \
             || { echo "::error::an aihub#665 visibility arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#679: the claim path's cross-user force_takeover check is the ONLY
+      # copy of that rule, and until now it had no test at all.
+      #
+      # domain.FnClaimWorkItem does not re-derive it and cannot — its signature
+      # takes neither callerRole nor callerProjectRoles, and its takeover branch
+      # says so: `} else if req.ForceOver { // ... caller must be maintainer/admin
+      # (handled upstream)`. "Upstream" is eleven lines in handleClaimWorkItem
+      # whose actor_user_id read was `//nolint:errcheck`, so a failed read left
+      # the actor empty and the guard's own `!= ""` arm skipped the check
+      # entirely. Deleting the whole block was measured to return 200 with a new
+      # attempt for a plain writer against another user's running attempt.
+      #
+      # 🔴 THE TWO CONTROLS ARE NAMED FOR THE SAME REASON AS aihub#665's ABOVE.
+      # "A writer is refused" is satisfied by refusing everyone, and refusing
+      # everyone breaks force_takeover — the operation that exists to recover a
+      # work item from a dead agent. The maintainer arm and the self-retake arm
+      # are what separate the fix from an outage.
+      #
+      # The companion source arm (TestClaimPathForceTakeoverActorReadIsNotDiscarded)
+      # needs no database and runs in the "Unit tests" step: it pins that the read
+      # is error-checked, which is the half no healthy-database test can observe.
+      - name: aihub#679 claim-path force_takeover authorization DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestClaimPathCrossUserForceTakeoverRequiresMaintainer$' -count=1 -v 2>&1 | tee claim_takeover_authz.log
+          for want in 'TestClaimPathCrossUserForceTakeoverRequiresMaintainer/a_plain_writer_is_refused' \
+                      'TestClaimPathCrossUserForceTakeoverRequiresMaintainer/control_a_maintainer_is_allowed' \
+                      'TestClaimPathCrossUserForceTakeoverRequiresMaintainer/control_the_same_writer_may_retake_its_own_attempt'; do
+            grep -q -- "--- PASS: $want (" claim_takeover_authz.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the claim path's cross-user force_takeover rule has no second copy in the domain layer, so an unverified router check is an unverified rule"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' claim_takeover_authz.log \
+            || { echo "::error::an aihub#679 takeover-authorization arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
       # aihub#668: UserContext.ProjectRoles was derived from projects.members
       # alone, at both of the sites TestProjectRolesHaveOneDerivation names, so a

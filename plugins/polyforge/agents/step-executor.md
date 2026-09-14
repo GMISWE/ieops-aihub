@@ -1,6 +1,6 @@
 ---
 name: step-executor
-description: Executes one non-review step of a claimed polyforge work item. Dispatched by the pf-execute loop as subagent_type "polyforge:step-executor"; not for ad-hoc routing.
+description: Executes one non-review step of a claimed polyforge work item. Dispatched by the pf-execute loop as the "executor"-role step agent; not for ad-hoc routing.
 model: sonnet
 ---
 

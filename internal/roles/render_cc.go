@@ -36,7 +36,8 @@ func RenderCCAgentFiles(roleList []Role, aliases CCAliases) (map[string]string, 
 		// a present-but-empty key under agentFrontmatter(), not as "absent".
 		var b bytes.Buffer
 		b.WriteString("---\n")
-		fmt.Fprintf(&b, "name: step-%s\n", r.Name)
+		name := mustAgentName("cc", r.Name)
+		fmt.Fprintf(&b, "name: %s\n", name)
 		fmt.Fprintf(&b, "description: %s\n", r.Description)
 		fmt.Fprintf(&b, "model: %s\n", alias)
 		if shape.CCDisallowedTools != "" {
@@ -45,7 +46,7 @@ func RenderCCAgentFiles(roleList []Role, aliases CCAliases) (map[string]string, 
 		b.WriteString("---\n\n")
 		b.WriteString(r.Prompt)
 
-		out[fmt.Sprintf("step-%s.md", r.Name)] = b.String()
+		out[name+".md"] = b.String()
 	}
 	return out, nil
 }

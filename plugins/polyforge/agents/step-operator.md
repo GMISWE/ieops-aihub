@@ -1,6 +1,6 @@
 ---
 name: step-operator
-description: Executes one mechanical delivery step of a claimed polyforge work item (commit_and_pr, await_ci, bump_version, publish_*, refresh_descriptions, build, await_image). Dispatched by the pf-execute loop as subagent_type "polyforge:step-operator"; not for ad-hoc routing.
+description: Executes one mechanical delivery step of a claimed polyforge work item (commit_and_pr, await_ci, bump_version, publish_*, refresh_descriptions, build, await_image). Dispatched by the pf-execute loop as the "operator"-role step agent; not for ad-hoc routing.
 model: haiku
 ---
 

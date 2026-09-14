@@ -1,6 +1,6 @@
 ---
 name: step-designer
-description: Executes one design-judgment step of a claimed polyforge work item (spec, direction, prototype). Dispatched by the pf-execute loop as subagent_type "polyforge:step-designer"; not for ad-hoc routing.
+description: Executes one design-judgment step of a claimed polyforge work item (spec, direction, prototype). Dispatched by the pf-execute loop as the "designer"-role step agent; not for ad-hoc routing.
 model: opus
 ---
 

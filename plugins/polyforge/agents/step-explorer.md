@@ -1,6 +1,6 @@
 ---
 name: step-explorer
-description: Read-only investigator for exploration/context-preparation steps of a claimed polyforge work item (prepare_context, map_consumers, ground, check_status). Dispatched by the pf-execute loop as subagent_type "polyforge:step-explorer"; not for ad-hoc routing.
+description: Read-only investigator for exploration/context-preparation steps of a claimed polyforge work item (prepare_context, map_consumers, ground, check_status). Dispatched by the pf-execute loop as the "explorer"-role step agent; not for ad-hoc routing.
 model: haiku
 disallowedTools: Edit, Write, NotebookEdit
 ---

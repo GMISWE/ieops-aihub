@@ -78,7 +78,11 @@ what each failure means, and how to do it by hand on a harness whose binary pred
    `level:` does NOT select a model. It is `common/review`'s review-depth argument and the loop
    passes it through as `Review level: <value>` - nothing more. See §0f.
 
-## 0b. The auto-mode dispatch, verbatim - the Agent call, not just its prompt
+## 0b. The auto-mode dispatch, verbatim - the call, not just its prompt
+
+> **The wrapper below is CLAUDE CODE's; the prompt body is every harness's** (aihub#670). Only
+> the outer call and the agent id change per harness - §0f's harness table has your row. The
+> text between `"""` and `"""` is identical on all four and is what "COPY IT WHOLE" is about.
 
 `engine.native.md` summarises this in prose to stay inside the payload budget. The literal
 template the loop dispatches - COPY IT WHOLE. Every argument shown is REQUIRED, and
@@ -99,7 +103,11 @@ Agent(
           explorer/reviewer/designer - not just is_review's two). Use the full
           plugin-namespaced id: the bare agent name resolves to a same-named user/project
           agent when one exists, while the namespaced id always resolves to the plugin's
-          file (measured, aihub#555). Do NOT add a model argument - it would silently
+          file (measured, aihub#555). NOT-CC HARNESSES: this argument name, the tool name
+          and the id spelling all change together - substitute your §0f row whole
+          (pi `subagent(agent=<id>, task=...)`; opencode `task(subagent_type=<id>,
+          prompt=..., description=<3-5 words>)`; codex has no dispatchable agent, run the
+          step in-session). Do NOT add a model argument - it would silently
           override the agent file.>,
   prompt: """
 You are executing step {step_id} of wi {wi_id}.
@@ -234,6 +242,50 @@ name -> agent-id lookup, never a predicate.
 | `explorer` | low, **read-only** | `prepare_context`, `map_consumers`, `ground`, `check_status` | `polyforge:step-explorer` |
 | `reviewer` | raised, **read-only** | `code_review`, `review`, `release_review` | `polyforge:step-reviewer` |
 | `designer` | raised, write | `spec`, `direction`, `prototype` | `polyforge:step-designer` |
+
+**The `agent` column above is CLAUDE CODE's spelling, and it is one of FOUR (aihub#670).** This
+file, and `engine.native.md` with it, ships byte-identical to pi, codex and opencode: pi's
+installer copies `skills/` with `cp -r` and no transform, `.codex-plugin/plugin.json` points
+codex at `./skills/` in place, and opencode's installer never copies skills at all, so three of
+the four harnesses have no installer stage that *could* rewrite a line, and the contract has to
+carry every harness itself. You know which harness you are running in; the `polyforge` binary
+does not and must never be asked for it (aihub#649, refuted twice: the thing reading this line
+is the model, not the process).
+
+| harness | agent id for role `<role>` | the dispatch call, `<id>` = that agent id |
+|---|---|---|
+| cc | `polyforge:step-<role>` | `Agent(subagent_type=<id>, prompt=<§0b>)` |
+| pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |
+| opencode | `step-<role>` | `task(subagent_type=<id>, prompt=<§0b>, description=<3-5 words>)` |
+| codex | `step-<role>` | **none today** - run the step yourself, see below |
+
+`internal/roles/dispatch.go` is the single copy of that table; the four renderers in that package
+take each harness's agent name from it, and
+`internal/cli/engine_native_dispatch_model_test.go` pins both this table and
+`engine.native.md`'s compact version against it. So renaming a generated agent file cannot leave
+the documented dispatch pointing at a name nobody ships.
+
+Per row, what actually breaks if you copy cc's line instead of yours:
+
+- **pi** - the tool is `subagent`, not `Agent`; BOTH argument names differ (`agent` / `task`);
+  and the id is `pf-<role>`. `pf-execute`'s own installer generates those files
+  (`polyforge roles generate pi`), so the agents exist - only the call is wrong.
+- **opencode** - the trap row, because `subagent_type` is spelled exactly as cc spells it. The
+  TOOL is `task`; `description` (3-5 words) is REQUIRED and cc's call has no such argument; and
+  `Agent.get("polyforge:step-...")` throws `Unknown agent type: ... is not a valid agent type`.
+  Getting the tool name right and the id wrong fails just as hard as getting neither right.
+- **codex** - there is no dispatchable polyforge agent at all right now, so there is nothing to
+  translate the line into. `spawn_agent` exists (feature `multi_agent`, on by default) but
+  resolves `agent_type` against an `[agents]` config section nothing in this repo writes, and
+  what `polyforge roles generate codex` produces is `$CODEX_HOME/step-<role>.config.toml`, a
+  config PROFILE for the `-p`/`--profile` process flag - codex has no agent-file auto-discovery
+  in this version at all (aihub#655, live-verified codex-cli 0.154.0). **Run the step in-session
+  yourself and say in the step summary that you did**; do not silently skip it, and do not
+  invent an `agent_type`.
+
+The ROLE -> role mapping in the table at the top of this section is harness-INDEPENDENT: only
+the last column changes. `polyforge engine resolve-role` stays the one place the role is decided
+on every harness.
 
 Read-only above means Edit/Write/NotebookEdit are disallowed in that agent's frontmatter
 (`internal/roles.CompileCapability` compiles `read_only` into that list - the actual
@@ -443,7 +495,10 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
     while True:   # ONLY `retry` re-enters this. i does not advance and sa_id does not change.
         dispatch Agent(subagent_type=ROLE_AGENT[role], prompt=§0b + retry_note(feedback))
         # ^ copy §0b's template VERBATIM - the same template the auto loop dispatches, for the
-        #   same reasons. No model argument here either (§0f, and §2's unknown-subagent_type
+        #   same reasons. The call shown is cc's (aihub#670): on pi/opencode substitute your
+        #   §0f row - tool name, argument names and agent id all change, while the prompt body
+        #   and `retry_note` stay identical; on codex run the step in-session (§0f).
+        #   No model argument here either (§0f, and §2's unknown-agent-id
         #   fallback is its one exception). retry_note(None) is empty; otherwise it appends
         #   `--- human feedback on the previous attempt ---`, the feedback, AND the fact that a
         #   previous attempt already ran and ITS EDITS ARE IN THE WORKTREE - pf_get_step cannot
@@ -628,12 +683,19 @@ Applies to BOTH loops. Check what the tools publish; do not infer it from a vers
   terminal call. Do not pass `note` to a tool that does not publish it: it is accepted and
   ignored, and the state file is deleted immediately afterwards, so the failure reason is lost
   with no error.
-- **Harness does not know the plugin agent ids** (the Agent call is REJECTED naming an unknown
-  subagent_type - an old harness, or a runtime without plugin agent definitions) -> fall back
-  for THAT dispatch only: `subagent_type: "general-purpose"` with an explicit model argument
-  stating the tier, since no agent file can apply there. Never fall back silently, and never
-  pass a model when the namespaced ids resolve - on a harness that knows them, an explicit
-  model overrides the agent file (§0f).
+- **Harness does not know the plugin agent ids** (the dispatch is REJECTED naming an unknown
+  agent - an old harness, or a runtime without the generated agent definitions) -> fall back
+  for THAT dispatch only, to your harness's own general-purpose agent, with an explicit model
+  argument stating the tier, since no agent file can apply there. Never fall back silently, and
+  never pass a model when the real ids resolve - on a harness that knows them, an explicit model
+  overrides the agent file (§0f).
+  **CHECK YOUR ROW BEFORE CONCLUDING THE ID IS UNKNOWN** (aihub#670): on pi, codex and opencode
+  a rejection is far more likely to mean you used Claude Code's id (`polyforge:step-<role>`)
+  than that your harness is old - §0f's table has the id your harness actually ships. The
+  general-purpose fallback is spelled `subagent_type: "general-purpose"` on Claude Code only; on
+  another harness it is that harness's own default agent, which is not necessarily called
+  "general-purpose". Falling back is a REAL downgrade - it loses the role's model tier and its
+  read-only tool policy - so it is the wrong answer to a wrong-id error.
 
 See `_common/references/lifecycle-details.md` for the same rules stated from the lifecycle side,
 including the `step_attempt_id` trap in the two-call fallback.

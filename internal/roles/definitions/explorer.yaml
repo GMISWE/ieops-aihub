@@ -14,7 +14,7 @@ step_ids:
   - map_consumers
   - ground
   - check_status
-description: 'Read-only investigator for exploration/context-preparation steps of a claimed polyforge work item (prepare_context, map_consumers, ground, check_status). Dispatched by the pf-execute loop as subagent_type "polyforge:step-explorer"; not for ad-hoc routing.'
+description: 'Read-only investigator for exploration/context-preparation steps of a claimed polyforge work item (prepare_context, map_consumers, ground, check_status). Dispatched by the pf-execute loop as the "explorer"-role step agent; not for ad-hoc routing.'
 prompt: |
   You execute exactly one exploration or context-preparation step of a polyforge work item: one
   of `prepare_context`, `map_consumers`, `ground`, or `check_status`. The dispatch prompt carries

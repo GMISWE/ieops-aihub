@@ -275,12 +275,15 @@ than a second, divergent one. So the two branches now state the same rule.
 1. The scenario repo produces no *architecture* step id today, so "architecture" in the owner's
    policy has no site to land on and the raised set is the review steps. When such a step
    appears, its id is what needs adding here - not a new key.
-2. `spec` and `plan` steps are design judgement and are NOT raised. That is deliberate and it is
-   a judgement call, not an oversight: the evidence behind raising review steps is two measured
-   catches by clean-context reviewers, while the same note records spec as "possible, undecided".
-   The per-review cost delta was measured by aihub#544 against the real transcript corpus
-   (median a few dollars per review run at the published price ratio); raising spec/plan
-   remains undecided and is the owner's call.
+2. `plan` steps are design judgement and are NOT raised; `spec` WAS raised, by the owner's
+   2026-09-13 decision 3 ("只升 spec 档不升 plan"), and the catalog carries that today - `spec`
+   resolves to `designer`, which the table above lists as raised. This entry used to bracket the
+   two together as undecided, and that half is now stale rather than merely cautious: a reader
+   comparing it against the table would find the file contradicting itself. What remains the
+   owner's call is `plan` alone. The evidence behind raising review steps is two measured catches
+   by clean-context reviewers, while the same note recorded spec as "possible, undecided" until
+   decision 3 settled it; the per-review cost delta was measured by aihub#544 against the real
+   transcript corpus (median a few dollars per review run at the published price ratio).
 
 **Why `level:` cannot be the key.** This is the aihub#358 defect and it is still true: the engine
 spent 2.5 months claiming a tier it never applied.
@@ -404,13 +407,25 @@ merely shorter. It gates §0c's invocation the same way.
 
 ## 1. Execute (rhs=true, interactive mode) - the loop in full
 
-> **Why this one is deferred, when the auto loop is not.** Interactive mode is a *per-step*
-> mechanic, so the resident/on-demand criterion ("resident = every step, on-demand = once per
-> wi") does not by itself put it here - the **budget** did. The two loops are near-identical and
-> only one can be resident; the auto loop stays because `requires_human_session=false` is the
-> common case. `engine.native.md` therefore carries a summary of this loop plus an explicit
-> instruction to read this section before running interactively. If the budget ever frees up,
-> this is the first thing that should come back.
+> **One-layer dispatch (aihub#644 - owner ruling 2026-09-13, decision 2, option ①).** Until
+> that ruling this loop dispatched NOTHING. It printed the step body and the human executed it:
+> zero-layer dispatch, which put the whole step body plus every round of human interaction into
+> the main session's context, and left `reviewer` steps judged by the person who had just done
+> the work. The ruling makes it **one layer**: the main session dispatches a step agent per
+> step, and the human confirms at the **step boundary**.
+>
+> So this is now the auto loop plus exactly ONE addition - a human gate between the agent
+> returning and the bracket being made. Everything else is shared deliberately: the same
+> `steps[]`, `resolve-role`, `ROLE_AGENT`, §0b template, `parse-review`, `bracket-plan`, and the
+> same §0c / §0e exits. A second execution path is what aihub#657 deleted and what aihub#640's
+> `workflow_identity_constraint` forbids; the one licensed difference is whether a human stands
+> at the step boundary.
+>
+> **Why this one is still deferred, when the auto loop is not.** The **budget**, not the
+> mechanics: `engine.native.md` shares a hard 10,000-character payload and only one of the two
+> loops can be resident; the auto loop stays because `requires_human_session=false` is the
+> common case. Now that the two differ by one gate rather than by a whole execution model, the
+> resident fragment can carry that difference in a sentence and this page carries its rules.
 
 ```python
 # Same bracket as auto mode - the SAME `polyforge engine bracket-plan` command with the same
@@ -421,31 +436,65 @@ sa_id = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
 
 for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
-    output: f"## Step {step_id}\n\n{expanded}"
-
-    wait for user input:
-      "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the
-                                     next step
-      "skip"                      -> COMPLETE it, with a summary that says it was skipped: the
-                                     same bracket-plan call as the "continue" path, only with
-                                     --artifact-summary='skipped - <the user's reason>'.
-      "fail"                      -> bracket-plan --step-id='<step_id>' --status='failed'
-                                     --step-attempt-id='<sa_id>' (§0c's shape, without
-                                     --error-type unless a review said so);
-                                     make what it prints, then
-                                     pf_complete_attempt(failed, note="failed reason: <user description>");
-                                     break (stop the whole loop)
-
     role = `polyforge engine resolve-role --step-id='<step_id>'`.role   # never re-derive
-    if role == "reviewer":
-        "PASS" / "continue"  -> fall through to the completed report below
-        "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report
-                                completed as usual
-        "FAIL <desc>"        -> §0c, with note="failed reason: <desc>"; break
+    feedback = None
+    halt = False      # set by the two exits that must leave BOTH loops - see below
 
-    # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here:
-    # report this step completed AND start the next one. Same command, same flag set, same
-    # quoting as §0h - including --supports-next-step, which is what keeps this loop's
+    while True:   # ONLY `retry` re-enters this. i does not advance and sa_id does not change.
+        dispatch Agent(subagent_type=ROLE_AGENT[role], prompt=§0b + retry_note(feedback))
+        # ^ copy §0b's template VERBATIM - the same template the auto loop dispatches, for the
+        #   same reasons. No model argument here either (§0f, and §2's unknown-subagent_type
+        #   fallback is its one exception). retry_note(None) is empty; otherwise it appends
+        #   `--- human feedback on the previous attempt ---`, the feedback, AND the fact that a
+        #   previous attempt already ran and ITS EDITS ARE IN THE WORKTREE - pf_get_step cannot
+        #   show them (this step is still in_progress, so it has no completed_steps entry), so
+        #   an agent not told would read a clean record against a dirty tree.
+        #   The step body goes to the AGENT, not to the human: printing {expanded} for a person
+        #   to carry out is the zero-layer loop this ruling replaced.
+
+        if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
+            halt = True; break   # §0e: no retry, do NOT call pf_complete_attempt, and do NOT
+                                 # bracket this step - `halt` is what carries that past the
+                                 # `while` (a bare `break` leaves only the inner loop and drops
+                                 # straight into the completed bracket below, which would file
+                                 # the step and start the next one - the two things §0e forbids)
+
+        verdict = None
+        if role == "reviewer":
+            # parse_review_result = `polyforge engine parse-review`, subagent output on STDIN
+            verdict = that verb's {"result": "PASS"|"WARN"|"FAIL"}   # a RECOMMENDATION - §1c
+
+        # ── THE GATE ── present, then WAIT. It is a gate only if nothing below it happens
+        # first: no bracket-plan, no pf_update_step, and no dispatch of steps[i+1] until the
+        # human has answered. A loop that runs ahead while waiting is the zero-layer loop with
+        # extra steps - the human's answer can no longer change anything.
+        output: f"## Step {step_id} ({role}) - agent finished\n\n{the agent's one-line summary}"
+                and, when verdict is set, f"Reviewer verdict: {verdict} - recommendation, §1c"
+
+        wait for user input:
+          "continue" / "done" / "ok"  -> leave the while; make the bracket below
+          "retry <feedback>"          -> feedback = <feedback>; re-enter the while. It makes NO
+                                         server call, so sa_id is unchanged - do NOT mint a new
+                                         step_attempt_id; this step is still open under that one.
+          "skip"                      -> leave the while; COMPLETE it with a summary that says it
+                                         was skipped: the same bracket-plan call as the
+                                         "continue" path, only with
+                                         --artifact-summary='skipped - <the user's reason>' (§1b)
+          "fail"                      -> bracket-plan --step-id='<step_id>' --status='failed'
+                                         --step-attempt-id='<sa_id>' (§0c's shape, without
+                                         --error-type unless a review said so);
+                                         make what it prints, then
+                                         pf_complete_attempt(failed, note="failed reason: <user description>");
+                                         halt = True; break
+
+    if halt:
+        break   # leave the FOR too. This step is already terminal (failed, §0c) or deliberately
+                # left open (paused, §0e); falling through to the completed bracket below would
+                # file it a SECOND time, under the same step_id and the same sa_id.
+
+    # Only "continue/done/ok" or "skip" reaches here - including a reviewer verdict the human
+    # overrode (§1c). Report this step completed AND start the next one. Same command, same flag
+    # set, same quoting as §0h - including --supports-next-step, which is what keeps this loop's
     # pf_update_step sequence identical to auto mode's instead of always degrading to two calls.
     next_sa = new_ulid() if i + 1 < len(steps) else None
     run bracket-plan(--step-id='<step_id>', --status='completed', --step-attempt-id='<sa_id>',
@@ -494,6 +543,77 @@ independent reasons, so this is not a single-purpose accommodation:
 advance in one call), and it terminates the attempt through the review-FAIL path in §0c. "The user
 chose not to do this" and "this step failed" are different facts and the timeline should not
 conflate them.
+
+Under one-layer dispatch `skip` is answered AFTER the agent has run, which adds a fact this
+branch did not used to have: see §1c - it changes the record, never the worktree.
+
+## 1c. The human is the ADJUDICATOR, not the executor (aihub#644)
+
+Zero-layer dispatch made the human the executor, so "what if the human disagrees with the
+result" had no meaning - they produced it. One layer separates the two roles and the owner's
+ruling assigns them: the step agent EXECUTES, the human ADJUDICATES. Three consequences, each a
+rule rather than a preference.
+
+**1. Four verbs, not three.** `retry` is new, and it is what makes the gate a gate. Without it a
+human looking at an unsatisfactory step has exactly two moves: accept it, or `fail`, which takes
+the whole attempt down through §0c. Neither of them is "do it again, properly" - which is the
+ordinary answer, and the one a person standing at a step boundary is there to give.
+
+| verb | what the loop does | what the record shows |
+|---|---|---|
+| `continue` / `done` / `ok` | bracket the step completed, start the next | a normal completed step |
+| `retry <feedback>` | re-dispatch THIS step with the feedback appended; **no server call** | nothing yet - the step is still open under the same `step_attempt_id` |
+| `skip` | the same bracket, with `--artifact-summary='skipped - <reason>'` (§1b) | a completed step whose summary says it was skipped |
+| `fail` | §0c's call pair, then stop the whole loop | a failed step and a failed attempt |
+
+`retry` is the only one of the four that touches no server state, and that is why `sa_id`
+survives it: the step was never closed, so the id that will eventually close it has not been
+spent. Minting a fresh one is the trap - `step_attempt_id` keys the step-history row
+(aihub#399), and a second id for one step is how a loop ends up filing two rows for it.
+
+**`skip` does not undo anything.** Under zero-layer dispatch nothing had happened when the human
+said `skip`, so there was nothing to undo. Now the agent has already run, and skipping changes
+only what the RECORD says - every edit it made is still in the worktree. To actually undo work,
+`retry` with that instruction, or `fail`. Saying `skip` over an agent that edited files leaves
+the tree and the timeline disagreeing, and nothing reports it.
+
+The retried agent cannot discover those edits on its own, which is why §1's dispatch tells it.
+`pf_get_step` is the only authority the §0b template gives it, and a step under `retry` is still
+`in_progress` - so it has no `completed_steps` entry and the record looks CLEAN while the tree is
+dirty. An agent not told that a previous attempt ran will read that gap as "nothing has happened
+yet" and start over on top of its own earlier edits.
+
+**2. A reviewer's verdict is a recommendation.** `polyforge engine parse-review` parses the
+marker exactly as it does in auto mode and still returns PASS / WARN / FAIL - but here it is
+shown to the human and the HUMAN's answer decides:
+
+- verdict `FAIL`, human answers `continue` -> the step completes, and the override goes in the
+  record: `--artifact-summary='<summary> - review FAIL overridden by human: <reason>'`. An
+  override that is not written down is indistinguishable from a review that passed.
+- verdict `PASS`, human answers `fail` -> §0c's call pair, but WITHOUT its `--error-type` and
+  without its `review_fail` note: §0c's literal block hardcodes both, and no review failed here.
+  Use the human's own reason, exactly as §1's `fail` branch does. The human's call wins in this
+  direction too, or "adjudicator" means nothing.
+- verdict `WARN` -> present it; the answer decides, exactly as for any other step.
+- want a second opinion -> `retry`. It re-runs the SAME reviewer agent with a clean context, so
+  it is a genuine second look rather than a continuation of the first one's reasoning.
+
+**Never apply the verdict automatically.** Auto-applying it IS the auto loop - `FAIL` goes
+straight to §0c with nobody asked. That is the behaviour option ① deliberately did not choose,
+and it is the single change that would make this loop's human gate decorative.
+
+**3. The tier is the same tier, by construction.** This loop calls the same `polyforge engine
+resolve-role` and dispatches the same `ROLE_AGENT` agent files as auto mode, so every tier and
+capability in §0f's table applies here unchanged - `reviewer`'s raised read-only agent and
+`designer`'s raised write-capable one for `spec` included. There is no rhs-dependent tier and
+nothing selects one: making the two differ would need an argument to `resolve-role` that no
+ruling asks for. Recorded because "does interactive mode get the raise too" is a question this
+file should answer rather than leave to inference.
+
+The second half of the ruling's benefit falls out of the same fact. Under zero-layer dispatch a
+`review` step was judged by the person who had just done the work, which is not a clean-context
+review at all; both measured catches behind raising the reviewer tier (aihub#338) came from a
+clean-context reviewer, and interactive mode now gets one.
 
 ## 2. Compatibility - server binary older than aihub#290
 

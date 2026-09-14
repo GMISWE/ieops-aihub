@@ -138,6 +138,13 @@ var detailsWriterCensus = map[string]detailsWriter{
 		Verdict: "fixed hints/vocabularies plus echoes of ONE offending entry from the caller's own request " +
 			"(got_type, got_uri, a parse error) — a 400 that hands the caller back its own bytes, never a stored row",
 	},
+	"conflicts.go:PredictConflicts": {
+		Shapes: []string{"{hint,paths_needing_project}"},
+		Verdict: "aihub#662's missing-project 400. `hint` is a fixed sentence; `paths_needing_project` is " +
+			"the `uri` of every path/document/section entry in the CALLER'S OWN declared_resources — " +
+			"its own bytes handed back, never a stored row or another actor's path, and bounded by the " +
+			"same request-size limit that bounded declared_resources on the way in",
+	},
 	"declared_resources.go:ValidateRequestedLocks": {
 		Shapes: []string{
 			"{entry_shape,got_resource_type,hint,index,valid_types}",

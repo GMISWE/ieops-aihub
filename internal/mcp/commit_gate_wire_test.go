@@ -808,6 +808,339 @@ func TestCommitGateWire_RefusalAdviceIsExecutableAndWorks(t *testing.T) {
 	})
 }
 
+// gateMergeSent returns the `merge` flag of every gate request made so far.
+//
+// It reports the RAW value, `any`, rather than a bool: absent and false are
+// different failures — a client that stopped sending the field, versus one that
+// sends it wrong — and a []bool would render them identically.
+func gateMergeSent(t *testing.T, f *fakeAihub) []any {
+	t.Helper()
+	var out []any
+	for _, c := range f.recorded() {
+		if c.Path == commitLocksPath {
+			out = append(out, c.Body["merge"])
+		}
+	}
+	return out
+}
+
+// gateMergeRepo leaves the gate worktree mid-merge over a file the other side
+// introduced and this branch then hand-edited, and returns the workspace root
+// and worktree.
+//
+// 🔴 THE HAND-EDIT IS WHY THE SCENARIO IS SHAPED LIKE THIS. Since aihub#662 a
+// merge only writes the paths differing from EVERY parent, so a file carried
+// across untouched can no longer be refused at all — which is the fix. What
+// CAN still be refused is a path the author actually wrote during the merge,
+// and `theirs.txt` is the worst such case: the other side created it, HEAD has
+// no version of it, and `git restore --staged` therefore has nothing to reset
+// to and removes the entry outright. A scenario built on a merely-carried file
+// would now sail through the gate and this test would measure nothing.
+func gateMergeRepo(t *testing.T) (wsRoot, wt string) {
+	t.Helper()
+	wsRoot, wt = gateRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-C", wt}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	base := gateHEAD(t, wt)
+
+	// The other work item's landed commit: a new file it holds the lock on.
+	git("checkout", "-q", "-b", "side", base)
+	gateWrite(t, wt, "theirs.txt", "owned and locked by another attempt\n")
+	git("add", "-A")
+	git("commit", "-q", "-m", "the other work item's commit")
+
+	// This branch's own work.
+	git("checkout", "-q", "polyforge/aihub-366-gate")
+	gateWrite(t, wt, "mine.txt", "this branch's own work\n")
+	git("add", "-A")
+	git("commit", "-q", "-m", "this branch's commit")
+
+	git("merge", "--no-commit", "--no-ff", "side")
+	// The evil-merge hand-edit: adjusting the files the merge just brought in.
+	// This is what puts them in the written set — each now differs from HEAD
+	// (absent) AND from MERGE_HEAD (different bytes). `theirs.txt` is the one
+	// the holder has locked; `alongside.txt` is the author's own, and it is what
+	// the advice's "the files that are left" resolves to — without a second
+	// entry the narrowed retry has an empty paths list, which is the PLAIN retry
+	// and a different measurement entirely.
+	gateWrite(t, wt, "theirs.txt", "owned and locked by another attempt\nadjusted while merging\n")
+	gateWrite(t, wt, "alongside.txt", "adjusted while merging, and nobody else holds it\n")
+	git("add", "theirs.txt", "alongside.txt")
+	return wsRoot, wt
+}
+
+// adviceEscaped renders an advice constant the way it appears inside a rendered
+// error, so `_raw` can be searched for it.
+//
+// pkg/client.formatDetails marshals `details` with encoding/json, which escapes
+// `<`, `>` and `&` as \uXXXX — so CommitLockRefusalAdvice's "<blocked paths>"
+// is NOT a substring of the text a caller reads, and a naive Contains against
+// the constant is false for reasons that have nothing to do with the contract.
+// Marshalling here rather than hand-escaping keeps the two ends using one rule.
+func adviceEscaped(t *testing.T, advice string) string {
+	t.Helper()
+	raw, err := json.Marshal(advice)
+	if err != nil {
+		t.Fatalf("marshal advice: %v", err)
+	}
+	return string(raw[1 : len(raw)-1])
+}
+
+// TestCommitGateWire_MergeRefusalIsNotTheDestructiveRemedy is aihub#662's
+// remedy half, and the destructiveness is MEASURED here rather than asserted.
+//
+// 🔴 THE FIRST SUBTEST IS THE EVIDENCE AND THE RED CONTROL AT ONCE. It executes
+// the ORDINARY recipe — the one domain.CommitLockRefusalAdvice numbers, parsed
+// by the same adviceRecipe that TestCommitGateWire_RefusalAdviceIsExecutableAndWorks
+// runs — against a real refused merge, and requires the resulting merge commit
+// to DELETE the other parent's file. That is a fact about git, so it can go red
+// on its own if git ever changes, and it is what makes the second subtest's
+// "ship a different string" a requirement rather than a preference.
+//
+// Without it the second subtest would be a tautology: "the merge advice differs
+// from the ordinary one" is satisfied by any two strings. What it means is
+// "the merge advice is not the one just measured to destroy data", and only the
+// measurement gives that sentence content.
+func TestCommitGateWire_MergeRefusalIsNotTheDestructiveRemedy(t *testing.T) {
+	const blocked = "theirs.txt"
+
+	// refusesTheirs is the real gate's behaviour narrowed to this scenario: it
+	// refuses iff the written set still contains the contested path, and it
+	// selects its advice through the SHIPPED selector using the `merge` flag the
+	// client actually sent — so a client that stopped sending it makes this fake
+	// hand back the ordinary remedy, exactly as the real server would.
+	refusesTheirs := func(body map[string]any) (int, any) {
+		var sent []string
+		if raw, ok := body["paths"].([]any); ok {
+			for _, p := range raw {
+				sent = append(sent, p.(string))
+			}
+		}
+		merge, _ := body["merge"].(bool)
+		for _, p := range sent {
+			if p == blocked {
+				return http.StatusConflict, map[string]any{
+					"code": "CONFLICT_LOCK_TAKEN",
+					"message": "this commit changes 1 file(s) locked by another attempt: [" + blocked +
+						"] — held by someone-else on aihub#999 (attempt ra_theirs)",
+					"details": map[string]any{
+						"blocked_paths": []string{blocked},
+						"advice":        domain.CommitLockAdviceFor(merge),
+					},
+				}
+			}
+		}
+		return http.StatusOK, map[string]any{
+			"checked": len(sent), "covered": []string{}, "probed": len(sent),
+			"acquired_paths": sent,
+		}
+	}
+
+	t.Run("measured: following the ORDINARY recipe on a merge deletes the other parent's file", func(t *testing.T) {
+		f := newFakeAihub(t)
+		wsRoot, wt := gateMergeRepo(t)
+		f.on(commitLocksPath, refusesTheirs)
+
+		out, isErr := callTool(t, f, "pf_commit", map[string]any{
+			"workspace_root": wsRoot, "work_item_id": gateWIID,
+			"repo": "aihub", "message": "merge origin/main",
+		})
+		if !isErr {
+			t.Fatalf("premise: this merge must be refused over %s, got %v", blocked, out)
+		}
+
+		steps := adviceRecipe(domain.CommitLockRefusalAdvice)
+		if len(steps) == 0 {
+			t.Fatal("the ordinary advice numbers no steps, so there is nothing to execute and this " +
+				"measurement cannot be taken. That is a change to CommitLockRefusalAdvice, and " +
+				"TestCommitGateWire_RefusalAdviceIsExecutableAndWorks is where it belongs")
+		}
+		for i, step := range steps {
+			cmd, hasCmd := adviceShellCmd(step)
+			switch {
+			case strings.Contains(step, "paths=["):
+				var left []any
+				for _, p := range gateIndex(t, wt) {
+					if p != blocked {
+						left = append(left, p)
+					}
+				}
+				retry, retryErr := callTool(t, f, "pf_commit", map[string]any{
+					"workspace_root": wsRoot, "work_item_id": gateWIID,
+					"repo": "aihub", "message": "merge origin/main (advice followed)",
+					"paths": left,
+				})
+				if retryErr {
+					t.Fatalf("the narrowed retry failed, so the recipe never produced the commit "+
+						"whose damage this row measures: %v", retry)
+				}
+			case hasCmd:
+				argv := strings.Fields(strings.ReplaceAll(cmd, "<blocked paths>", blocked))
+				full := append([]string{"-C", wt}, argv[1:]...)
+				if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+					t.Fatalf("step %d, `%s`: %v\n%s", i+1, cmd, err, out)
+				}
+				t.Logf("step %d ran `%s`; index is now %v", i+1, cmd, gateIndex(t, wt))
+			default:
+				t.Fatalf("step %d is neither a shell command nor a retry: %q", i+1, step)
+			}
+		}
+
+		// It IS a merge commit — otherwise the damage below would be an ordinary
+		// commit's, and the whole argument would not apply.
+		parents, err := exec.Command("git", "-C", wt, "rev-list", "--parents", "-n", "1", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("rev-list --parents: %v", err)
+		}
+		if n := len(strings.Fields(string(parents))); n != 3 {
+			t.Fatalf("HEAD has %d field(s) in `rev-list --parents` (want 3: self + two parents); "+
+				"the recipe did not produce a merge commit: %s", n, parents)
+		}
+
+		// 🔴 THE MEASUREMENT. What lands on the base branch when this PR merges
+		// is the diff against the OTHER parent, and there it is a deletion.
+		vsOther, err := exec.Command("git", "-C", wt, "diff", "--name-status", "HEAD^2", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("diff HEAD^2 HEAD: %v", err)
+		}
+		if !strings.Contains(string(vsOther), "D\t"+blocked) {
+			t.Fatalf("following the ordinary recipe on a merge did NOT delete %s "+
+				"(diff vs the other parent: %q). That is this test's premise: if git no longer "+
+				"behaves this way, CommitLockMergeRefusalAdvice's whole argument has to be "+
+				"re-derived rather than kept", blocked, vsOther)
+		}
+		// And it is invisible where a reviewer looks: the merge's own combined diff.
+		own, err := exec.Command("git", "-C", wt, "show", "--name-only", "--format=", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("show HEAD: %v", err)
+		}
+		if strings.Contains(string(own), blocked) {
+			t.Errorf("the merge commit's own diff names %s (%q), so the deletion is at least "+
+				"visible. It was not when this was measured, and the advice says so", blocked, own)
+		}
+		t.Logf("measured: the ordinary recipe produced `git diff HEAD^2 HEAD` = %q while the "+
+			"merge's own diff showed %q", strings.TrimSpace(string(vsOther)), strings.TrimSpace(string(own)))
+	})
+
+	t.Run("so the merge refusal must not ship that recipe", func(t *testing.T) {
+		f := newFakeAihub(t)
+		wsRoot, _ := gateMergeRepo(t)
+		f.on(commitLocksPath, refusesTheirs)
+
+		out, isErr := callTool(t, f, "pf_commit", map[string]any{
+			"workspace_root": wsRoot, "work_item_id": gateWIID,
+			"repo": "aihub", "message": "merge origin/main",
+		})
+		if !isErr {
+			t.Fatalf("premise: this merge must be refused, got %v", out)
+		}
+		raw, _ := out["_raw"].(string)
+
+		// The client half: without this field the server cannot choose, and the
+		// destructive remedy comes back with every assertion about `paths` still
+		// green.
+		if got := gateMergeSent(t, f); len(got) != 1 || got[0] != true {
+			t.Fatalf("the gate request carried merge=%v, want exactly one call with true. "+
+				"MERGE_HEAD is only observable in this worktree, so a flag that does not travel "+
+				"is a server that cannot tell a merge from an ordinary commit", got)
+		}
+		if !strings.Contains(raw, adviceEscaped(t, domain.CommitLockMergeRefusalAdvice)) {
+			t.Errorf("the merge refusal does not carry the merge remedy:\n%s", raw)
+		}
+		if strings.Contains(raw, adviceEscaped(t, domain.CommitLockRefusalAdvice)) {
+			t.Errorf("the merge refusal carries the ORDINARY remedy, which the row above just "+
+				"measured deleting %s from the merge tree:\n%s", blocked, raw)
+		}
+	})
+
+	t.Run("negative control: an ordinary commit still gets the ordinary remedy", func(t *testing.T) {
+		f := newFakeAihub(t)
+		wsRoot, wt := gateRepo(t)
+		f.on(commitLocksPath, refusesTheirs)
+		gateWrite(t, wt, blocked, "somebody else owns this")
+		gateWrite(t, wt, "mine.txt", "this one is mine")
+
+		out, isErr := callTool(t, f, "pf_commit", map[string]any{
+			"workspace_root": wsRoot, "work_item_id": gateWIID,
+			"repo": "aihub", "message": "feat: both files",
+		})
+		if !isErr {
+			t.Fatalf("premise: this commit must be refused, got %v", out)
+		}
+		if got := gateMergeSent(t, f); len(got) != 1 || got[0] != false {
+			t.Errorf("merge=%v on an ordinary commit, want exactly one call with false. A client "+
+				"that always said true would pass every assertion in the row above while "+
+				"replacing the working remedy with one that lands no commit", got)
+		}
+		raw, _ := out["_raw"].(string)
+		if !strings.Contains(raw, adviceEscaped(t, domain.CommitLockRefusalAdvice)) {
+			t.Errorf("an ordinary refusal lost the executable remedy:\n%s", raw)
+		}
+	})
+}
+
+// TestCommitGateWire_MergeSendsOnlyWhatItWrites is the determination half at the
+// wire, and it is here rather than only in internal/coding because the narrowing
+// has to survive the trip: GitPendingCommitPaths can be perfectly correct while
+// pf_commit keeps calling GitStagedPaths.
+//
+// This is the aihub#654 shape exactly — a branch merging an origin/main that
+// carries another work item's files, having touched none of them.
+func TestCommitGateWire_MergeSendsOnlyWhatItWrites(t *testing.T) {
+	f := newFakeAihub(t)
+	wsRoot, wt := gateRepo(t)
+	f.on(commitLocksPath, gateNeverBlocks)
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-C", wt}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	base := gateHEAD(t, wt)
+	git("checkout", "-q", "-b", "side", base)
+	gateWrite(t, wt, "theirs.txt", "another work item's file")
+	git("add", "-A")
+	git("commit", "-q", "-m", "the other work item's commit")
+	git("checkout", "-q", "polyforge/aihub-366-gate")
+	gateWrite(t, wt, "mine.txt", "this branch's own work")
+	git("add", "-A")
+	git("commit", "-q", "-m", "this branch's commit")
+	git("merge", "--no-commit", "--no-ff", "side")
+
+	// The premise: the OLD determination sees the other work item's file.
+	if idx := gateIndex(t, wt); !strings.Contains(strings.Join(idx, " "), "theirs.txt") {
+		t.Fatalf("index vs HEAD = %v, want it to carry theirs.txt; without that this test is "+
+			"measuring a merge that never had anything to over-report", idx)
+	}
+
+	out, isErr := callTool(t, f, "pf_commit", map[string]any{
+		"workspace_root": wsRoot, "work_item_id": gateWIID,
+		"repo": "aihub", "message": "merge side",
+	})
+	if isErr {
+		t.Fatalf("pf_commit failed: %v", out)
+	}
+	if sent := gatePathsSent(t, f); len(sent) != 0 {
+		t.Errorf("the gate was asked about %v. Every one of those is a lock pf_commit would take "+
+			"over a file this merge INHERITED — aihub#654 was refused 409 over exactly three of "+
+			"them, held legitimately by aihub#659, and the advice it was handed would have "+
+			"deleted them", sent)
+	}
+	if out["lock_gate"] != "not_run" {
+		t.Errorf("lock_gate = %v, want \"not_run\": this merge writes no path of its own", out["lock_gate"])
+	}
+	if sha, _ := out["sha"].(string); sha == "" {
+		t.Error("no sha: the merge commit must still be created — `git commit` builds it from " +
+			"MERGE_HEAD, and a gate that writes nothing does not mean a commit that does not exist")
+	}
+}
+
 // gateNeverBlocks is a fake gate that acquires whatever it is asked about. Tests
 // that are about failures UPSTREAM of the gate use it to prove the gate is not
 // the thing that failed.

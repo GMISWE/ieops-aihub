@@ -108,7 +108,7 @@ func TestPredictLockRulesLeaveTheCallerOut(t *testing.T) {
 		t.Helper()
 		resp, aerr := PredictConflicts(ctx, pool, &PredictConflictsRequest{
 			WorkItemID: wiRef, Project: proj, DeclaredResources: declared, DryRun: dryRun,
-		}, roles)
+		}, roles, "")
 		if aerr != nil {
 			t.Fatalf("PredictConflicts: %v", aerr)
 		}

@@ -344,8 +344,8 @@ func TestCommitGate_AbsentVersusPresent(t *testing.T) {
 		write(t, r, "out-of-scope.txt", "nobody asked for a lock on me")
 
 		var seen []string
-		gate := func(_ context.Context, paths []string) error {
-			seen = paths
+		gate := func(_ context.Context, pending PendingCommit) error {
+			seen = pending.Paths
 			return errRefused
 		}
 
@@ -391,8 +391,8 @@ func TestGitCommitGated_GateSeesExactlyWhatTheCommitContains(t *testing.T) {
 	write(t, r, "untouched.txt", "not in this commit")
 
 	var seen []string
-	gate := func(_ context.Context, paths []string) error {
-		seen = paths
+	gate := func(_ context.Context, pending PendingCommit) error {
+		seen = pending.Paths
 		return nil
 	}
 	if _, err := GitCommitGated(context.Background(), r.wt, "only pkg", []string{"pkg"}, gate); err != nil {
@@ -424,7 +424,7 @@ func TestShip_GateRefusalStopsAtCommitStage(t *testing.T) {
 	write(t, r, "out-of-scope.txt", "x")
 
 	res, err := runShipGated(t, r, "wi_ShipGate", "feat: gated", nil,
-		func(context.Context, []string) error { return errRefused })
+		func(context.Context, PendingCommit) error { return errRefused })
 
 	if !errors.Is(err, errRefused) {
 		t.Fatalf("error = %v, want the gate's refusal", err)
@@ -452,6 +452,214 @@ func TestShip_GateRefusalStopsAtCommitStage(t *testing.T) {
 	}
 }
 
+// setUpMerge leaves `r` mid-merge and returns the name of the file the OTHER
+// side contributed. The branch adds mine.txt; the side branch adds theirs.txt
+// and edits shared.txt; `conflict` decides whether both sides also edit c.txt,
+// which is what forces a hand resolution.
+//
+// It is one helper rather than two because the ONLY difference between the two
+// scenarios this file cares about is whether a conflict exists, and writing
+// them separately is how "the clean case and the conflicted case were actually
+// different setups" becomes an explanation for a divergence nobody checked.
+func setUpMerge(t *testing.T, r *testRepo, conflict bool) {
+	t.Helper()
+	base := r.head(t)
+
+	r.git(t, "checkout", "-q", "-b", "side", base)
+	write(t, r, "theirs.txt", "owned and locked by another attempt")
+	write(t, r, "shared.txt", "the other side's version")
+	if conflict {
+		write(t, r, "c.txt", "THEIRS\n")
+	}
+	r.git(t, "add", "-A")
+	r.git(t, "commit", "-q", "-m", "the other work item's landed commit")
+
+	r.git(t, "checkout", "-q", r.tBranch)
+	write(t, r, "mine.txt", "this branch's own work")
+	if conflict {
+		write(t, r, "c.txt", "OURS\n")
+	}
+	r.git(t, "add", "-A")
+	r.git(t, "commit", "-q", "-m", "this branch's own commit")
+
+	// A conflicted merge exits non-zero, so this cannot go through r.git.
+	cmd := exec.Command("git", "merge", "--no-commit", "--no-ff", "side")
+	cmd.Dir = r.wt
+	out, err := cmd.CombinedOutput()
+	if conflict == (err == nil) {
+		t.Fatalf("premise: conflict=%v but `git merge` err=%v\n%s", conflict, err, out)
+	}
+	if conflict {
+		write(t, r, "c.txt", "RESOLVED\n")
+		r.git(t, "add", "c.txt")
+	}
+}
+
+// TestGitPendingCommitPaths_MergeCountsOnlyWhatDiffersFromBothParents is
+// aihub#662's determination half, and the differential IS the test.
+//
+// 🔴 THE STAGED SET IS ASSERTED ALONGSIDE THE WRITTEN ONE, deliberately. A
+// narrowing that returned the empty list for every merge would satisfy the
+// clean row on its own, and a narrowing that quietly stopped narrowing would
+// satisfy the conflicted row. Only the pair — index-vs-HEAD is BIG and the
+// written set is small, on the same worktree at the same moment — distinguishes
+// "narrowed correctly" from either.
+//
+// The conflicted row is the one that matters. A merge with a hand resolution
+// must keep that resolution locked; if it did not, this narrowing would have
+// traded a false refusal for a missed one, which is the direction the whole
+// gate exists to prevent.
+func TestGitPendingCommitPaths_MergeCountsOnlyWhatDiffersFromBothParents(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no merge: the written set is the staged set", func(t *testing.T) {
+		r := newTestRepo(t)
+		write(t, r, "a.txt", "1")
+		write(t, r, "b.txt", "2")
+		r.git(t, "add", "-A")
+
+		pending, err := GitPendingCommitPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitPendingCommitPaths: %v", err)
+		}
+		if pending.Merge {
+			t.Error("Merge=true with no merge in progress; every refusal would then ship the " +
+				"merge remedy, which lands no commit at all on an ordinary one")
+		}
+		staged, err := GitStagedPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitStagedPaths: %v", err)
+		}
+		if strings.Join(pending.Paths, ",") != strings.Join(staged, ",") {
+			t.Errorf("written=%v staged=%v; outside a merge the narrowing must be the identity, "+
+				"or aihub#366's whole change set stopped being protected", pending.Paths, staged)
+		}
+	})
+
+	t.Run("clean merge: everything is inherited, so nothing is written", func(t *testing.T) {
+		r := newTestRepo(t)
+		setUpMerge(t, r, false)
+
+		staged, err := GitStagedPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitStagedPaths: %v", err)
+		}
+		// The premise: the un-narrowed set is NOT empty. Without this the row
+		// below is satisfied by an empty index and measures nothing.
+		if !contains(staged, "theirs.txt") {
+			t.Fatalf("index vs HEAD = %v, want it to carry theirs.txt — this row's whole point "+
+				"is that the old determination saw a file the merge does not write", staged)
+		}
+
+		pending, err := GitPendingCommitPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitPendingCommitPaths: %v", err)
+		}
+		if !pending.Merge {
+			t.Error("Merge=false during a merge; the refusal would then ship the destructive remedy")
+		}
+		if len(pending.Paths) != 0 {
+			t.Errorf("written=%v, want none. Every entry is a lock this gate demands over a file "+
+				"it only inherited — aihub#654 was refused 409 over exactly three such files, "+
+				"while index-vs-HEAD here says %v", pending.Paths, staged)
+		}
+	})
+
+	t.Run("conflicted merge: the resolution is written, the carried file is not", func(t *testing.T) {
+		r := newTestRepo(t)
+		setUpMerge(t, r, true)
+
+		staged, err := GitStagedPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitStagedPaths: %v", err)
+		}
+		if !contains(staged, "theirs.txt") || !contains(staged, "c.txt") {
+			t.Fatalf("index vs HEAD = %v, want both the carried file and the resolved one", staged)
+		}
+
+		pending, err := GitPendingCommitPaths(ctx, r.wt)
+		if err != nil {
+			t.Fatalf("GitPendingCommitPaths: %v", err)
+		}
+		if !pending.Merge {
+			t.Error("Merge=false during a conflicted merge")
+		}
+		if !contains(pending.Paths, "c.txt") {
+			t.Errorf("written=%v, missing the hand-resolved c.txt. A resolution is content that "+
+				"exists in NEITHER parent; dropping it would trade aihub#654's false refusal for "+
+				"a missed one, which is the worse direction", pending.Paths)
+		}
+		if contains(pending.Paths, "theirs.txt") {
+			t.Errorf("written=%v still contains theirs.txt, which the merge carried across "+
+				"unchanged from the other parent", pending.Paths)
+		}
+		if len(pending.Paths) != 1 {
+			t.Errorf("written=%v, want exactly [c.txt]", pending.Paths)
+		}
+	})
+}
+
+// TestGitMergeParents_ReadsEveryParentNotJustTheFirst pins the one thing that
+// cannot be seen from GitPendingCommitPaths' answer.
+//
+// 🔴 `git rev-parse MERGE_HEAD` IS THE TRAP, and it is silent. Measured on git
+// 2.43.0: for an octopus merge it prints ONE object id and exits 0 while
+// MERGE_HEAD holds two — no error, no warning, just a short answer. This test
+// exists because a version of GitMergeParents built on rev-parse passes every
+// two-parent row above, and octopus merges are rare enough that nothing else
+// here would ever look.
+func TestGitMergeParents_ReadsEveryParentNotJustTheFirst(t *testing.T) {
+	ctx := context.Background()
+	r := newTestRepo(t)
+	base := r.head(t)
+
+	if parents, err := GitMergeParents(ctx, r.wt); err != nil || parents != nil {
+		t.Fatalf("GitMergeParents outside a merge = %v, %v; want nil, nil — a non-nil answer "+
+			"here makes every ordinary commit ship the merge remedy", parents, err)
+	}
+
+	for _, name := range []string{"s1", "s2"} {
+		r.git(t, "checkout", "-q", "-b", name, base)
+		write(t, r, name+".txt", name)
+		r.git(t, "add", "-A")
+		r.git(t, "commit", "-q", "-m", name)
+	}
+	r.git(t, "checkout", "-q", r.tBranch)
+	write(t, r, "mine.txt", "mine")
+	r.git(t, "add", "-A")
+	r.git(t, "commit", "-q", "-m", "mine")
+
+	// 🔴 FATAL, NOT SKIP. This test has exactly one assertion, and it is the only
+	// thing anywhere that distinguishes reading MERGE_HEAD from asking
+	// `git rev-parse`. A skip on an unavailable octopus merge would delete that
+	// assertion silently on whatever git the next CI image ships, and a green
+	// `go test` would report the same thing either way. The fixture is a
+	// conflict-free three-way merge of two independent single-file branches,
+	// which every git since 1.5 performs; if this ever fails it is a fact worth
+	// stopping for.
+	cmd := exec.Command("git", "merge", "--no-commit", "--no-ff", "s1", "s2")
+	cmd.Dir = r.wt
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the octopus merge this row is built on did not run: %v\n%s\n"+
+			"Without it MERGE_HEAD holds one id, and the difference this test exists to "+
+			"measure does not exist in the fixture", err, out)
+	}
+
+	parents, err := GitMergeParents(ctx, r.wt)
+	if err != nil {
+		t.Fatalf("GitMergeParents: %v", err)
+	}
+	if len(parents) != 2 {
+		t.Fatalf("parents = %v, want 2. `git rev-parse MERGE_HEAD` answers ONE here and exits 0, "+
+			"so a rev-parse implementation reads as correct; the residue is an intersection taken "+
+			"over too few sets, i.e. locks demanded over files the merge inherited", parents)
+	}
+	// And the two must be the two branch tips, not the same sha twice.
+	if parents[0] == parents[1] {
+		t.Errorf("parents = %v, both the same commit", parents)
+	}
+}
+
 // TestShip_GateNotConsultedWhenNothingIsStaged is the zero-overhead arm at the
 // git layer: Ship's idempotent retry after a failed push stages nothing and
 // creates no commit, so it changes no file and must not spend a gate call.
@@ -466,7 +674,7 @@ func TestShip_GateNotConsultedWhenNothingIsStaged(t *testing.T) {
 
 	called := false
 	_, err := runShipGated(t, r, "wi_ShipNoStage", "feat: retry", nil,
-		func(context.Context, []string) error {
+		func(context.Context, PendingCommit) error {
 			called = true
 			return errRefused
 		})

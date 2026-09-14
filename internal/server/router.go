@@ -1147,7 +1147,14 @@ func handlePredictConflicts(pool *pgxpool.Pool) echo.HandlerFunc {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "invalid request body"))
 		}
 
-		resp, aihubErr := domain.PredictConflicts(ctx, pool, &req, u.ProjectRoles)
+		// u.Role travels alongside u.ProjectRoles for the reason every other
+		// handler here does it (aihub#227): an admin's ProjectRoles map is empty,
+		// so the visibility fold inside PredictConflicts read every admin as
+		// having no access and redacted the holder from the project's own owner
+		// (aihub#662). It is read from the authenticated user, never from the
+		// request body — a caller-supplied role would be a redaction the caller
+		// can switch off.
+		resp, aihubErr := domain.PredictConflicts(ctx, pool, &req, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)
 		}

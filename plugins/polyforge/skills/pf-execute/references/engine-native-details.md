@@ -94,11 +94,13 @@ select the agent from the step id, and let the file carry the model:
 
 ```
 Agent(
-  subagent_type: <REQUIRED - "polyforge:step-reviewer" (REVIEW_AGENT) when is_review(step_id),
-          else "polyforge:step-executor" (STEP_AGENT). Use the full plugin-namespaced id: the
-          bare agent name resolves to a same-named user/project agent when one exists, while
-          the namespaced id always resolves to the plugin's file (measured, aihub#555).
-          Do NOT add a model argument - it would silently override the agent file.>,
+  subagent_type: <REQUIRED - ROLE_AGENT[role] where role = `polyforge engine resolve-role
+          --step-id='<step_id>'`.role (aihub#642/#664: five roles - executor/operator/
+          explorer/reviewer/designer - not just is_review's two). Use the full
+          plugin-namespaced id: the bare agent name resolves to a same-named user/project
+          agent when one exists, while the namespaced id always resolves to the plugin's
+          file (measured, aihub#555). Do NOT add a model argument - it would silently
+          override the agent file.>,
   prompt: """
 You are executing step {step_id} of wi {wi_id}.
 
@@ -120,10 +122,11 @@ If there are learnings worth keeping, call pf_remember to store them in aihub.
 ```
 
 `internal/cli/engine_native_dispatch_model_test.go` pins this template: it must select the
-agent with an explicit `subagent_type:` keyed on `is_review`, name BOTH agents, agree with
-the constants `engine.native.md` declares AND with the `model:` frontmatter the two agent
-files actually carry, and contain NO model argument - so re-adding the argument, swapping
-the agents, or re-keying the choice all go red rather than shipping as prose drift.
+agent via `ROLE_AGENT[role]` where `role` comes from `polyforge engine resolve-role`, name
+all five agents, agree with the dict `engine.native.md` declares AND with the `model:` /
+`disallowedTools:` frontmatter the five agent files actually carry, and contain NO model
+argument - so re-adding the argument, swapping an agent, or re-keying the choice back onto
+a restated predicate all go red rather than shipping as prose drift.
 
 ## 0c. `fail_step_and_attempt` - the review-FAIL path, verbatim
 
@@ -215,16 +218,30 @@ Step <step_id> paused the attempt for <slug> - a human needs to look at it.
 
 ## 0f. The model tier is keyed on step KIND; `level:` cannot become one (aihub#358 / aihub#338)
 
-**The mapping, as the auto loop implements it.** Two tiers, selected from the step id alone.
-Since aihub#555 the tier is carried by an AGENT DEFINITION FILE, not by a dispatch argument:
-each agent file's `model:` frontmatter is the single copy of its model name, read by the
-harness as configuration, and it is deliberately NOT repeated in this table (a second
-hand-written copy is the aihub#294 drift class; the gate pins the file, not prose).
+**The mapping, as the auto loop implements it.** Five roles, resolved from the step id (or an
+explicit `role:`) by ONE call: `polyforge engine resolve-role --step-id='<sid>'`
+(`internal/engine.ResolveRole`, aihub#642/#664). Since aihub#555 the tier is carried by an
+AGENT DEFINITION FILE, not by a dispatch argument: each agent file's `model:` frontmatter is
+the single copy of its model name, read by the harness as configuration, and it is
+deliberately NOT repeated in this table (a second hand-written copy is the aihub#294 drift
+class; the gate pins the file, not prose). The loop's only job is `ROLE_AGENT[role]` - a
+name -> agent-id lookup, never a predicate.
 
-| step kind | predicate in `engine.native.md` | agent (its file carries the model) |
-|---|---|---|
-| review / design judgement | `sid.endswith("_review")`, or `sid` in `review` / `code_review` / `release_review` | `REVIEW_AGENT` = `polyforge:step-reviewer` (agents/step-reviewer.md, the raised tier; read-only by construction: Edit/Write/NotebookEdit are disallowed in its definition) |
-| everything else | otherwise | `STEP_AGENT` = `polyforge:step-executor` (agents/step-executor.md, the default tier; write-capable) |
+| role | tier | step ids (catalog, `internal/roles/definitions/*.yaml`) | agent |
+|---|---|---|---|
+| `executor` | default, write | `code_change`, `review_fix`, `verify`, `plan`, `test`, `e2e`, `live_verify`, `deploy_prod`, `prove_unchanged`, `finalize`, `commit_loop` | `polyforge:step-executor` |
+| `operator` | lowest, write | `commit_and_pr`, `await_ci`, `refresh_descriptions`, `publish_stable`, `publish_plugin`, `bump_version`, `build`, `await_image` | `polyforge:step-operator` |
+| `explorer` | low, **read-only** | `prepare_context`, `map_consumers`, `ground`, `check_status` | `polyforge:step-explorer` |
+| `reviewer` | raised, **read-only** | `code_review`, `review`, `release_review` | `polyforge:step-reviewer` |
+| `designer` | raised, write | `spec`, `direction`, `prototype` | `polyforge:step-designer` |
+
+Read-only above means Edit/Write/NotebookEdit are disallowed in that agent's frontmatter
+(`internal/roles.CompileCapability` compiles `read_only` into that list - the actual
+enforcement mechanism, not the table). Dispatching `explorer` for `prepare_context` therefore
+cannot silently widen to a write-capable executor the way the pre-aihub#664 two-way
+`is_review` predicate did: that predicate had no `explorer` / `operator` / `designer` branch
+at all, so all three fell through to the `else` arm - the default, write-capable
+`STEP_AGENT` - which is the capability-widening bug aihub#664 closes.
 
 **The two channels that can defeat the agent files (aihub#555, measured on Claude Code
 2.1.258).**
@@ -243,10 +260,11 @@ hand-written copy is the aihub#294 drift class; the gate pins the file, not pros
    editing that machine's plugin copy, not shadowing the name.
 
 Measured against polyforge-coding@09cc434 (17 templates, 102 step occurrences, 26 distinct step
-ids), that raises exactly **9 occurrences**: `code_review` ×8 (chore.aihub, chore.tether,
-critical_bug.ieops, feature.aihub, feature.tether, fix_bug.aihub, fix_bug.ieops, fix_bug.tether)
-and `release_review` ×1 (release.aihub). Note `review_fix` (×8) is NOT one of them - it applies a
-review's findings, which is ordinary editing work, and `endswith("_review")` does not match it.
+ids): the catalog's raised-tier (`reviewer`) step ids occur **9** times - `code_review` ×8
+(chore.aihub, chore.tether, critical_bug.ieops, feature.aihub, feature.tether, fix_bug.aihub,
+fix_bug.ieops, fix_bug.tether) and `release_review` ×1 (release.aihub). Note `review_fix` (×8)
+resolves to `executor`, not `reviewer` - it applies a review's findings, which is ordinary
+editing work.
 
 **Decided by the owner (2026-09-04): task-kind -> tier.** The owner explicitly rejected keying it
 on `level:`, and explicitly asked for the policy `hooks/pf-skill-router` already ships on the
@@ -341,7 +359,7 @@ not only the `bracket-plan` blocks, so an unquoted value goes red wherever it is
 | verb | replaces the pseudocode for | stdout |
 |---|---|---|
 | `startup` | §0 steps 2-6 | `{scenario_path, legacy_fallback, sha, template_source, steps:[{id,content,expanded}]}`, and writes `.pf_meta.json` |
-| `resolve-role` | `is_review(step_id)`, and a step's explicit `role:` | `{role, tier, read_only, source}`, `source` one of `declared` / `catalog` / `heuristic` |
+| `resolve-role` | the entire role choice - a step's explicit `role:`, the catalog, and the `is_review` fallback (§0f's table, aihub#664) | `{role, tier, read_only, source}`, `source` one of `declared` / `catalog` / `heuristic` |
 | `parse-review` | `parse_review_result` | `{"result": "PASS"}`, or `WARN` / `FAIL`: the LAST `<!-- REVIEW_RESULT: ... -->` marker in the output, and `WARN` when there is none - never `PASS`, never an auto-`FAIL` |
 | `bracket-plan` | the step bracket, both its forms | an ORDERED array of the `pf_update_step` calls to make |
 | `cleanup-worktrees` | wrap-time worktree removal (`_common/references/lifecycle-details.md` §0) | `{removed:[...], errors:{}}` |
@@ -418,7 +436,8 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
                                      pf_complete_attempt(failed, note="failed reason: <user description>");
                                      break (stop the whole loop)
 
-    if is_review(step_id):   # `polyforge engine resolve-role --step-id='<step_id>'` -> reviewer
+    role = `polyforge engine resolve-role --step-id='<step_id>'`.role   # never re-derive
+    if role == "reviewer":
         "PASS" / "continue"  -> fall through to the completed report below
         "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report
                                 completed as usual

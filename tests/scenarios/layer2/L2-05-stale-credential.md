@@ -13,7 +13,7 @@ CALL: pf_create_work_item(project="marketplace", goal="[test] L2-05 stale creden
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-05-claim-1", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-05-claim-1")
 ASSERT: response.ok == true
 NOTE: save response.attempt_id as ATTEMPT_1, response.claim_epoch (should be 1)
 
@@ -33,7 +33,7 @@ NOTE: Verify WORKSPACE_ROOT/.polyforge/state/WI_ID.json does NOT exist
 NOTE: If file still exists, this is a FAIL
 
 ### Re-claim with new idempotency_key (creates attempt #2)
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-05-claim-2", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-05-claim-2")
 ASSERT: response.ok == true
 ASSERT: response.claim_epoch == 2
 

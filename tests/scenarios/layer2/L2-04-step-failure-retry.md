@@ -9,7 +9,7 @@ CALL: pf_create_work_item(project="marketplace", goal="[test] L2-04 step failure
       wi_type="fix_bug", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-04-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-04-claim")
 ASSERT: response.ok == true
 
 ## Steps

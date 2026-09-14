@@ -38,7 +38,7 @@ USER_INTENT: "execute" (or "run it" / "let's do it")
 EXPECTED SKILL BEHAVIOR — Setup phase:
   1. Load wi info:
      pf_list_work_items(ids=[WI_ID], include_step_state=true)
-     → requires_human_session=false, current_step="prepare_context", phase_mode="step"
+     → requires_human_session=false, current_step="prepare_context"
 
   2. Memory-First before dispatch:
      pf_recall(project="marketplace", query=wi.goal,
@@ -169,7 +169,7 @@ EXPECTED SKILL BEHAVIOR (main step loop iteration 2):
                  repo="marketplace",
                  message="fix(cache): remove stale entry on user logout\n\n...\n\nwi: marketplace#<seq>")
     c. pf_push(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
-               repo="marketplace", skip_base_check=false)
+               repo="marketplace")
     d. pf_pr(workspace_root=WORKSPACE_ROOT, work_item_id=WI_ID,
              repo="marketplace",
              title="fix(cache): remove stale entry on user logout", body="...")
@@ -210,7 +210,7 @@ EXPECTED SKILL BEHAVIOR (automatic retro):
     2. pf_recall(project="marketplace", query=wi.goal, type="experience.*", top_k=3)
        + pf_activate_memory(id) for each relevant result
     3. LLM retrospective analysis (planned vs actual, deviations, learnings)
-    4. For each finding: pf_recall(query=...) FIRST, then pf_remember(body=...,
+    4. For each finding: pf_recall(query=...) FIRST, then pf_remember(content=...,
                                    type="experience.*", visibility="team")
     5. pf_save_artifact(type="methodology.wrap_summary", work_item_id=WI_ID,
                         content="<1-paragraph summary>")
@@ -224,7 +224,7 @@ ASSERT MCP CALLS (retro):
   - pf_read_events called with work_item_id=WI_ID
   - pf_recall called BEFORE any pf_remember (Memory-First enforced)
   - pf_save_artifact called with type="methodology.wrap_summary"
-  - pf_remember called with body= param (NOT content=), visibility="team" or "project"
+  - pf_remember called with content= param, visibility="team" or "project"
 
 ---
 
@@ -232,11 +232,10 @@ ASSERT MCP CALLS (retro):
 EXPECTED SKILL BEHAVIOR (coding scenario wrap):
   pf_wrap(
     workspace_root=WORKSPACE_ROOT,
-    work_item_id=WI_ID,
-    attempt_id=<from state file>,
-    claim_epoch=<from state file>,
-    session_secret=<injected by MCP server from state file>
+    work_item_id=WI_ID
   )
+  NOTE: attempt_id / claim_epoch / session_secret are NOT parameters. The MCP
+  client reads them from the state file and injects them; the caller names none.
   NOTE: pf_wrap = on_wrap hook + pf_complete_attempt(wrapped) + workspace cleanup.
   Do NOT call pf_complete_attempt directly for coding scenarios.
 

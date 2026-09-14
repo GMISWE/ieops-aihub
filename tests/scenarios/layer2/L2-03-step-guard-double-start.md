@@ -8,7 +8,7 @@ CALL: pf_create_work_item(project="marketplace", goal="[test] L2-03 step guard",
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-03-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-03-claim")
 ASSERT: response.ok == true
 
 ## Steps

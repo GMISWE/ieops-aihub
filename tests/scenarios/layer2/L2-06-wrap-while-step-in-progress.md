@@ -10,7 +10,7 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="chore", priority="normal")
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-06-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l2-06-claim")
 ASSERT: response.ok == true
 
 ## Steps

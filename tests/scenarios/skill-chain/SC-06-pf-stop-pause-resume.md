@@ -29,9 +29,8 @@ EXPECTED SKILL BEHAVIOR:
   4. pf_predict_conflicts(work_item_id=WI_ID, declared_resources=[...], dry_run=true)
      # aihub#666: step 3 already created the wi, so work_item_id resolves the project
      # (aihub#662) and also buys the aihub#510/#564 self-exclusion.
-  5. pf_claim_work_item(work_item_id=WI_ID, mode="fresh",
+  5. pf_claim_work_item(work_item_id=WI_ID,
                          idempotency_key=<client ULID>,
-                         session_info={machine_id: <hostname>},
                          requested_locks=[{resource_type: "git_branch",
                                            resource_key: "marketplace/polyforge/<slug>"}])
      → returns {attempt_id, claim_epoch, acquired_locks, repo_pins}
@@ -146,7 +145,6 @@ USER_INTENT: "resume WI_ID" (or "/pf-work WI_ID --resume")
 EXPECTED SKILL BEHAVIOR (Mode C — resume paused wi):
   1. pf_claim_work_item(
        work_item_id=WI_ID,
-       mode="resume",
        idempotency_key=<new client ULID>
      )
      Restores: prepared workspace + step state from previous attempt.
@@ -174,7 +172,7 @@ EXPECTED SKILL BEHAVIOR (Mode C — resume paused wi):
      - Or manually invoke `polyforge-coding:prepare_context`
 
 ASSERT MCP CALLS:
-  - pf_claim_work_item(work_item_id=WI_ID, mode="resume") called
+  - pf_claim_work_item(work_item_id=WI_ID) called
   - Returns NEW_ATTEMPT_ID, NEW_CLAIM_EPOCH (different from original ATTEMPT_ID)
 
 ASSERT STATE after resume:
@@ -207,5 +205,5 @@ ASSERT MCP CALLS:
 ## PASS criteria
 pf-stop --pause resets in-progress step before releasing lease; lease released via
 pf_complete_attempt(status="paused"); state file kept; locks retained; WI_ID appears
-in paused[] segment; pf-work --resume calls pf_claim_work_item(mode="resume") and
+in paused[] segment; pf-work --resume calls pf_claim_work_item and
 returns a new attempt_id; work continues from prepare_context on resume.

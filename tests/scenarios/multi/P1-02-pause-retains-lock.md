@@ -46,7 +46,7 @@ AS BOB: retry claim WI_BOB
 ASSERT_ERROR: HTTP 409 CONFLICT_LOCK_TAKEN  <- KEY: pause does not release lock
 
 ### Alice resumes and wraps (lock released)
-AS ALICE: claim WI_ALICE with mode="resume"; wrap it
+AS ALICE: re-claim WI_ALICE (the claim IS the resume); wrap it
 
 ### Bob now succeeds
 AS BOB: retry claim WI_BOB

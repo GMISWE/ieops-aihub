@@ -12,7 +12,7 @@ ASSERT: response.wi_type == "feature"
 ASSERT: response.requires_human_session == true
 NOTE: save response.id as WI_ID
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l3-02-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l3-02-claim")
 ASSERT: response.ok == true
 
 ## Steps

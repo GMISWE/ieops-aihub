@@ -111,10 +111,8 @@ EXPECTED SKILL BEHAVIOR (transition to Mode B):
      pf_claim_work_item(
        work_item_id=EXISTING_WI_ID,
        idempotency_key=<client ULID>,
-       session_info={machine_id: <hostname>},
        requested_locks=[{resource_type: "git_branch",
-                         resource_key: "marketplace/polyforge/<slug>"}],
-       mode="fresh"
+                         resource_key: "marketplace/polyforge/<slug>"}]
      )
      → returns {attempt_id, claim_epoch, acquired_locks, repo_pins}
      NOTE: the explicit `requested_locks` is load-bearing here since aihub#416
@@ -145,7 +143,7 @@ EXPECTED SKILL BEHAVIOR (transition to Mode B):
 ASSERT MCP CALLS (Mode B claim):
   - pf_predict_conflicts(work_item_id=EXISTING_WI_ID, declared_resources=[...],
                          dry_run=true) called
-  - pf_claim_work_item(work_item_id=EXISTING_WI_ID, mode="fresh") called
+  - pf_claim_work_item(work_item_id=EXISTING_WI_ID) called
   - pf_create_work_item NOT called again (existing wi claimed, not new one)
 
 ASSERT STATE after claim:
@@ -178,7 +176,7 @@ EXPECTED SKILL BEHAVIOR:
 ASSERT MCP CALLS (continue new):
   - pf_create_work_item called with force_create=true (or equivalent)
   - Returns NEW_WI_ID (different from EXISTING_WI_ID)
-  - pf_claim_work_item(work_item_id=NEW_WI_ID, mode="fresh") called
+  - pf_claim_work_item(work_item_id=NEW_WI_ID) called
 
 ---
 
@@ -206,5 +204,5 @@ ASSERT MCP CALLS (cancel):
 ## PASS criteria (Mode B path — Step 2):
 pf_create_work_item returns 409 CONFLICT_DUPLICATE; skill surfaces existing wi and
 prompts user with three choices; user picks B; pf_predict_conflicts called before
-claim; pf_claim_work_item(work_item_id=EXISTING_WI_ID, mode="fresh") called; new
+claim; pf_claim_work_item(work_item_id=EXISTING_WI_ID) called; new
 duplicate wi NOT created; state file for EXISTING_WI_ID written.

@@ -37,7 +37,7 @@ USER_INTENT: "execute" (or "run it" / "continue")
 EXPECTED SKILL BEHAVIOR — Setup phase:
   1. Load wi info:
      pf_list_work_items(ids=[WI_ID], include_step_state=true)
-     → requires_human_session=false, current_step="code_change", phase_mode="step"
+     → requires_human_session=false, current_step="code_change"
      → prepare_context.status="completed" (previous_steps contains artifact_summary)
 
   2. Memory-First before entering loop:

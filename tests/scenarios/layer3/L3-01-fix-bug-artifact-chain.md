@@ -11,7 +11,7 @@ CALL: pf_create_work_item(project="marketplace",
 ASSERT: response.status == "queued"
 NOTE: save response.id as WI_ID, response.slug as SLUG
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l3-01-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="l3-01-claim")
 ASSERT: response.ok == true
 ASSERT: response.project == "marketplace"
 

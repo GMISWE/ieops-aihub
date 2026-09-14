@@ -186,3 +186,18 @@ const QueryEmbedPrefix = "Instruct: Given a web search query, retrieve relevant 
 func QueryEmbedInput(query string) string {
 	return QueryEmbedPrefix + query
 }
+
+// QueryEmbedPrefixID is the prefix's fingerprint for the emb_pipeline stamp
+// (aihub#661) — the thing that makes an edit to the const above show up in the
+// data, which the paragraph over it says nothing does today.
+//
+// It lives HERE, beside the const, rather than in embed_pipeline.go where it is
+// used, and that placement is deliberate: embed_query_prefix_test.go's census
+// allows exactly three non-test files to name QueryEmbedPrefix, because the
+// prefixed TEXT must never reach a lexical or ILIKE path. A fingerprint is not
+// that text and carries none of that hazard — but widening the census to let a
+// fourth file name the const would weaken the guard for every future file too.
+// One exported derived value costs nothing and keeps the census at three.
+func QueryEmbedPrefixID() string {
+	return queryPrefixFingerprint(QueryEmbedPrefix)
+}

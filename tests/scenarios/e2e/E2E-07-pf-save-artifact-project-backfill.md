@@ -10,7 +10,7 @@ CALL: pf_create_work_item(project="marketplace",
       wi_type="fix_bug", priority="normal")
 NOTE: save response.id as WI_ID, response.project as EXPECTED_PROJECT
 
-CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-07-claim", mode="fresh")
+CALL: pf_claim_work_item(work_item_id=WI_ID, idempotency_key="e2e-07-claim")
 ASSERT: response.ok == true
 
 ## Steps

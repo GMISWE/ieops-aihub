@@ -22,32 +22,38 @@ import (
 // budget cannot drift apart again.
 
 // embedWorkItemBestEffort returns the pgvector literal / model / dims /
-// embedded rune count for the given wi text, or all-nil when embedding is
-// disabled, the input is empty, or the provider fails.
+// embedded rune count / pipeline identity for the given wi text, or all-nil
+// when embedding is disabled, the input is empty, or the provider fails.
 //
 // embeddedLen (aihub#504, migration 0039) is the rune count of the composed
 // goal+content input the vector actually embeds — WorkItemEmbedInput truncates
 // at the input budget, and before this value was recorded that truncation was
 // visible nowhere on the row. Returned alongside the vector so no writer can
 // store one without the other.
-func embedWorkItemBestEffort(ctx context.Context, goal, content string) (vecLit, model *string, dims, embeddedLen *int) {
+//
+// pipeline (aihub#661, migration 0041) is the identity of the pipeline that
+// produced this vector — see embed_pipeline.go. Returned from the same branch
+// for the same reason: a provenance field that can be written without a vector
+// eventually claims provenance for a vector that does not exist.
+func embedWorkItemBestEffort(ctx context.Context, goal, content string) (vecLit, model *string, dims, embeddedLen *int, pipeline *string) {
 	if isNoopProvider(embProvider) {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	in := WorkItemEmbedInput(goal, content)
 	if in == "" {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	vec, err := embProvider.Embed(ctx, in)
 	if err != nil || len(vec) == 0 {
 		fmt.Fprintf(os.Stderr, "work_items: embed failed (leaving emb_vector NULL): %v\n", err)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	lit := vecToPGLiteral(vec)
 	m := embProvider.ModelID()
 	d := embProvider.Dims()
 	n := utf8.RuneCountInString(in)
-	return &lit, &m, &d, &n
+	p := EmbedPipelineID(m, d)
+	return &lit, &m, &d, &n, &p
 }
 
 // refreshWorkItemEmbeddingBestEffort recomputes the embedding for a wi whose
@@ -67,13 +73,13 @@ func refreshWorkItemEmbeddingBestEffort(ctx context.Context, pool *pgxpool.Pool,
 	if content != nil {
 		c = *content
 	}
-	vecLit, model, dims, embeddedLen := embedWorkItemBestEffort(ctx, goal, c)
+	vecLit, model, dims, embeddedLen, pipeline := embedWorkItemBestEffort(ctx, goal, c)
 	if vecLit == nil {
 		return
 	}
 	if _, err := pool.Exec(ctx,
-		`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4 WHERE id = $5`,
-		*vecLit, *model, *dims, *embeddedLen, wiID); err != nil {
+		`UPDATE work_items SET emb_vector = $1::vector, emb_model = $2, emb_dims = $3, embedded_len = $4, emb_pipeline = $5 WHERE id = $6`,
+		*vecLit, *model, *dims, *embeddedLen, *pipeline, wiID); err != nil {
 		fmt.Fprintf(os.Stderr, "work_items: embed refresh write failed id=%s: %v\n", wiID, err)
 	}
 }

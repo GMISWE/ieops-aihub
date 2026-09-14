@@ -272,10 +272,21 @@ func ResolveModel(candidates []config.RoleCandidate, harness string, probe Catal
 // (AC7) -- this warning cannot be silenced by any flag or caller, unlike the
 // returned error which callers may choose to just log.
 func GenerateRoles(mc *config.MachineConfig, harness, outDir string) error {
-	return generateRoles(mc, harness, outDir, probeForHarness(harness))
+	return GenerateRolesWithPreset(mc, harness, outDir, "")
 }
 
-func generateRoles(mc *config.MachineConfig, harness, outDir string, probe CatalogProbe) error {
+// GenerateRolesWithPreset is GenerateRoles with an explicit preset override
+// (`polyforge roles generate <harness> --out <dir> --preset=<name>`), resolved
+// through config.MachineConfig.ResolveTiers so this path and every other reader
+// of the tier table agree about which table is in force (aihub#673).
+//
+// An empty override means "use this machine's configured selection", which is
+// what GenerateRoles passes and what the serve-startup path wants.
+func GenerateRolesWithPreset(mc *config.MachineConfig, harness, outDir, preset string) error {
+	return generateRoles(mc, harness, outDir, probeForHarness(harness), preset)
+}
+
+func generateRoles(mc *config.MachineConfig, harness, outDir string, probe CatalogProbe, preset string) error {
 	if harness != "pi" && harness != "codex" && harness != "opencode" {
 		return fmt.Errorf("unsupported harness %q for roles generate (must be \"pi\", \"codex\", or \"opencode\")", harness)
 	}
@@ -285,10 +296,18 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 		return fmt.Errorf("load roles: %w", err)
 	}
 
-	var tiers map[string][]config.RoleCandidate
-	if mc != nil && mc.Roles != nil {
-		tiers = mc.Roles.Tiers
+	// 🔴 Resolved, never read straight off mc.Roles.Tiers. Before aihub#673 this
+	// line was `tiers = mc.Roles.Tiers`, which meant a preset selected anywhere
+	// else on this machine would not reach the files this function writes. See
+	// config.MachineConfig.ResolveTiers for why one resolver is the whole point.
+	tiers, tierSource, err := mc.ResolveTiers(preset)
+	if err != nil {
+		return err
 	}
+	// Provenance on stderr, not stdout: stdout carries the subcommand's own
+	// success line, and an operator comparing two machines needs to see WHICH
+	// table produced these files, not merely that some table did.
+	fmt.Fprintf(os.Stderr, "polyforge: roles generate %s: tier table from %s\n", harness, tierSource)
 
 	resolved := make(map[string]string, len(roleList))
 	for _, r := range roleList {
@@ -353,7 +372,7 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 // such helper is added here. Wiring an auto-regen hook into serve startup, if
 // ever wanted, is left to a follow-up work item.
 func RunRolesGenerate(mc *config.MachineConfig, args []string) {
-	usage := "usage: polyforge roles generate <pi|codex|opencode> --out <dir>"
+	usage := "usage: polyforge roles generate <pi|codex|opencode> --out <dir> [--preset=<name>]"
 	if len(args) < 1 || args[0] != "generate" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
@@ -371,13 +390,17 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 
 	fs := flag.NewFlagSet("roles generate "+harness, flag.ExitOnError)
 	outDir := fs.String("out", "", "output directory for the generated agent files")
+	// Overrides ~/.polyforge/config.toml [roles] preset for this invocation
+	// only; an unknown name is refused by ResolveTiers rather than silently
+	// falling back to [roles.tiers] (aihub#673).
+	preset := fs.String("preset", "", "named tier-table snapshot to generate from (default: the machine's [roles] preset)")
 	_ = fs.Parse(args[1:])
 	if *outDir == "" {
 		fmt.Fprintln(os.Stderr, "roles generate: --out is required\n"+usage)
 		os.Exit(1)
 	}
 
-	if err := GenerateRoles(mc, harness, *outDir); err != nil {
+	if err := GenerateRolesWithPreset(mc, harness, *outDir, *preset); err != nil {
 		fmt.Fprintf(os.Stderr, "roles generate: %v\n", err)
 		os.Exit(1)
 	}

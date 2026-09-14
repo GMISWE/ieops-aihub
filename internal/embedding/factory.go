@@ -37,6 +37,15 @@ import (
 //	                      Consumed by domain.MemoryEmbedInput /
 //	                      domain.WorkItemEmbedInput, so it moves every writer
 //	                      at once (aihub#361).
+//	EMBEDDING_SERVING_ID
+//	                    — free-text declaration of what is SERVING the model
+//	                      (backend, version, pooling, attention direction), e.g.
+//	                      "tei-1.9.3-lasttoken-causal". Goes into every row's
+//	                      emb_pipeline stamp and must be bumped in the same
+//	                      change as any serving-side change; unset stamps
+//	                      s=undeclared and is warned about here. aihub cannot
+//	                      derive this — see ServingID (serving_id.go) for what
+//	                      the stamp therefore does not cover (aihub#661).
 //
 // The openai and ollama providers are returned budget-wrapped (budget.go). The
 // wiring lives here rather than at the call site in cmd/aihub/main.go because
@@ -69,6 +78,7 @@ func FromEnv() (Provider, error) {
 		}
 		// apiKey is optional: keyless self-hosted endpoints (llama.cpp/Ollama/vLLM)
 		// ignore the Authorization header; only real api.openai.com needs it.
+		warnIfServingUndeclared()
 		return WithBudget(NewOpenAI(apiKey, model, dims, baseURL), budgetFromEnv()), nil
 
 	case "ollama":
@@ -85,6 +95,7 @@ func FromEnv() (Provider, error) {
 		if baseURL == "" {
 			return nil, fmt.Errorf("embedding: EMBEDDING_BASE_URL required for ollama provider")
 		}
+		warnIfServingUndeclared()
 		return WithBudget(NewOllama(baseURL, model, dims), budgetFromEnv()), nil
 
 	case "noop", "":

@@ -1373,7 +1373,8 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 	var embVecLit *string // nil → SQL NULL
 	var embModel *string
 	var embDims *int
-	var embeddedLen *int // aihub#504: runes the stored vector embeds; NULL when no vector
+	var embeddedLen *int    // aihub#504: runes the stored vector embeds; NULL when no vector
+	var embPipeline *string // aihub#661: which pipeline produced the vector; NULL when no vector
 	if embeddableType(req.Type) {
 		embInput := MemoryEmbedInput(req.Content)
 		if vec, embErr := embProvider.Embed(ctx, embInput); embErr != nil {
@@ -1390,6 +1391,11 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			// vector does not have (aihub#504, migration 0039).
 			n := utf8.RuneCountInString(embInput)
 			embeddedLen = &n
+			// Same rule, same branch (aihub#661, migration 0041): emb_model says
+			// which checkpoint, emb_pipeline says under what serving semantics —
+			// the distinction a 1.7.2/1.9.3 swap erased. See embed_pipeline.go.
+			p := EmbedPipelineID(m, d)
+			embPipeline = &p
 		}
 	}
 
@@ -1580,14 +1586,14 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
 			activation_count, last_activated_at, last_activated_by, expires_at, tags, source_artifact_id,
-			emb_model, emb_dims, emb_vector, embedded_len,
+			emb_model, emb_dims, emb_vector, embedded_len, emb_pipeline,
 			status, attrs, rendered_html, supersedes_id, latest_id, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11,
 			$12, $13, $14, $15, $16, $17,
-			$18, $19, $20::vector, $21,
-			'active', $22, $23, $24, $1, clock_timestamp(), clock_timestamp()
+			$18, $19, $20::vector, $21, $22,
+			'active', $23, $24, $25, $1, clock_timestamp(), clock_timestamp()
 		)
 		RETURNING id, project, type, content, author_user_id, author_display,
 			work_item_id, visibility, is_immortal, base_strength, stability_days,
@@ -1598,8 +1604,8 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		req.WorkItemID, req.Visibility, immortal, baseStrength, stabilityDays,
 		req.ActivationCount, req.LastActivatedAt, req.LastActivatedBy, // $12, $13, $14
 		req.ExpiresAt, req.Tags, nil, // $15, $16, $17 — source_artifact_id = nil
-		embModel, embDims, embVecLit, embeddedLen, // $18, $19, $20, $21 — emb_model/dims/vector/embedded_len
-		req.Attrs, renderedHTML, req.SupersedesMemID, // $22, $23, $24
+		embModel, embDims, embVecLit, embeddedLen, embPipeline, // $18..$22 — emb_model/dims/vector/embedded_len/pipeline
+		req.Attrs, renderedHTML, req.SupersedesMemID, // $23, $24, $25
 	).Scan(
 		&mem.ID, &mem.Project, &mem.Type, &mem.Content, &mem.AuthorUserID, &mem.AuthorDisplay,
 		&mem.WorkItemID, &mem.Visibility, &mem.IsImmortal, &mem.BaseStrength, &mem.StabilityDays,

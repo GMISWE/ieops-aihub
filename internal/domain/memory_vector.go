@@ -201,12 +201,74 @@ func RecallWithVector(ctx context.Context, pool *pgxpool.Pool, req *RecallReques
 	// outweighed a 0.0025 cosine gap. The `similarity` column returned is raw cosine,
 	// so the displayed numbers did not even match the row order.
 	//
-	// Why bucketing rather than simply reweighting to, say, 0.9/0.1: the 0.6B embedding
-	// model packs every cosine in a result set into a band roughly 0.04 wide (0.68-0.72
-	// in the reported case), so ANY non-trivial strength weight can still flip a gap
-	// that small. Cosine has to be the dominant sort key, not merely a heavier one.
+	// Why bucketing rather than simply reweighting to, say, 0.9/0.1: on the RETURNED
+	// PAGE the cosines sit close enough together that any non-trivial strength weight
+	// can still flip the gap between two adjacent rows - 0.7227 against 0.7202 in
+	// aihub#311's own report. Cosine has to be the dominant sort key, not merely a
+	// heavier one.
 	// round(...,2) keeps recency useful where it is legitimate - rows within 0.01
 	// cosine of each other are genuinely near-tied, and there the stronger memory wins.
+	//
+	// SCOPE - the narrow band is a property of the PAGE, not of the result set. This
+	// paragraph used to read "the 0.6B embedding model packs every cosine in a result
+	// set into a band roughly 0.04 wide", and in 2026-09 a reader took that literally,
+	// derived "so the whole candidate set falls into about 4 buckets of 0.01", and
+	// planned work on it. The candidate set is several times wider than the page and
+	// occupies dozens of buckets, not a handful; only the page is narrow, and that has
+	// been true in every reading so far. aihub#646 measured the gap, aihub#647 is this
+	// correction.
+	//
+	// Measured 2026-09-14, production, 38 frozen queries, project aihub, types
+	// experience.*/rule.*/fact.*, default min_strength 0.3, 271-row candidate set;
+	// pipeline = TEI 89-1.9.3 last-token over a causal forward pass, whole corpus
+	// re-embedded (i.e. after aihub#650 repaired the serving defect aihub#648 found):
+	//
+	//   - returned page (top-10) cosine band: median 0.128, range 0.048-0.270.
+	//   - candidate set: at least 15-30 distinct 0.01 buckets, median 23, spanning at
+	//     least 0.17-0.485 of cosine. Lower bounds, and flagged as such: top_k is
+	//     clamped to 200, so this run saw 200 of the 271 rows and the full set can
+	//     only be wider. aihub#646 read the whole set over SQL on the production host
+	//     and got 22-54 buckets; that seat was not available here.
+	//   - top-10 slots that land in a cosine tie group, i.e. are positioned by
+	//     eff_strength rather than by similarity: 226 of 380 (59.5%). At 3 decimals
+	//     10.0%, at 4 decimals 0.5%. So the rounding is not a rare tiebreak - it still
+	//     places most of the page, and removing it would make recall insensitive to
+	//     reinforcement and decay above the strength floor.
+	//   - aihub#311's shape (the set's max-cosine row not returned first): 1 query of
+	//     38, worst rank 2. That one is frozen query A286, where 0.609800 and 0.609456
+	//     both round to 0.61 - a 0.00034 gap, i.e. precisely the near-tie the bucket
+	//     exists to hand to the stronger row.
+	//
+	// HISTORICAL, do not reuse: the same census on 2026-09-13 (aihub#646, 245-row set)
+	// read page band median 0.046, 22-54 buckets over the full candidate set, 307 of
+	// 380 slots (80.8%) positioned by eff_strength, and 10 of 38 argmax inversions with
+	// worst rank 6. Those are real readings of a BROKEN pipeline: production TEI was
+	// then forwarding a causal checkpoint under bidirectional attention (aihub#648),
+	// which compressed the cosine space about 2.8x on the page band, so each 0.01
+	// bucket swallowed far more rows than it does now. Quote them only as history.
+	//
+	// One copy of the sentence corrected above survives outside this file and is NOT
+	// corrected by aihub#647, deliberately: replayCosineBand in
+	// internal/domain/recall_recency_replay_test.go quotes it verbatim and pins 0.04 as
+	// the denominator of a design-doc ratio, so moving it is a test change, not a
+	// comment change. Its own fixture is a 20-row page captured 2026-09-08 under the
+	// same broken serving. If you touch that constant, re-measure first.
+	//
+	// NOT AN INVARIANT - stated outright because aihub#646 met an inversion and read it
+	// as a regression rather than as the trade: bucketing does NOT guarantee that the
+	// row holding the highest cosine is returned first, and never did. Two rows inside
+	// one bucket are ordered by eff_strength, so a slightly-lower-cosine but stronger
+	// row can come first, and in the reading above one does. That is the deliberate
+	// trade - recency wins inside a near-tie - and aihub#311 is not reopened by an
+	// instance of it. aihub#311 was a 0.3-weighted strength term overturning a cosine
+	// gap of any size; this is a strength term breaking a tie at the 3rd decimal.
+	//
+	// Changing the precision has now been measured on both sides of the serving fix and
+	// bought nothing either time: at 2, 3, 4 decimals and with no rounding at all,
+	// recall@1/5/10 over the 36 non-control frozen queries is 17/20/24 on 2026-09-14
+	// (it was 0/1/2 on 2026-09-13 - far worse, equally invariant). 3 decimals reshuffles
+	// 37% of top-10 slots for that zero gain. Before proposing it again, measure; do not
+	// re-derive it from this comment.
 	//
 	// eff_strength is the SELECT alias, ordered directly rather than through tanh():
 	// tanh is strictly increasing, so it cannot change a DESC ordering, and dropping it

@@ -374,6 +374,19 @@ func runCLI(ctx context.Context, args []string) {
 		// No aihubClient needed: every `engine` verb is local-only (internal/engine +
 		// internal/roles + git), for a future headless orchestrator (aihub#654).
 		cli.RunEngine(ctx, args[1:])
+	case "drain":
+		// Layer 3 continuous scheduler (aihub#640). Needs a client: every scheduling
+		// decision it makes is a question about server state.
+		if aihubClient == nil {
+			fatalf("%s", noAPIKey)
+		}
+		cli.RunDrain(ctx, aihubClient, wsRoot, args[1:])
+	case "watch":
+		// Deliberately NOT gated on the client, and it is not an oversight: watch reads a
+		// local snapshot and makes no network call at all (aihub#640
+		// `watch_is_light_because_of_datasource`), so requiring a credential would make the
+		// observer unavailable in exactly the situations it exists for.
+		cli.RunWatch(ctx, args[1:])
 	case "help":
 		printUsage()
 	default:
@@ -499,6 +512,22 @@ Engine (aihub#654, local-only, for a future headless orchestrator):
                               "removed" and every failure in "errors" (one entry per
                               failing repo, plus "(parent)" if the shared-parent
                               removal itself failed). Prints removed, errors.
+
+Layer 3 continuous scheduling (aihub#640):
+  drain --project=<name> [--all] [--plan] [--max-parallel=<n>]
+        [--max-rounds=<n>] [--max-work-items=<n>] [--channel=<h[/model],...>] [--json]
+                              Repeatedly select the work items that are executable
+                              right now (queued, rhs=false, no unfinished blocking
+                              dependency, in scope), run them across rounds, and stop
+                              with a terminal state. Exit codes: 0 COMPLETED,
+                              10 IDLE, 11 BLOCKED_EXTERNAL, 12 FAILED.
+                              --plan reports what WOULD run and claims nothing.
+  watch [--run=<id>] [--follow] [--list] [--json]
+                              Show what a running drain is doing. Reads only that
+                              run's local snapshot: zero network, so it never hangs
+                              on a slow server. This is the PROCESS's view of one
+                              run on this machine, not the project's -- for the
+                              repository view use /pf-status.
 
 Config files (§9.5.3):
   ~/.polyforge/config.toml   Machine-level config (machine_id, [auth] api_key)

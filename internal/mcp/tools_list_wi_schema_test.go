@@ -92,7 +92,13 @@ var listWIWireProbes = map[string][]struct {
 	"label":      {{shape: "alpha", want: "alpha"}},
 	"user_id":    {{shape: "u_abc", want: "u_abc"}},
 	"claimed_by": {{shape: "u_abc", want: "u_abc"}},
-	"source":     {{shape: "human", want: "human"}},
+	// aihub#656. Contains-match display-name filters, unlike the exact-id
+	// user_id/claimed_by above — but the wire probe only asserts the string
+	// reaches the query param unmangled; the ILIKE-contains semantics are a
+	// hop-4 fact pinned in internal/domain/work_items_list_filters_test.go.
+	"owner_display":    {{shape: "xiaokang", want: "xiaokang"}},
+	"reporter_display": {{shape: "xiaokang", want: "xiaokang"}},
+	"source":           {{shape: "human", want: "human"}},
 	"since":      {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
 	"cursor":     {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
 	"sort":       {{shape: "closed_at", want: "closed_at"}},
@@ -472,5 +478,34 @@ func TestListWorkItemsToolPublishesServerEnums(t *testing.T) {
 		!strings.Contains(strings.ToLower(sortDesc), "only closed") {
 		t.Errorf("sort description must state that %s returns only closed items; got %q",
 			domain.ListWorkItemsSortClosedAt, sortDesc)
+	}
+}
+
+// aihub#656 wired OwnerDisplay/ReporterDisplay/WatcherUserID at hop 3
+// (router.go), because the raw HTTP endpoint silently dropped all three
+// regardless of any MCP-publication question. Only the first two are
+// published here: `owner_display`/`reporter_display` have no contrary ruling,
+// but docs/mcp-cards/pf_list_work_items.md's "Open" section already ruled
+// (aihub#652, restated by this wi) that a watcher filter is a deliberate scope
+// decision, not an oversight — so `watcher_user_id` must NOT appear in the
+// schema even though it now works over raw HTTP.
+//
+// This assertion does not gate anything on its own (a future, deliberate
+// reversal of that scope ruling is legitimate and would need to edit this
+// test too) — it exists so an ACCIDENTAL addition shows up as a diff here
+// instead of silently drifting the schema out of sync with the card's ruling.
+func TestListWorkItemsPublishesDisplayFiltersNotWatcher(t *testing.T) {
+	published := schemaPropTypes(t, listWorkItemsSchema())
+	for _, name := range []string{"owner_display", "reporter_display"} {
+		if _, ok := published[name]; !ok {
+			t.Errorf("schema must publish %q (aihub#656): OwnerDisplay/ReporterDisplay have "+
+				"no contrary scope ruling, unlike WatcherUserID", name)
+		}
+	}
+	if _, ok := published["watcher_user_id"]; ok {
+		t.Errorf("schema must NOT publish watcher_user_id: docs/mcp-cards/pf_list_work_items.md's " +
+			"\"Open\" section rules omitting a watcher filter a deliberate scope decision " +
+			"(aihub#652), not an oversight — publishing it here would silently reverse that " +
+			"ruling without anyone deciding to")
 	}
 }

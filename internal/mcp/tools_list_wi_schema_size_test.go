@@ -43,10 +43,24 @@ import "testing"
 // original despite disclosing more, landing the schema at 5459 B: +103 B over
 // the 5356 B baseline, net -8 B from the first (non-disclosing) draft.
 //
-// Set to the exact measured 5459 B, no padding — not a round number with
+// aihub#656 added `owner_display` and `reporter_display` (attempt-owner and
+// reporter DISPLAY-NAME filters, case-insensitive ILIKE-contains — unlike
+// `user_id`/`claimed_by` right above them, which are exact-id matches). The
+// same wi's router.go hop-3 gap also covers a third field, `watcher_user_id`,
+// but that one is deliberately NOT published here: docs/mcp-cards/
+// pf_list_work_items.md's "Open" section already ruled (aihub#652) that
+// omitting a watcher filter from the published MCP schema is a scope
+// decision, not an oversight, and this wi restates rather than reverses it.
+//
+// Measured 5459 B before this change. Both new descriptions disclose the
+// contains-vs-exact distinction explicitly, the same lesson review_fix drew
+// for `claimed_by` above. Landed at 5798 B: +339 B over the 5459 B baseline
+// (~85 tokens/request) for two params.
+//
+// Set to the exact measured 5798 B, no padding — not a round number with
 // slack, so the next addition hits this same gate rather than inheriting
 // borrowed headroom.
-const listWorkItemsSchemaBudget = 5459
+const listWorkItemsSchemaBudget = 5798
 
 func TestListWorkItemsSchemaStaysWithinItsWireBudget(t *testing.T) {
 	got := len(listWorkItemsSchema())

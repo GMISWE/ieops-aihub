@@ -38,7 +38,8 @@ var (
 	// listWorkItemsStringParams are forwarded verbatim when non-empty.
 	listWorkItemsStringParams = []string{
 		"project", "kind", "wi_type", "priority", "milestone", "scenario",
-		"label", "user_id", "claimed_by", "source", "since", "limit", "cursor",
+		"label", "user_id", "claimed_by", "owner_display", "reporter_display",
+		"source", "since", "limit", "cursor",
 		"sort", "order", "query",
 		// aihub#277 / aihub#276. Both go through scalarArg (like `limit`), so
 		// a caller sending min_similarity as a JSON number — which is the
@@ -150,7 +151,15 @@ func listWorkItemsSchema() json.RawMessage {
 		// own disclosure just above. "only" below is that disclosure: a superseded
 		// claimant (a prior attempt on a since-reclaimed work item) does not match.
 		"claimed_by": prop("string", "Filter by CURRENT attempt's claimant only, exact match."),
-		"source":     prop("string", "Filter by source"),
+		// aihub#656. Unlike user_id/claimed_by above, these two are NOT exact
+		// matches: case-insensitive ILIKE-contains against wi.reporter_display /
+		// run_attempts.actor_display (CURRENT/LATEST attempt) respectively — a
+		// display-name search, not an id filter. Said explicitly because the two
+		// params right above it are both exact-match and a reader would otherwise
+		// assume the same semantics carry over.
+		"owner_display":    prop("string", "Filter by CURRENT attempt owner's display name, case-insensitive contains match (not exact) against run_attempts.actor_display."),
+		"reporter_display": prop("string", "Filter by reporter's display name, case-insensitive contains match (not exact) against wi.reporter_display."),
+		"source":           prop("string", "Filter by source"),
 		"ready_only": prop("boolean", "Only return items that are ready to claim: queued, "+
 			"not requiring a human session, and with no unfinished blocking dependency. "+
 			"Same PREDICATE as pf_get_ready_queue's items[] (one shared SQL constant), but "+

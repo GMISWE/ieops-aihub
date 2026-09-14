@@ -238,6 +238,12 @@ func TestListWorkItemsParams_EndToEnd(t *testing.T) {
 			{"ids=" + ids[0], 1},
 			{"ids=" + ids[0] + "," + ids[1], 2},
 			{"since=2000-01-01T00:00:00Z", 6},
+			// aihub#656. Every fixture row's reporter_display is set to the same
+			// uid value (seedListParamsFixture's INSERT uses $12 for both
+			// reporter_user_id and reporter_display), so this proves the
+			// ILIKE-contains predicate actually discriminates rather than being
+			// a no-op — matching all 6 rather than 0 or a truncated subset.
+			{"reporter_display=" + uid, listParamsFixtureCount},
 		} {
 			if n := listParamsCount(t, pool, base+"&"+tc.query, uc); n != tc.want {
 				t.Errorf("%s: got n=%d, want %d — this positive control must discriminate, "+
@@ -251,14 +257,20 @@ func TestListWorkItemsParams_EndToEnd(t *testing.T) {
 		// value cannot match anything, so 0 is the only correct answer and
 		// listParamsFixtureCount is the old, broken one.
 		//
-		// Two different old failures are covered here, deliberately not
+		// Three different old failures are covered here, deliberately not
 		// distinguished by the assertion because the caller could not
 		// distinguish them either:
 		//   - since / milestone / kind / source / scenario were dropped by the
 		//     HTTP handler or the SQL, so even a direct HTTP caller was ignored;
 		//   - wi_type / priority / ids / label already worked over HTTP but were
-		//     absent from the MCP schema, so no polyforge skill could reach them.
-		// Both presented as "I sent a filter and got everything back".
+		//     absent from the MCP schema, so no polyforge skill could reach them;
+		//   - owner_display / reporter_display / watcher_user_id (aihub#656) had
+		//     full domain-layer support (buildListWorkItemsWhere) but zero
+		//     entries in router.go's hop-3 binding table — cheap to probe here
+		//     because no fixture row has a run_attempts row (current_attempt_id
+		//     is NULL for all six) or a wi_watches row, so a garbage value
+		//     correctly returns 0 on the fix and the full fixture on the bug.
+		// All three presented as "I sent a filter and got everything back".
 		for _, tc := range []struct{ name, query string }{
 			{"since", "since=2099-01-01T00:00:00Z"},
 			{"milestone", "milestone=zzz-no-such"},
@@ -269,6 +281,9 @@ func TestListWorkItemsParams_EndToEnd(t *testing.T) {
 			{"priority", "priority=zzz-no-such"},
 			{"ids", "ids=wi_zzznosuchid"},
 			{"label", "label=zzz-nope"},
+			{"owner_display", "owner_display=zzz-no-such-owner"},
+			{"reporter_display", "reporter_display=zzz-no-such-reporter"},
+			{"watcher_user_id", "watcher_user_id=zzz-no-such-watcher"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				n := listParamsCount(t, pool, base+"&"+tc.query, uc)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
@@ -750,9 +751,41 @@ func handleClaimWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 
 		// Cross-user force_takeover via the claim path requires maintainer/admin (§4.3, §9.4).
 		// Self-takeover (same user_id) is implicit and only needs writer.
+		//
+		// 🔴 THIS CHECK HAS NO SECOND COPY, which is what makes the error below worth
+		// returning (aihub#679). domain.FnClaimWorkItem does not re-derive it and
+		// structurally cannot: its signature takes neither callerRole nor
+		// callerProjectRoles, and its takeover branch says so in as many words —
+		// `} else if req.ForceOver { // Explicit force_takeover request — caller must be
+		// maintainer/admin (handled upstream)`. "Upstream" is these eleven lines. That
+		// is the opposite of the sibling site in handleForceTakeover below, where
+		// domain.FnForceTakeover re-reads actor_user_id with its error CHECKED and
+		// re-applies the same predicate before mutating anything.
+		//
+		// The read used to be `//nolint:errcheck`, and a discarded error here does not
+		// fail the request, it SKIPS THE CHECK: currentActorUserID stays "" and the
+		// guard's own `currentActorUserID != ""` arm then reads a failed read as "there
+		// is nobody to take this from", admitting a plain writer to another user's
+		// running attempt. A permission gate is the one place where an unread error is
+		// not untidiness but a direction: this one failed open.
+		//
+		// Narrow, and worth stating as narrow. pgx.ErrNoRows is excluded deliberately —
+		// current_attempt_id is denormalised with no FK (migration 0002), so a dangling
+		// pointer means "no live attempt", and the domain's own read reaches the same
+		// conclusion two statements later and claims fresh. A PERSISTENT fault is caught
+		// downstream too, because FnClaimWorkItem's read of the same row returns
+		// dbErrCause on anything that is not ErrNoRows. The window this closes is the
+		// one where THIS read fails transiently and that one succeeds — a blip, a
+		// cancelled context, a pool exhaustion that clears. Small, but a gate that is
+		// only correct when the database is healthy is not a gate.
 		if req.ForceOver && wi.CurrentAttemptID != nil {
 			var currentActorUserID string
-			pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`, *wi.CurrentAttemptID).Scan(&currentActorUserID) //nolint:errcheck
+			err := pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`,
+				*wi.CurrentAttemptID).Scan(&currentActorUserID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return writeError(c, domain.NewErr(domain.ErrInternalError,
+					"failed to load the current attempt to authorize force_takeover"))
+			}
 			if currentActorUserID != "" && currentActorUserID != u.UserID {
 				projRole := u.ProjectRoles[wi.Project]
 				if u.Role != "admin" && projRole != "maintainer" {
@@ -822,9 +855,31 @@ func handleForceTakeover(pool *pgxpool.Pool) echo.HandlerFunc {
 		minRole := "maintainer"
 		if wi.CurrentAttemptID != nil {
 			// Check if the current attempt belongs to this user
+			//
+			// aihub#679: this read looks like the claim path's twin above and behaves as
+			// its OPPOSITE, so the difference is spelled out rather than left to whoever
+			// notices the two lines are no longer identical.
+			//
+			// The value read can only RELAX minRole, from maintainer to writer. So a
+			// failed read - which leaves actorUserID at "" and cannot equal a real
+			// u.UserID - keeps the STRICTER requirement, and the failure mode is a
+			// self-takeover being asked for maintainer rather than a stranger being let
+			// in. That direction is correct, and it was correct before this comment
+			// existed; the error was suppressed, so nothing said whether it was correct
+			// ON PURPOSE. Reading the error and consulting the value only when it
+			// succeeded makes the safety deliberate, and the `err == nil` guard is what a
+			// future edit that inverts the comparison would now have to defeat on
+			// purpose.
+			//
+			// It is NOT promoted to a 500, unlike the claim path. There the check has no
+			// second copy; here domain.FnForceTakeover re-reads the same column with its
+			// error returned as dbErr and re-applies `isSelf || maintainer/admin` inside
+			// the transaction, so a database fault is already refused one layer down with
+			// nothing mutated. Turning a fault into a 500 here would only take the
+			// refusal away from the layer that also knows how to roll back.
 			var actorUserID string
-			pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`, *wi.CurrentAttemptID).Scan(&actorUserID) //nolint:errcheck
-			if actorUserID == u.UserID {
+			if err := pool.QueryRow(ctx, `SELECT actor_user_id FROM run_attempts WHERE id=$1`,
+				*wi.CurrentAttemptID).Scan(&actorUserID); err == nil && actorUserID == u.UserID {
 				minRole = "writer" // same user, different machine → self-takeover
 			}
 		}

@@ -108,9 +108,55 @@ still stops on the first hit and still suppresses every rule after it —
 `internal/domain/predict_rule_shape_test.go`
 (`TestOnlyTheLockTableRuleHardBlocksAndItStopsTheRulesAfterIt`) pins that as a
 property of the ladder — but it now leaves through the H7 fold instead of around
-it, so a holder in a project the (authorized) caller cannot see comes back as
-`[conflict in project X, no visibility]` on the hard rule exactly as it already
-did on rule 3.
+it, so a holder in a project the (authorized) caller cannot see comes back
+redacted on the hard rule exactly as it already did on rule 3.
+
+⚠️ **THAT REDACTION NO LONGER NAMES THE PROJECT** (`aihub#679`). Until then the
+folded description was `[conflict in project X, no visibility]` — this card
+published that string as the contract, a refusal whose whole subject is "you may
+not see that project" answered by naming it — and that the label can never again
+be built by interpolating the project is what
+`internal/domain/conflicts_fold_label_test.go`
+(`TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee`) exists to hold.
+Since this endpoint is the pre-claim gate every caller may reach with an
+arbitrary path, that made it an enumeration oracle for the project list, and
+project names here are frequently customer names.
+
+The label is now the constant `domain.FoldedConflictDescription`, whose value is
+`[conflict in another project, no visibility]` and which interpolates nothing —
+held by `internal/domain/conflicts_fold_label_test.go`
+(`TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee`), which pins both
+the constant's own text and that the fold assigns it rather than building a
+string from anything in scope.
+
+A folded prediction still carries `severity`, `rule`, `resource_type` and
+`resource_key`, so a blocked caller still learns that it is blocked, by which
+rule, and on which of its OWN declared resources —
+`internal/server/predict_conflicts_visibility_db_test.go`
+(`TestPredictConflictsVisibilityAcrossProjects`) requires all four of those
+present in the same answer whose holder fields it requires absent, because a
+"fix" that dropped the prediction would satisfy every redaction clause while
+removing the hard gate `pf-work` branches on.
+
+What the fold clears is exactly `actor_display`, `work_item_id`,
+`work_item_slug`, `attempt_id` and the description — the set is compared
+exhaustively by `internal/domain/conflicts_fold_label_test.go`
+(`TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee`), so adding a
+sixth field reddens it as loudly as dropping one of the five.
+
+📎 One field short of "everything about the counterparty", stated here rather
+than left for someone to rediscover: `last_active_age_seconds` is NOT cleared, so
+a folded prediction from rule 2, 4 or 6 still carries the invisible holder's
+heartbeat age — pinned as a residue, in that direction, by
+`internal/domain/conflicts_fold_label_test.go`
+(`TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee`). That it stays
+uncleared is deliberate and not an oversight: it carries no identity, it predates
+`aihub#665`, and widening the redaction is a behaviour change no work item has
+asked for — the same arm
+(`TestFoldedConflictDescriptionNamesNothingTheCallerCannotSee`) reddens if it is
+ever cleared, so the residue cannot be closed quietly in one place. Read the
+paragraph above as "the counterparty's IDENTITY is withheld" rather than
+"everything about the counterparty is".
 
 ✅ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 now sends `project`**
 (`aihub#666`), and the carve-out this card invoked for deferring it never

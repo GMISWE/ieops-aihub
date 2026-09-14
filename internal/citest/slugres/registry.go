@@ -174,6 +174,13 @@ var siteExemptions = []SiteExemption{
 		Arg: "<call with 2 args>", Col: "call:ListDependencies.wiID",
 		Reason: "s.client.ListDependencies (pkg/client): it GETs handleListDependencies, which " +
 			"resolves id-or-slug and passes wi.ID down (aihub#357)."},
+	{File: "internal/cli/drain.go", Func: "(*drainQueries).ObserveQueue",
+		Arg: "<call with 2 args>", Col: "call:ListDependencies.wiID",
+		Reason: "q.c.ListDependencies (pkg/client), same shape and same reason as the " +
+			"tools_dependency.go entry above: it GETs handleListDependencies, which resolves " +
+			"id-or-slug and passes wi.ID down (aihub#357). The value passed here is stricter " +
+			"than that contract needs anyway, since it is an `id` read straight out of this " +
+			"same server's own work-item list response, never a caller-typed slug (aihub#640)."},
 }
 
 // DynamicExemption covers one string literal carrying a work-item-id

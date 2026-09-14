@@ -1512,47 +1512,105 @@ func TestRun_TheResolvedRoleReachesTheCommandLine(t *testing.T) {
 	}
 }
 
-// TestRun_AChannelThatCannotExpressAReadOnlyRoleIsDemoted covers the other side of ①: what happens
-// when the harness at the head of the candidate list has no read-only expression at all.
+// TestRun_AReadOnlyRoleIsNeverSilentlyRunWriteCapable covers the other side of ①: the harness
+// whose read-only capability rides ENTIRELY on an agent selector that fails open.
 //
-// The alternative — running the step anyway — is the original defect with a command line that
-// looks fixed, so the run falls to the next candidate instead. The demotion is for the whole run
-// rather than for this step, because a read-only role appears in nearly every step graph.
+// ⚠️ An earlier draft of this test asserted the wrong thing — that opencode is refused outright
+// for a read-only role — on the premise that roles.CompileCapability's refusal meant "opencode
+// cannot express read_only". A clean-context reviewer rejected that: render_opencode.go writes
+// `permission: edit: deny` into the generated agent file, so opencode CAN express it, and
+// refusing would have FAILED every work item with a review step on a working
+// `--channel=opencode` configuration. The real hazard is narrower and is what is asserted now.
 //
-// Mutant watched: classifying ErrNoReadOnlyCapability as StepFailed (i.e. deleting the
-// StepChannelUnsuitable branch) makes the work item FAIL instead of falling through.
-func TestRun_AChannelThatCannotExpressAReadOnlyRoleIsDemoted(t *testing.T) {
-	h := newFakeHub([]string{"code_review"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
-	r := runnerFor(h, Budget{})
-	r.Channels = []Channel{{Harness: HarnessOpenCode}, {Harness: HarnessClaude}}
-	r.ResolveRole = func(string) (string, bool, error) { return "reviewer", true, nil }
-
-	var used []Harness
-	var mu sync.Mutex
-	r.Dispatch = func(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
-		// The PRODUCTION dispatcher's first act, reproduced: build the command, and report a
-		// refusal to build it rather than running something else.
-		if _, err := BuildStepInvocation(req.Channel, req.Binding(), req.Prompt); err != nil {
-			return DispatchResult{ExitErr: err}, err
+// Mutants watched RED, each applied alone:
+//   - demoting the `req.ReadOnly` guard on the AgentFellBackToDefault branch to a log line (the
+//     pre-review behaviour) → the silent-fallback arm
+//   - deleting the StepChannelUnsuitable classification → the suppressed-selector arm
+func TestRun_AReadOnlyRoleIsNeverSilentlyRunWriteCapable(t *testing.T) {
+	t.Run("a silent fallback to the default agent fails the step", func(t *testing.T) {
+		// The measured opencode shape: exit 0, work done, and a warning that the agent carrying
+		// the capability was not the one that ran. Exit 0 and non-empty output make this StepOK
+		// to every other check in the package — which is exactly why it needs its own.
+		h := newFakeHub([]string{"code_review"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
+		r := runnerFor(h, Budget{})
+		r.Channels = []Channel{{Harness: HarnessOpenCode}}
+		r.ResolveRole = func(string) (string, bool, error) { return "reviewer", true, nil }
+		r.Dispatch = func(_ context.Context, _ DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Output: "! agent \"step-reviewer\" not found. Falling back to " +
+				"default agent\nreviewed it\n<!-- REVIEW_RESULT: PASS -->\ndone\n"}, nil
 		}
-		mu.Lock()
-		used = append(used, req.Channel.Harness)
-		mu.Unlock()
-		return DispatchResult{Output: "reviewed\n<!-- REVIEW_RESULT: PASS -->\ndone\n"}, nil
-	}
+		report, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if report.Totals.Wrapped != 0 || report.Terminal != TerminalFailed {
+			t.Fatalf("the work item was WRAPPED on a read-only step that ran write-capable "+
+				"(terminal=%s, outcomes=%+v). The harness said out loud that it ran the default "+
+				"agent; on this harness the agent file is the only thing carrying read_only, so "+
+				"that sentence means the reviewer could edit the tree it was reviewing",
+				report.Terminal, report.Outcomes)
+		}
 
-	report, err := r.Run(context.Background())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(used) != 1 || used[0] != HarnessClaude {
-		t.Fatalf("the read-only step ran on %v, want claude only: opencode cannot express the "+
-			"capability, so running there would widen it exactly as before", used)
-	}
-	if report.Terminal != TerminalCompleted {
-		t.Errorf("terminal = %s (%+v); falling to a usable channel is ordinary control flow, not "+
-			"a failure of the work item", report.Terminal, report.Outcomes)
-	}
+		// Negative control: the SAME fallback on a write-capable role is not a capability change
+		// and must not fail anything — it costs the model tier and the prompt, which is a log
+		// line, not a failure.
+		h2 := newFakeHub([]string{"code_change"}, fwi("b", "normal", "2026-01-01T00:00:00Z"))
+		r2 := runnerFor(h2, Budget{})
+		r2.Channels = []Channel{{Harness: HarnessOpenCode}}
+		r2.ResolveRole = func(string) (string, bool, error) { return "executor", false, nil }
+		r2.Dispatch = func(_ context.Context, _ DispatchRequest) (DispatchResult, error) {
+			return DispatchResult{Output: "! agent \"step-executor\" not found. Falling back to " +
+				"default agent\ndid the thing\nsummary\n"}, nil
+		}
+		rep2, err := r2.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if rep2.Totals.Wrapped != 1 {
+			t.Errorf("a write-capable role was failed for a fallback that cost it no capability: "+
+				"%+v", rep2.Outcomes)
+		}
+	})
+
+	t.Run("a channel with nothing left to carry it is demoted, not run", func(t *testing.T) {
+		// The second defence: the stale-plugin retry suppresses the agent selector, and on this
+		// harness that leaves NOTHING expressing read_only. Building the command is refused and
+		// the run falls to a channel that can.
+		h := newFakeHub([]string{"code_review"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
+		r := runnerFor(h, Budget{})
+		r.Channels = []Channel{{Harness: HarnessOpenCode}, {Harness: HarnessClaude}}
+		r.ResolveRole = func(string) (string, bool, error) { return "reviewer", true, nil }
+
+		var used []Harness
+		var mu sync.Mutex
+		r.Dispatch = func(_ context.Context, req DispatchRequest) (DispatchResult, error) {
+			// The PRODUCTION dispatcher's first act, reproduced: build the command, and report a
+			// refusal to build it rather than running something else.
+			b := req.Binding()
+			b.NoAgentSelector = true // as the stale-plugin retry would have left it
+			if _, err := BuildStepInvocation(req.Channel, b, req.Prompt); err != nil {
+				return DispatchResult{ExitErr: err}, err
+			}
+			mu.Lock()
+			used = append(used, req.Channel.Harness)
+			mu.Unlock()
+			return DispatchResult{Output: "reviewed\n<!-- REVIEW_RESULT: PASS -->\ndone\n"}, nil
+		}
+
+		report, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(used) != 1 || used[0] != HarnessClaude {
+			t.Fatalf("the read-only step ran on %v, want claude only: with its selector suppressed "+
+				"opencode has no way to express the capability, and claude still has "+
+				"--disallowedTools", used)
+		}
+		if report.Terminal != TerminalCompleted {
+			t.Errorf("terminal = %s (%+v); falling to a usable channel is ordinary control flow, "+
+				"not a failure of the work item", report.Terminal, report.Outcomes)
+		}
+	})
 }
 
 // TestRun_ARefusedAgentSelectorRetriesWithoutIt keeps the fix for ① from becoming an outage.
@@ -1584,7 +1642,7 @@ func TestRun_ARefusedAgentSelectorRetriesWithoutIt(t *testing.T) {
 		if !req.NoAgentSelector {
 			// Verbatim shape of what claude 2.1.258 prints, measured on this machine.
 			return DispatchResult{Output: "--agent 'polyforge:step-explorer' not found. " +
-				"Available agents: claude, Explore, polyforge:step-executor, polyforge:step-reviewer\n"},
+					"Available agents: claude, Explore, polyforge:step-executor, polyforge:step-reviewer\n"},
 				fmt.Errorf("exit status 1")
 		}
 		return DispatchResult{Output: "explored\nsummary\n"}, nil
@@ -1647,8 +1705,13 @@ func TestRun_ARefusedAgentSelectorRetriesWithoutIt(t *testing.T) {
 // Mutants watched RED:
 //   - `skipped[o.Candidate.ID] = true` unconditionally on ResultLockBlocked (the pre-fix line)
 //   - heldByThisRun returning false always
-//   - registerAttempt's deregistration removed (turns the retry into an unbounded loop, caught by
-//     the claim-count assertion below)
+//
+// ⚠️ NOT watched here, and the claim that it was is one a reviewer had to take out: removing
+// registerAttempt's deregistration leaves THIS test green. It is caught by
+// TestRun_AnOwnAttemptThatNEVEREndsStopsBeingRetryable, which is written for exactly that
+// mutant — the defect is covered, the attribution was not. A "mutant watched" line that names
+// the wrong test is worse than no line, because the next person reads it as coverage that has
+// been checked.
 func TestRun_ALockHeldByThisRunsOwnAttemptIsRetriedNextRound(t *testing.T) {
 	wi1 := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
 	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
@@ -1946,5 +2009,75 @@ func TestRun_LayerTwoNotifiesOnlyWhatItCanAddress(t *testing.T) {
 	if !explained {
 		t.Errorf("nothing named the requires_human_session work item that made this run exit 11. "+
 			"logs=%v", logs)
+	}
+}
+
+// TestRun_TheOwnHolderCheckDoesNotRaceTheClaim closes the window a reviewer found in ③(b)'s first
+// implementation, and it fails deterministically against that implementation rather than flakily.
+//
+// The window: `heldByThisRun` keyed only on the holder's ATTEMPT id, which is known only after
+// that worker's claim RETURNED. But the server takes worker A's lock and refuses worker B inside
+// the same request, so B's 409 — naming A's attempt — can be processed before A's claim has come
+// back and registered it. The refusal then reads as foreign, the work item is written off for the
+// whole run, and ③(b) silently does nothing. Non-deterministically, which is the worst way for a
+// scheduling decision to be wrong.
+//
+// The fixture makes that ordering certain instead of likely: A's claim blocks until B has already
+// been refused. The fix is the second registry — the work item id and slug are known from the
+// candidate list, so they are registered BEFORE the claim goes out and the window does not exist.
+//
+// Mutant watched RED: dropping `liveCandidates` from heldByThisRun (back to the attempt-only
+// check) strands wi2 for the run.
+func TestRun_TheOwnHolderCheckDoesNotRaceTheClaim(t *testing.T) {
+	wi1 := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
+	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
+	h := newFakeHub([]string{"code_change"}, wi1, wi2)
+
+	r := runnerFor(h, Budget{MaxParallel: 2, MaxRounds: 5})
+	refused := make(chan struct{})
+	var once sync.Once
+	inner := h.claim
+	r.Claim = func(ctx context.Context, id, key string) (*ClaimInfo, *Blocker, error) {
+		if id == "wi2" {
+			// The refusal the server raises the instant it takes wi1's lock — BEFORE wi1's own
+			// claim has returned anything to this process. It names wi1's attempt and wi1's
+			// slug, which is exactly the payload conflict_with carries.
+			//
+			// Only while wi1 still holds the lock: once wi1 has wrapped, the lock is free and the
+			// ordinary fake answers. A fixture that refused forever would fail the real code and
+			// prove nothing — which is how the first draft of this test read.
+			h.mu.Lock()
+			held := h.wis["wi1"].status != "wrapped"
+			if held {
+				h.claimAttempts[id]++
+			}
+			h.mu.Unlock()
+			if held {
+				once.Do(func() { close(refused) })
+				return nil, &Blocker{AttemptID: "ra_wi1", WorkItem: "wi1", Resource: "internal/x.go"},
+					fmt.Errorf("%w: held by wi1", ErrLockTaken)
+			}
+		}
+		if id == "wi1" {
+			// wi1's claim does not return until wi2 has already been refused: the window under
+			// test, held open.
+			select {
+			case <-refused:
+			case <-time.After(10 * time.Second):
+				t.Error("wi2 was never refused; the fixture, not the code, is what this tested")
+			}
+		}
+		return inner(ctx, id, key)
+	}
+	// Second round: the lock is free, so the ordinary fake answers.
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Totals.Wrapped != 2 {
+		t.Fatalf("wrapped = %d, want 2. wi2's refusal named wi1 — a work item THIS RUN was "+
+			"executing — so the lock was free one round later. Keyed on the attempt id alone, "+
+			"that refusal arrives before the attempt is registered and reads as somebody else's. "+
+			"outcomes=%+v", report.Totals.Wrapped, report.Outcomes)
 	}
 }

@@ -101,25 +101,34 @@ type Binding struct {
 // effect on the repository it runs in" structural rather than merely requested.
 var PreflightBinding = Binding{ReadOnly: true}
 
-// ErrNoReadOnlyCapability is returned when a harness cannot express a read-only role at all.
+// ErrNoReadOnlyCapability is returned when NOTHING on the command line can carry a read-only
+// role's capability — neither a capability flag nor an agent selector.
 //
-// Today that is opencode and only opencode, and it is roles.CompileCapability's own position
-// rather than a judgement made here: SupportedHarnesses is {"cc","pi","codex"} and the opencode
-// case returns an explicit "not implemented in this layer" error (aihub#653 owns opencode's
-// permission-rules-table shape). drain must not paper over that, and the measurement says why.
-// `opencode run --agent step-nosuchrole` does NOT fail — measured 2026-09-14, opencode 1.18.30,
-// it prints
+// ⚠️ It is NOT "opencode is unsupported", which was this sentinel's first and wrong meaning.
+// roles.CompileCapability does refuse opencode, but only because opencode's read-only expression
+// is a different SHAPE that lives elsewhere in the same package: render_opencode.go's
+// opencodePermissionBlock writes `permission:\n  edit: deny` into the generated agent file, and
+// roles/dispatch.go says so in as many words ("opencode is excluded there because its read-only
+// expression is a different shape handled directly in render_opencode.go"). So opencode CAN
+// express it — through the agent file, exactly as Claude Code's `disallowedTools:` frontmatter
+// does. Refusing to run a read-only role there outright, which an earlier draft of this change
+// did, would have broken a correctly configured single-channel `--channel=opencode` run: every
+// work item with a review step would have FAILED.
+//
+// What is true is that on opencode the agent selector is the ONLY carrier, and that selector
+// fails OPEN. Measured 2026-09-14, opencode 1.18.30, `--agent step-nosuchrole` prints
 //
 //	! agent "step-nosuchrole" not found. Falling back to default agent
 //
-// and carries on with the DEFAULT agent, which is write-capable. So on opencode the agent file is
-// the only carrier of the read-only capability AND the mechanism that selects it fails open. A
-// read-only role dispatched there would run write-capable exactly as before this fix, with the
-// added insult that the command line would look as though something had been enforced.
+// and carries on with the write-capable default. That is handled where the evidence is — after
+// the run, in dispatchWithFallback, which fails the step rather than logging it (see
+// AgentFellBackToDefault). This sentinel covers the remaining hole: the retry path that
+// SUPPRESSES the agent selector (Binding.NoAgentSelector). On opencode that leaves a read-only
+// role with nothing at all, so it is refused and the channel demoted instead.
 //
-// The probe is deliberately exempt (see PreflightBinding): refusing there would delete a whole
-// channel over an invocation that runs no tools.
-var ErrNoReadOnlyCapability = errors.New("drain: harness cannot express a read-only role")
+// The probe is deliberately exempt (see PreflightBinding): it has no role, and refusing there
+// would delete a whole channel over an invocation that runs no tools.
+var ErrNoReadOnlyCapability = errors.New("drain: nothing on this command line can carry the role's read-only capability")
 
 // BuildInvocation returns the non-interactive command for the credential PROBE.
 //
@@ -160,12 +169,23 @@ func BuildInvocation(ch Channel, prompt string) (Invocation, error) {
 // more deny rules and died with "Input must be provided …". Hence the `--` this emits before the
 // prompt, which also makes a prompt that begins with a dash safe.
 //
-// ⚠️ And what read_only does NOT mean, so nobody reads more into it than is there: Bash stays
-// available, and a claude step told to write a file with Write denied did it with
-// `printf > file` instead. That is not a hole this function can close — it is exactly what B/C's
-// reviewer has (step-reviewer.md keeps Bash on purpose, for builds and tests, and says in prose
-// not to modify the tree). Matching B/C is the acceptance standard (aihub#640
-// `workflow_identity_constraint`); a hermetic sandbox would be a capability A has and B/C lacks.
+// ⚠️ And what read_only does NOT mean, so nobody reads more into it than is there. On claude it
+// is a tool DENYLIST, not a sandbox: Bash stays available, and a step told to write a file with
+// Write denied did it with `printf > file` instead. That is not a hole this function can close —
+// it is exactly what B/C's reviewer has (step-reviewer.md keeps Bash on purpose, for builds and
+// tests, and says in prose not to modify the tree). Matching B/C is the acceptance standard
+// (aihub#640 `workflow_identity_constraint`); a hermetic sandbox would be a capability A has and
+// B/C lacks.
+//
+// 🔴 The four are NOT equivalent on that point, and the difference is not drain's to fix. codex
+// gets a real sandbox (`-s read-only`), and pi gets an ALLOWLIST — roles' piReadOnlyTools is
+// `read, grep, find, ls` plus four pf_* tools, with no shell and no pf_remember. So a read-only
+// step on the pi channel cannot run a build or a test, which a `code_review` step is supposed to
+// do, and cannot store a learning although StepAgentPrompt tells every step agent to. That is a
+// property of the role definition in internal/roles/compile.go — this work item's declared files
+// do not include it, and aihub#676 owns that package — so it is recorded here and folded rather
+// than edited around. Drain compiles what the catalog says; it must not invent a different
+// allowlist locally, which would be the second copy this whole change exists to avoid.
 //
 // codex. `-s` is the load-bearing half and `-p` is not, which is the opposite of what the
 // aihub#655 profile work suggests: `codex exec -p step-nosuchrole` is SILENTLY ACCEPTED — no
@@ -183,6 +203,28 @@ func BuildInvocation(ch Channel, prompt string) (Invocation, error) {
 // in-session `subagent(agent=…)` tool, and `pi --help` lists no `--agent`. Its capability flag is
 // an exact match for the compiled shape, though — `--tools, -t <tools>` is documented as
 // "Comma-separated allowlist of tool names to enable", which is what roles' PiTools already is.
+// `pi -p --tools read,grep,find,ls -- <prompt>` was run here and reached the model (this box's pi
+// answers 401), which proves the flags PARSE; whether pi enforces the allowlist could not be
+// measured without a credential, and is asserted only on pi's own documentation.
+//
+// # The exact command lines, run end to end (2026-09-14, this machine)
+//
+// Not "the flags look right" — these are the strings this function produces, executed:
+//
+//	claude -p --permission-mode acceptEdits --agent polyforge:step-reviewer \
+//	       --disallowedTools Edit,Write,NotebookEdit -- "Reply with exactly the word OK…"
+//	    → exit 0, replied OK. And told to use Write, the same agent REFUSED and created nothing.
+//
+//	claude -p --permission-mode acceptEdits --agent polyforge:step-executor -- "Use the Write
+//	       tool to create t9.txt…"
+//	    → exit 0, file created, replied DONE. The write-capable role is still write-capable.
+//
+//	claude -p --permission-mode acceptEdits --disallowedTools Edit,Write,NotebookEdit \
+//	       -- "Reply with exactly the word POLYFORGE_OK…"        (the preflight probe)
+//	    → exit 0, replied POLYFORGE_OK. The probe still passes with the capability applied.
+//
+// That pair is the whole finding in one measurement: same binary, same permission mode, opposite
+// capabilities, decided by the role the loop had already resolved and was throwing away.
 //
 // the evidence for the base command every row above starts from.
 //
@@ -243,20 +285,22 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 		agentID = id
 	}
 
-	// The capability, from roles.CompileCapability and nowhere else.
+	// The capability, from roles.CompileCapability and nowhere else. An error here means this
+	// harness has no COMPILED shape (opencode); it does not mean the capability is unexpressible,
+	// because the agent file may carry it. capabilityCarried below is what decides that.
 	shape, capErr := roles.CompileCapability(b.ReadOnly, key)
 	if capErr != nil {
-		if b.Role != "" && b.ReadOnly {
-			return Invocation{}, fmt.Errorf("%w: %s (role %q): %v",
-				ErrNoReadOnlyCapability, ch.Harness, b.Role, capErr)
-		}
-		// Write-capable role, or the roleless probe: there is nothing to express, so an
-		// uncompilable capability costs nothing. Fall through with the zero shape.
 		shape = roles.Shape{}
 	}
 
 	var args []string
 	var sep bool // emit "--" before the prompt
+	// capabilityCarried records that SOMETHING on this command line expresses the role's
+	// read-only capability — a capability flag, or the agent selector whose file carries it.
+	// Tracked rather than assumed per harness, so the one combination that has neither (an
+	// opencode read-only role on the agent-suppressed retry path) is a refusal instead of a
+	// silently unrestricted run.
+	capabilityCarried := !b.ReadOnly
 
 	switch ch.Harness {
 	case HarnessClaude:
@@ -269,6 +313,7 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 		}
 		if shape.CCDisallowedTools != "" {
 			args = append(args, "--disallowedTools", cliList(shape.CCDisallowedTools))
+			capabilityCarried = true
 		}
 		sep = true
 
@@ -278,6 +323,9 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 			mode = codexWriteSandbox
 		}
 		args = []string{"exec", "-s", mode, "--skip-git-repo-check"}
+		if shape.CodexSandboxMode != "" {
+			capabilityCarried = true
+		}
 		if ch.Model != "" {
 			args = append(args, "-m", ch.Model)
 		}
@@ -292,6 +340,11 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 		}
 		if agentID != "" {
 			args = append(args, "--agent", agentID)
+			// opencode has no capability FLAG; render_opencode.go puts `permission: edit: deny`
+			// in the generated agent file, so selecting the agent IS selecting the capability.
+			// That makes the selector load-bearing here in a way it is nowhere else — and it
+			// fails open, which dispatchWithFallback checks for after the fact.
+			capabilityCarried = true
 		}
 
 	case HarnessPi:
@@ -301,6 +354,7 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 		}
 		if shape.PiTools != "" {
 			args = append(args, "--tools", cliList(shape.PiTools))
+			capabilityCarried = true
 		}
 		sep = true
 
@@ -312,6 +366,11 @@ func BuildStepInvocation(ch Channel, b Binding, prompt string) (Invocation, erro
 			ch.Harness, joinHarnesses(KnownHarnesses))
 	}
 
+	if b.Role != "" && !capabilityCarried {
+		return Invocation{}, fmt.Errorf(
+			"%w: %s, role %q (read_only): no capability flag and no agent selector%s",
+			ErrNoReadOnlyCapability, ch.Harness, b.Role, noAgentSelectorNote(b, capErr))
+	}
 	if sep {
 		args = append(args, "--")
 	}
@@ -362,10 +421,25 @@ func cliList(shapeValue string) string {
 //
 // Matched on the harness's own words because that is the only signal: the exit status is 1, which
 // is also every ordinary step failure.
+//
+// ⚠️ The match is deliberately narrow, and the wide version was the first draft. A whole-output
+// scan for "--agent" AND "not found" is the DetectPause shape this package already documents as
+// dangerous: drain's first customer is aihub's own work items, this very file contains the
+// string "--agent", and a perfectly healthy `code_change` step that greps or prints a diff of it
+// alongside any "not found" would trip the detector — costing a needless re-run at the wrong
+// model tier. Requiring the two on ONE LINE keeps the generic form useful for a reworded claude
+// message while making an incidental co-occurrence in a step's output essentially impossible.
 func IsAgentNotFound(output string) bool {
-	l := strings.ToLower(StripANSI(output))
-	return strings.Contains(l, "not found. available agents:") ||
-		(strings.Contains(l, "--agent") && strings.Contains(l, "not found"))
+	for _, line := range strings.Split(StripANSI(output), "\n") {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "not found. available agents:") {
+			return true
+		}
+		if strings.Contains(l, "--agent") && strings.Contains(l, "not found") {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentFellBackToDefault reports whether a harness SILENTLY ignored the agent selector and ran
@@ -381,7 +455,6 @@ func IsAgentNotFound(output string) bool {
 func AgentFellBackToDefault(output string) bool {
 	return strings.Contains(strings.ToLower(StripANSI(output)), "falling back to default agent")
 }
-
 
 func joinHarnesses(hs []Harness) string {
 	out := make([]string, len(hs))
@@ -570,4 +643,19 @@ func lastMeaningfulLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// noAgentSelectorNote explains WHY nothing carried the capability, which is the only actionable
+// half of that refusal: on the harness it can happen to, the cause is always that the agent
+// selector was suppressed after the harness refused it.
+func noAgentSelectorNote(b Binding, capErr error) string {
+	switch {
+	case b.NoAgentSelector:
+		return " (the agent selector was suppressed after this harness refused it, and this " +
+			"harness has no capability flag to fall back on)"
+	case capErr != nil:
+		return " (" + capErr.Error() + ")"
+	default:
+		return ""
+	}
 }

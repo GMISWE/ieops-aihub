@@ -15,7 +15,14 @@ import (
 // drain may have been running for hours when the binary on disk is replaced — so the two really
 // do meet across versions, and silence there would mean watch confidently reporting stale field
 // semantics.
-const SnapshotVersion = 1
+// Bumped to 2 by aihub#678: QueueState.ExternallyBlocked[].Blockers changed from a list of bare
+// id strings to a list of BlockerRef, because a blocker in a project the caller cannot open has
+// a slug and NO usable id — one value had to become two. That is an incompatible change in this
+// constant's own terms, so it is announced here rather than left for `polyforge watch` to render
+// half-understood. BlockerRef.UnmarshalJSON still ACCEPTS the old shape, deliberately: the
+// version warning is a disclosure, and on its own it would leave `--stop` unable to read (and so
+// unable to stop) a run started by the previous binary.
+const SnapshotVersion = 2
 
 // SnapshotFile is the snapshot's filename inside a run directory.
 const SnapshotFile = "snapshot.json"

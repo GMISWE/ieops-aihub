@@ -1329,13 +1329,29 @@ func runHarness(ctx context.Context, inv drain.Invocation, workDir, logPath stri
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		// Negative pid = the whole group. Errors are returned rather than swallowed so
-		// CommandContext reports them; ESRCH (the group already gone) is the ordinary race and
-		// CommandContext treats os.ErrProcessDone as success, which is why it is named above.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		// Negative pid = the whole group. ESRCH — the group exited and was reaped between
+		// ctx.Done() and this call — is the ordinary race, and it has to be TRANSLATED rather
+		// than returned: os/exec treats only os.ErrProcessDone as "nothing to cancel", and
+		// syscall.Errno.Is maps EACCES/EEXIST/ENOENT/ENOSYS and NOT ESRCH, so returning it raw
+		// makes Wait report `exec: canceling Cmd: no such process`. ClassifyStepDispatch then
+		// reads that as an ordinary step failure and the work item is blamed for a cancellation
+		// that worked perfectly.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return os.ErrProcessDone
 	}
 	// Long enough for a harness to flush and reap, short enough that a hung run's cleanup is not
-	// itself unbounded. After it, the group is SIGKILLed and the pipes are closed regardless.
+	// itself unbounded.
+	//
+	// ⚠️ What it does after that is NARROWER than "kills the tree", and the difference is worth
+	// stating because the obvious reading is wrong: os/exec's watchCtx calls
+	// `c.Process.Kill()` — SIGKILL to the LEADER only — and then closes the parent's I/O pipes.
+	// A grandchild that ignores the SIGTERM above and outlives its parent is not signalled again;
+	// it dies on SIGPIPE at its next write, or not at all. So this bounds how long runHarness can
+	// block, and the SIGTERM to the group above is what actually reaps the tree. The residual is
+	// a process that catches SIGTERM and declines to exit, which is a much smaller set than the
+	// "every descendant, always" that Go's default SIGKILL-the-leader left orphaned.
 	cmd.WaitDelay = harnessWaitDelay
 	if workDir != "" {
 		cmd.Dir = workDir
@@ -1593,6 +1609,14 @@ func lockBlockerFrom(err error) *drain.Blocker {
 	}
 	var details struct {
 		ConflictWith struct {
+			// 🔴 attempt_id is what makes the "is the holder one of MY OWN concurrent claims?"
+			// question answerable (drain.Blocker.AttemptID, aihub#678 ③(b)). The server has
+			// always sent it — all five ErrConflictLockTaken construction sites in
+			// internal/domain carry it — and this struct simply did not declare it, so the
+			// value arrived on the wire and was dropped here. A struct field missing from a
+			// json.Unmarshal target is silent by construction, which is why the gap survived:
+			// nothing failed, the Blocker just came back with one field permanently empty.
+			AttemptID    string `json:"attempt_id"`
 			ActorDisplay string `json:"actor_display"`
 			WorkItemSlug string `json:"work_item_slug"`
 		} `json:"conflict_with"`
@@ -1601,14 +1625,18 @@ func lockBlockerFrom(err error) *drain.Blocker {
 		_ = json.Unmarshal(apiErr.Details, &details)
 	}
 	b := &drain.Blocker{
-		Actor:    details.ConflictWith.ActorDisplay,
-		WorkItem: details.ConflictWith.WorkItemSlug,
+		AttemptID: details.ConflictWith.AttemptID,
+		Actor:     details.ConflictWith.ActorDisplay,
+		WorkItem:  details.ConflictWith.WorkItemSlug,
 		// The message is "resource <type>:<key> is already locked"; the key is the half an
 		// operator can act on. Read off the message because the details object carries the
 		// holder and not the resource.
 		Resource: lockResourceFromMessage(apiErr.Message),
 	}
-	if b.Actor == "" && b.WorkItem == "" && b.Resource == "" {
+	// AttemptID counts toward "the server named something". Leaving it out of this test would
+	// discard a refusal that named ONLY the attempt — which is the one field the retry decision
+	// is made on.
+	if b.AttemptID == "" && b.Actor == "" && b.WorkItem == "" && b.Resource == "" {
 		return nil
 	}
 	return b
@@ -1780,19 +1808,24 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 	if err != nil {
 		return st, err
 	}
-	ready := drain.IDSet(readySet)
 	for _, c := range queued {
-		if ready[c.ID] {
-			continue
-		}
 		if c.RequiresHumanSession != nil && !*c.RequiresHumanSession {
-			// Queued, drain-eligible by classification, and yet not in the server's ready set:
-			// something else holds it — a live blocking dependency whose status transition has
-			// not landed. It is not this bucket's business, and it is already covered by the
-			// blocked walk below whenever the status caught up. Left uncounted rather than
-			// guessed at, which is what it was before.
+			// Explicitly false: drain MAY execute this one. Either it is already in the ready
+			// set, or something else holds it — a live blocking dependency whose status
+			// transition has not landed — which is the blocked walk's business, not this
+			// bucket's. Left uncounted rather than guessed at, which is what it was before.
 			continue
 		}
+		// requires_human_session is true, or NULL. Neither satisfies the server's
+		// `requires_human_session = false`, so neither can appear in Executable and neither is
+		// drain's to run.
+		//
+		// ⚠️ Deliberately NOT also filtered against the ready set, and the reason is worth
+		// stating because the guard LOOKS prudent: `ready_only` already requires
+		// `requires_human_session = false`, so no work item reaching this line can be in it, and
+		// a membership test against a separately-paginated 200-row page would be inert at best
+		// and — if the two pages ever disagreed — a silent way for this bucket to under-report.
+		// The classification IS the predicate; a second, weaker one adds nothing to agree with.
 		st.NeedsHumanSession = append(st.NeedsHumanSession, c)
 	}
 
@@ -1831,9 +1864,10 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 					continue
 				}
 				if !q.blockerIsLive(ctx, ref, liveCache) {
-					// 🔴 Not a blocker at all. unblockDependentWI requeues a dependent WITHOUT
-					// deleting the wi_dependencies row (internal/domain/dependencies.go says so
-					// explicitly), so a finished blocker stays on the edge list forever. Since
+					// 🔴 Not a blocker at all. unblockDependentWI (internal/domain/run_attempts.go)
+					// requeues a dependent WITHOUT deleting the wi_dependencies row —
+					// DeleteDependency's own comment in internal/domain/dependencies.go spells
+					// that out — so a finished blocker stays on the edge list forever. Since
 					// AllInScope holds only NON-terminal work items, my own wrapped blocker is
 					// absent from inScope and used to be classified as somebody else's — so a
 					// work item waiting on one live blocker of mine reported BLOCKED_EXTERNAL

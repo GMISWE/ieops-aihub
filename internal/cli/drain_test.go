@@ -953,6 +953,22 @@ func TestLockBlockerFrom_ReadsTheHolderTheServerNamed(t *testing.T) {
 	if b.Actor != "someone" || b.WorkItem != "aihub#665" {
 		t.Errorf("blocker = %+v, want actor=someone work_item=aihub#665", b)
 	}
+	// 🔴 attempt_id, and this assertion is why the fixture above has always carried it.
+	//
+	// It is the field aihub#678 ③(b)'s whole decision rests on — "is the holder one of MY OWN
+	// concurrent claims, which will release this lock inside the round?" — and for one commit it
+	// was tested nowhere, because every ③(b) test lives in internal/drain where the fake hands
+	// the runner a Blocker with AttemptID already populated. This file is the only place the wire
+	// is crossed, and this test asserted Actor, WorkItem and Resource: every field EXCEPT the one
+	// the new mechanism needed. The details struct simply did not declare `attempt_id`, so the
+	// value arrived and was dropped, silently — a missing field in an Unmarshal target never
+	// fails — and the entire retry path was inert in production while every unit test was green.
+	// Found by a clean-context reviewer who added exactly this line.
+	if b.AttemptID != "ra_other" {
+		t.Errorf("blocker.AttemptID = %q, want ra_other. Without it heldByThisRun can never say "+
+			"yes, so a lock held by this run's own concurrent claim is written off for the whole "+
+			"run and the fix does nothing at all", b.AttemptID)
+	}
 	if b.Resource != "file_scope:aihub:aihub:internal/cli/drain.go" {
 		t.Errorf("blocker.Resource = %q — the key is the half an operator can act on", b.Resource)
 	}
@@ -977,6 +993,17 @@ func TestLockBlockerFrom_ReadsTheHolderTheServerNamed(t *testing.T) {
 	}
 	if got := lockBlockerFrom(partial); got == nil || got.Resource != "file_scope:aihub:x.go" {
 		t.Errorf("a conflict with no holder details lost its resource key: %+v", got)
+	}
+
+	// ...and a refusal that named ONLY the attempt must not be discarded as "unnamed". It is the
+	// single field the retry decision reads, so a nil here would throw away the whole signal.
+	attemptOnly := &client.APIError{
+		StatusCode: 409, Code: "CONFLICT_LOCK_TAKEN", Message: "locked",
+		Details: json.RawMessage(`{"conflict_with":{"attempt_id":"ra_mine"}}`),
+	}
+	if got := lockBlockerFrom(attemptOnly); got == nil || got.AttemptID != "ra_mine" {
+		t.Errorf("a conflict naming only the holding attempt returned %+v; that field alone is "+
+			"enough to decide whether this run will release the lock itself", got)
 	}
 }
 
@@ -1681,9 +1708,9 @@ func TestCompleteAttemptFailed_ForcesTerminationOfTheOpenStep(t *testing.T) {
 		t.Fatalf("CompleteAttempt(wrapped): %v", err)
 	}
 	if v, present := got["force_terminate_step"]; present && v == true {
-		t.Errorf("the WRAPPED body carried force_terminate_step. A step still in_progress at wrap "+
-			"time means the loop wrapped a work item whose last step never completed, and the 409 "+
-			"is the only thing that would say so; forcing it files a `failed` step row under a "+
+		t.Errorf("the WRAPPED body carried force_terminate_step. A step still in_progress at wrap " +
+			"time means the loop wrapped a work item whose last step never completed, and the 409 " +
+			"is the only thing that would say so; forcing it files a `failed` step row under a " +
 			"`wrapped` attempt and calls that success")
 	}
 }

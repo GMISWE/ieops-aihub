@@ -168,6 +168,40 @@ type Runner struct {
 	// successful claim and removed when executeWorkItem returns, whatever the outcome — see
 	// heldByThisRun.
 	liveAttempts map[string]bool
+	// liveCandidates holds the ids AND slugs of the work items currently being executed,
+	// registered BEFORE the claim goes out. It is the half of heldByThisRun that is not subject
+	// to a race with the server's own lock acquisition; see that function.
+	liveCandidates map[string]bool
+}
+
+// registerCandidate records a work item this run is about to claim, by BOTH id and slug, because
+// the 409's `conflict_with.work_item_slug` is a slug while the candidate list is keyed on ids and
+// either may be what a caller compares. Returns a function that forgets it.
+func (r *Runner) registerCandidate(c Candidate) func() {
+	keys := make([]string, 0, 2)
+	for _, k := range []string{c.ID, c.Slug} {
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return func() {}
+	}
+	r.mu.Lock()
+	if r.liveCandidates == nil {
+		r.liveCandidates = map[string]bool{}
+	}
+	for _, k := range keys {
+		r.liveCandidates[k] = true
+	}
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		for _, k := range keys {
+			delete(r.liveCandidates, k)
+		}
+		r.mu.Unlock()
+	}
 }
 
 // registerAttempt records an attempt this run just claimed. Returns a function that forgets it.
@@ -199,19 +233,37 @@ func (r *Runner) registerAttempt(id string) func() {
 	}
 }
 
-// heldByThisRun reports whether a lock refusal names an attempt this run currently holds.
+// heldByThisRun reports whether a lock refusal names something this run is currently executing —
+// and so something that will release the lock without anybody's help.
 //
-// A nil Blocker, or one the server could not name, answers false: the holder lookup is
-// best-effort on the server side (internal/domain/resource_events.go says a refusal reported
-// without a name is still a refusal), and "I could not tell" must fall to the conservative
-// policy, which is the whole-run skip.
+// It consults TWO registries, and the second one is not redundant: it closes a race the first
+// cannot.
+//
+//	liveAttempts    the holder's attempt id, known only AFTER that worker's claim returned
+//	liveCandidates  the holder's work item, registered BEFORE this worker's claim goes out
+//
+// The race: the server takes worker A's lock and refuses worker B inside the same request window,
+// so B can be back with a 409 naming A's attempt before A's claim has returned and registered it.
+// Keyed on the attempt alone, that refusal reads as foreign and the work item is written off for
+// the whole run — non-deterministically, which is the worst way for this to be wrong. The work
+// item id and slug are known from the candidate list, so registering those at the top of
+// executeWorkItem removes the window entirely; `conflict_with.work_item_slug` is the matching
+// field, and it travels in the same payload as the attempt id.
+//
+// A nil Blocker, or one the server could not name at all, answers false: the holder lookup is
+// best-effort server-side (internal/domain/resource_events.go says a refusal reported without a
+// name is still a refusal), and "I could not tell" must fall to the conservative policy, which is
+// the whole-run skip.
 func (r *Runner) heldByThisRun(b *Blocker) bool {
-	if b == nil || b.AttemptID == "" {
+	if b == nil {
 		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.liveAttempts[b.AttemptID]
+	if b.AttemptID != "" && r.liveAttempts[b.AttemptID] {
+		return true
+	}
+	return b.WorkItem != "" && r.liveCandidates[b.WorkItem]
 }
 
 // RunReport is what a completed drain run has to say for itself.
@@ -285,8 +337,14 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 	// the server keeps returning it as executable; without this set the next round freezes it
 	// again, claims again, is refused again, and the run never terminates — a busy-wait wearing
 	// a round loop's clothing, and precisely the deadlock temptation the ruling warns about
-	// ("等待是死锁的温床"). Holding the skip for the whole run is also the honest scope: the
-	// holder is another live attempt, and nothing this run does will end it.
+	// ("等待是死锁的温床").
+	//
+	// ⚠️ Holding the skip FOR THE WHOLE RUN rests on a premise that used to be stated as fact and
+	// is only usually true: "the holder is another live attempt, and nothing this run does will
+	// end it". At --max-parallel>=2 the holder can be one of this run's OWN concurrent claims,
+	// which ends within the round — see Outcome.RetryNextRound and Blocker.AttemptID. Such a work
+	// item is re-offered next round instead of being written off. Nothing waits on a lock either
+	// way; the deadlock argument is untouched.
 	skipped := map[string]bool{}
 
 	for {
@@ -437,8 +495,11 @@ func (r *Runner) Run(ctx context.Context) (RunReport, error) {
 
 	if terminal == TerminalBlockedExternal {
 		r.notifyExternalBlocks(ctx, queue.ExternallyBlocked)
-		r.reportHumanSessionNeeded(queue.NeedsHumanSession)
 	}
+	// Reported on EVERY ending, not only the one it can cause. A run that also failed something
+	// ends FAILED, and these work items would then be named nowhere at all — the report prints a
+	// count, and a count of work items nobody can execute is not something anyone can act on.
+	r.reportHumanSessionNeeded(queue.NeedsHumanSession)
 
 	var totals Totals
 	r.mu.Lock()
@@ -525,6 +586,10 @@ func (r *Runner) executeRound(ctx context.Context, frozen []Candidate) []Outcome
 // cannot be truncated by a shell that is not there.
 func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 	res := Outcome{Candidate: c, LogDir: WILogDir(r.RunDir, c.Slug)}
+
+	// BEFORE the claim, not after: a sibling worker's lock refusal can come back naming this
+	// work item while this claim is still in flight. See heldByThisRun.
+	defer r.registerCandidate(c)()
 
 	claim, blocker, err := r.Claim(ctx, c.ID, r.NewULID())
 	switch {
@@ -815,11 +880,20 @@ func (r *Runner) dispatchWithFallback(ctx context.Context, req DispatchRequest) 
 		switch verdict {
 		case StepOK:
 			if AgentFellBackToDefault(out.Output) {
-				// Write-capable roles only: BuildStepInvocation refuses a read-only role on the
-				// one harness measured to do this, so reaching here means the capability was
-				// never at stake — only the role's prompt and model tier were discarded. Said
-				// out loud regardless, because a selector that quietly does nothing is exactly
-				// how this defect class arrived.
+				if req.ReadOnly {
+					// 🔴 The capability was NOT applied. On the harness measured to do this the
+					// agent file is the only carrier of read_only (render_opencode.go's
+					// `permission: edit: deny`), so a silent fall back to the default agent means
+					// this read-only step just ran WRITE-CAPABLE — the exact defect aihub#678 ①
+					// is about, and the reason this cannot be a log line. Failing the step is the
+					// safe direction: the work is redoable, an unreviewed edit made by a reviewer
+					// is not.
+					return out, fmt.Errorf("step agent for read-only role %q was not applied: %s "+
+						"could not find its agent and silently ran the DEFAULT (write-capable) "+
+						"agent instead. Generate this harness's agent files with "+
+						"`polyforge roles generate %s`; see %s",
+						req.Role, ch.Harness, ch.Harness, req.LogPath)
+				}
 				r.Logf("drain: %s ignored the agent selector for role %q and ran its DEFAULT agent; "+
 					"the step ran with the wrong model tier and prompt. Generate this harness's "+
 					"agent files (`polyforge roles generate`) to fix it.", ch.Harness, req.Role)
@@ -1097,9 +1171,29 @@ func (r *Runner) update(fn func(*Snapshot)) {
 	cp.Active = append([]ActiveWI(nil), r.snapshot.Active...)
 	cp.Recent = append([]Outcome(nil), r.snapshot.Recent...)
 	cp.PreflightRejected = append([]PreflightVerdict(nil), r.snapshot.PreflightRejected...)
-	cp.Queue.ExternallyBlocked = append([]BlockedWorkItem(nil), r.snapshot.Queue.ExternallyBlocked...)
+	cp.Queue.ExternallyBlocked = copyBlocked(r.snapshot.Queue.ExternallyBlocked)
+	cp.Queue.NeedsHumanSession = append([]Candidate(nil), r.snapshot.Queue.NeedsHumanSession...)
 	r.mu.Unlock()
 	r.Publish(&cp)
+}
+
+// copyBlocked deep-copies the externally-blocked list INCLUDING each entry's Blockers slice.
+//
+// A one-level `append([]BlockedWorkItem(nil), ...)` was enough while Blockers was built once and
+// never touched again; it stopped being enough when the element type gained a slice of its own,
+// because the copy's entries would still share that backing array with the live snapshot. The
+// invariant this whole function promises is "shares NOTHING with the live one", and a copy that
+// is one level short is exactly the shape `-race` finds months later, inside encoding/json.
+func copyBlocked(in []BlockedWorkItem) []BlockedWorkItem {
+	if in == nil {
+		return nil
+	}
+	out := make([]BlockedWorkItem, len(in))
+	for i, b := range in {
+		b.Blockers = append([]BlockerRef(nil), b.Blockers...)
+		out[i] = b
+	}
+	return out
 }
 
 func (r *Runner) setActive(a ActiveWI) {

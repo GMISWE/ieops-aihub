@@ -484,17 +484,44 @@ func TestBuildStepInvocation_TheRolesCapabilityReachesEveryHarness(t *testing.T)
 		}
 	})
 
-	t.Run("opencode refuses a read-only role rather than widening it", func(t *testing.T) {
-		// Measured 2026-09-14, opencode 1.18.30: `--agent step-nosuchrole` prints
-		// `! agent "step-nosuchrole" not found. Falling back to default agent` and CARRIES ON with
-		// the write-capable default. So on opencode the agent file is the only carrier of the
-		// read-only capability AND the mechanism selecting it fails OPEN — and roles.
-		// CompileCapability refuses opencode outright anyway (aihub#653 owns that shape). Running
-		// the step there would be the original defect with a command line that looks fixed.
-		if _, err := BuildStepInvocation(Channel{Harness: HarnessOpenCode}, ro, "P"); !errors.Is(err, ErrNoReadOnlyCapability) {
-			t.Fatalf("opencode built a read-only step invocation (err=%v). It cannot express the "+
-				"capability, so the step would run WRITE-CAPABLE", err)
+	t.Run("opencode carries read_only in the agent file, and refuses only when it cannot", func(t *testing.T) {
+		// ⚠️ THIS SUBTEST ASSERTED THE OPPOSITE in the first draft of this change, and a
+		// clean-context reviewer was right to reject it. The premise was "roles.CompileCapability
+		// refuses opencode, therefore opencode cannot express read_only". False: it is excluded
+		// from SupportedHarnesses because its expression is a different SHAPE that lives in the
+		// same package — render_opencode.go's opencodePermissionBlock writes
+		// `permission:\n  edit: deny` into the generated agent file, and roles/dispatch.go says
+		// so in as many words. Refusing outright would have FAILED every work item with a review
+		// step on a correctly configured `--channel=opencode` run.
+		oc := stepArgsOf(t, Channel{Harness: HarnessOpenCode}, ro)
+		if !hasPair(oc, "--agent", "step-reviewer") {
+			t.Fatalf("opencode read-only args %v select no agent. The agent file is the ONLY "+
+				"carrier of read_only here, so not selecting it IS the widening", oc)
 		}
+
+		// What IS true is that the carrier fails open — measured, `--agent step-nosuchrole`
+		// prints `! agent "…" not found. Falling back to default agent` and runs the
+		// write-capable default. Two defences, and this is the second: when the selector is
+		// SUPPRESSED (the stale-plugin retry path), opencode has nothing left, so the build is
+		// refused rather than producing an unrestricted command line that looks restricted.
+		// The first defence is after the fact, in dispatchWithFallback.
+		suppressed := Binding{Role: readOnlyRole, ReadOnly: true, NoAgentSelector: true}
+		if _, err := BuildStepInvocation(Channel{Harness: HarnessOpenCode}, suppressed, "P"); !errors.Is(err, ErrNoReadOnlyCapability) {
+			t.Errorf("opencode built a read-only invocation with the agent selector suppressed "+
+				"(err=%v). Nothing on that command line carries the capability", err)
+		}
+		// The same suppression on claude is FINE, because --disallowedTools survives it. That is
+		// the whole point of carrying both there, and the negative control for the guard above.
+		cc := stepArgsOf(t, Channel{Harness: HarnessClaude},
+			Binding{Role: readOnlyRole, ReadOnly: true, NoAgentSelector: true})
+		if has(cc, "--agent") {
+			t.Errorf("claude args %v still carry --agent under NoAgentSelector", cc)
+		}
+		if !hasPair(cc, "--disallowedTools", "Edit,Write,NotebookEdit") {
+			t.Errorf("claude args %v lost the capability along with the selector; the retry is "+
+				"supposed to drop only the selector", cc)
+		}
+
 		// A write-capable role is fine there, and still gets the selector.
 		w := stepArgsOf(t, Channel{Harness: HarnessOpenCode}, rw)
 		if !hasPair(w, "--agent", "step-executor") {
@@ -614,6 +641,15 @@ func TestIsAgentNotFound_AndTheSilentFallback(t *testing.T) {
 		"error: file not found: internal/x.go",
 		"REVIEW_RESULT: FAIL",
 		"",
+		// 🔴 The one that made the matcher line-scoped. drain's first customer is aihub's own
+		// work items, and THIS FILE contains the string "--agent": a healthy code_change step
+		// that greps or diffs it and separately reports a missing file would, under a
+		// whole-output scan, be re-run with its agent selector suppressed — at the wrong model
+		// tier, for no reason. The same unanchored-substring shape DetectPause documents as
+		// dangerous, caught before it shipped rather than after.
+		"reading internal/drain/channel.go: args = append(args, \"--agent\", agentID)\n" +
+			"go: internal/nope.go: file not found\n",
+		"$ rg -- --agent\ninternal/drain/channel.go:250\n\nerror: config not found\n",
 	} {
 		if IsAgentNotFound(ordinary) {
 			t.Errorf("an ordinary failure was read as an agent refusal: %q", ordinary)

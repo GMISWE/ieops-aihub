@@ -1,6 +1,9 @@
 package drain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // RoundTally is what one round did, and it is the only input the convergence decision takes.
 // Keeping it a plain struct (rather than letting ClassifyRound reach back into the runner) is
@@ -83,6 +86,44 @@ func (b BlockerRef) Display() string {
 // project the caller cannot open: there is no id to address, and addressing the sentinel is how
 // the 404-per-round came about.
 func (b BlockerRef) Notifiable() bool { return b.ID != "" }
+
+// UnmarshalJSON accepts BOTH this struct and the bare id string BlockedWorkItem.Blockers used to
+// hold, so a snapshot written by an older binary still parses.
+//
+// This is not defensive politeness; without it the shape change breaks the one command that
+// exists to stop a runaway scheduler. `polyforge drain --stop` and `polyforge watch` read
+// snapshot.json through ReadSnapshot, which returns an error on ANY unmarshal failure — and an
+// unattended run and its observer meet across versions BY CONSTRUCTION (Snapshot's own doc:
+// "drain may have been running for hours when the binary on disk is replaced"). A run started by
+// yesterday's binary that hit an external block writes `"blockers":["wi_x"]`; a new binary would
+// fail to parse it, and `--stop` exits 1 without signalling anything. SnapshotVersion is bumped
+// alongside this so watch still SAYS the shape changed; the version warning is a disclosure, not
+// a parser, and only this makes the file readable.
+func (b *BlockerRef) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		// The legacy value was whatever ObserveQueue had put in the list: an id for an
+		// accessible blocker, and — this is the bug being fixed — the literal "hidden" sentinel
+		// for one that was not. Reading it back as an ID would restore the 404 target, so the
+		// sentinel is stripped here too and survives only as something to display.
+		*b = BlockerRef{ID: s, Slug: s}
+		if s == "hidden" {
+			b.ID = ""
+		}
+		return nil
+	}
+	// A distinct type, so this method is not called recursively on the struct form.
+	type blockerRefJSON BlockerRef
+	var v blockerRefJSON
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*b = BlockerRef(v)
+	return nil
+}
 
 // BlockedWorkItem is one in-scope work item held up by dependencies OUTSIDE the scope, together
 // with the blockers responsible. It exists so the BLOCKED_EXTERNAL notification has somewhere to

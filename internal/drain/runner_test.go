@@ -38,6 +38,11 @@ type fakeWI struct {
 	reviewVerdict string
 	// pauseAtStep makes the named step's agent report a pause.
 	pauseAtStep string
+	// lockedByRunning names another work item: while THAT one is `running`, claiming this one
+	// loses a lock race to its attempt. It is how the fake reproduces a lock refusal whose holder
+	// is one of THIS RUN's own concurrent claims (aihub#678 ③(b)), which is the case the
+	// whole-run skip gets wrong.
+	lockedByRunning string
 }
 
 type fakeHub struct {
@@ -54,6 +59,14 @@ type fakeHub struct {
 	// claimAttempts counts EVERY call to claim(), successful or refused. It is what proves
 	// "skip, never retry" rather than merely "never succeeded twice".
 	claimAttempts map[string]int
+
+	// gate/gateOnce serialise the one genuinely concurrent scenario in this file: a worker whose
+	// first step blocks until a SIBLING worker has lost a lock race to its attempt. Without it
+	// "the holder is my own live attempt" is a race the test would only sometimes reach.
+	gate     chan struct{}
+	gateOnce sync.Once
+	// holdFirstStepOf names the work item whose first dispatch waits on the gate.
+	holdFirstStepOf string
 }
 
 func newFakeHub(steps []string, wis ...fakeWI) *fakeHub {
@@ -148,11 +161,11 @@ func (h *fakeHub) observe(context.Context) (QueueState, error) {
 
 // outsidersLocked returns the blockers of w that are outside the scope, which is what the
 // production ObserveQueue reports so the notification has somewhere to land.
-func (h *fakeHub) outsidersLocked(w *fakeWI, inScope map[string]bool) []string {
-	var out []string
+func (h *fakeHub) outsidersLocked(w *fakeWI, inScope map[string]bool) []BlockerRef {
+	var out []BlockerRef
 	for _, b := range w.blockedBy {
 		if !inScope[b] {
-			out = append(out, b)
+			out = append(out, BlockerRef{ID: b, Slug: b})
 		}
 	}
 	return out
@@ -167,8 +180,19 @@ func (h *fakeHub) claim(_ context.Context, id, _ string) (*ClaimInfo, *Blocker, 
 		return nil, nil, fmt.Errorf("no such work item %s", id)
 	}
 	if w.lockHolder != "" {
-		return nil, &Blocker{WorkItem: w.lockHolder, Actor: "someone.else", Resource: "internal/x.go"},
+		return nil, &Blocker{WorkItem: w.lockHolder, Actor: "someone.else", Resource: "internal/x.go",
+				AttemptID: "ra_foreign"},
 			fmt.Errorf("%w: held by %s", ErrLockTaken, w.lockHolder)
+	}
+	if other, ok := h.wis[w.lockedByRunning]; ok && other.status == "running" {
+		// The attempt id is the SAME one claim() handed out for `other` — which is what makes
+		// this refusal distinguishable from a foreign one, and the whole point of the fix.
+		if h.gate != nil {
+			h.gateOnce.Do(func() { close(h.gate) })
+		}
+		return nil, &Blocker{WorkItem: other.Slug, Actor: "me", Resource: "internal/x.go",
+				AttemptID: "ra_" + other.ID},
+			fmt.Errorf("%w: held by %s", ErrLockTaken, other.ID)
 	}
 	if w.status != "queued" {
 		return nil, nil, fmt.Errorf("work item %s is %s, not queued", id, w.status)
@@ -203,7 +227,12 @@ func (h *fakeHub) dispatch(_ context.Context, req DispatchRequest) (DispatchResu
 		}
 		w.spawns = nil
 	}
+	hold := h.gate != nil && h.holdFirstStepOf == req.Claim.WorkItemID && req.Index == 1
 	h.mu.Unlock()
+
+	if hold {
+		<-h.gate
+	}
 
 	switch {
 	case w.failAtStep == req.Step.ID:
@@ -1395,5 +1424,527 @@ func TestRun_PublishNeverSeesAnAliasedSlice(t *testing.T) {
 
 	if _, err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// ─── aihub#678 ───────────────────────────────────────────────────────────────────────────────
+
+// TestRun_TheResolvedRoleReachesTheCommandLine is finding ① at the loop seam.
+//
+// The loop always resolved the role correctly — drainResolveRole calls engine.ResolveRole against
+// the real catalog, and its own comment promises a review-shaped step "never silently to the
+// write-capable executor". It then put the answer on DispatchRequest and NOTHING READ IT: three
+// grep hits over the non-test sources, all writes. This asserts the two halves that were
+// disconnected — the loop hands the role down, and the command line built from it is the
+// read-only one — because either half alone can be right while a `code_review` step still runs
+// with edits auto-approved.
+//
+// Mutants watched RED (each `go build`-checked first):
+//   - executeWorkItem passing Role:"" / ReadOnly:false into DispatchRequest
+//   - DispatchRequest.Binding() dropping ReadOnly
+//   - the --disallowedTools append in channel.go (its own arm)
+func TestRun_TheResolvedRoleReachesTheCommandLine(t *testing.T) {
+	h := newFakeHub([]string{"code_change", "code_review"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
+	r := runnerFor(h, Budget{})
+	// The production three-tier fallback, in miniature: review-shaped step ids are the read-only
+	// reviewer, everything else the write-capable executor.
+	r.ResolveRole = func(sid string) (string, bool, error) {
+		if engine.IsReviewStep(sid) {
+			return "reviewer", true, nil
+		}
+		return "executor", false, nil
+	}
+
+	seen := map[string]DispatchRequest{}
+	var mu sync.Mutex
+	inner := h.dispatch
+	r.Dispatch = func(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
+		mu.Lock()
+		seen[req.Step.ID] = req
+		mu.Unlock()
+		return inner(ctx, req)
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	review, ok := seen["code_review"]
+	if !ok {
+		t.Fatalf("the review step was never dispatched; seen=%v", seen)
+	}
+	if review.Role != "reviewer" || !review.ReadOnly {
+		t.Fatalf("the review step reached the dispatcher as role=%q read_only=%v — the loop resolved "+
+			"it and then lost it", review.Role, review.ReadOnly)
+	}
+	// The seam the production dispatcher uses. A Binding that dropped either field would build
+	// the same write-capable command line the defect produced.
+	if b := review.Binding(); b.Role != "reviewer" || !b.ReadOnly {
+		t.Fatalf("Binding() = %+v, want the resolved role and its capability", b)
+	}
+
+	inv, err := BuildStepInvocation(Channel{Harness: HarnessClaude}, review.Binding(), review.Prompt)
+	if err != nil {
+		t.Fatalf("BuildStepInvocation for the review step: %v", err)
+	}
+	if !hasPair(inv.Args, "--disallowedTools", "Edit,Write,NotebookEdit") {
+		t.Errorf("the review step's command line is %v. It denies nothing, so the reviewer can — "+
+			"and under --permission-mode acceptEdits WILL, without asking — modify the tree it "+
+			"is reviewing", inv.Args)
+	}
+	if !hasPair(inv.Args, "--agent", "polyforge:step-reviewer") {
+		t.Errorf("the review step's command line is %v, selecting no reviewer agent", inv.Args)
+	}
+
+	// Negative control: the write step must NOT be restricted, or it completes nothing.
+	code, ok := seen["code_change"]
+	if !ok {
+		t.Fatal("the code_change step was never dispatched")
+	}
+	if code.ReadOnly {
+		t.Fatal("code_change reached the dispatcher as read-only")
+	}
+	codeInv, err := BuildStepInvocation(Channel{Harness: HarnessClaude}, code.Binding(), code.Prompt)
+	if err != nil {
+		t.Fatalf("BuildStepInvocation for the code step: %v", err)
+	}
+	if has(codeInv.Args, "--disallowedTools") {
+		t.Errorf("the write step's command line %v denies Edit/Write/NotebookEdit", codeInv.Args)
+	}
+}
+
+// TestRun_AChannelThatCannotExpressAReadOnlyRoleIsDemoted covers the other side of ①: what happens
+// when the harness at the head of the candidate list has no read-only expression at all.
+//
+// The alternative — running the step anyway — is the original defect with a command line that
+// looks fixed, so the run falls to the next candidate instead. The demotion is for the whole run
+// rather than for this step, because a read-only role appears in nearly every step graph.
+//
+// Mutant watched: classifying ErrNoReadOnlyCapability as StepFailed (i.e. deleting the
+// StepChannelUnsuitable branch) makes the work item FAIL instead of falling through.
+func TestRun_AChannelThatCannotExpressAReadOnlyRoleIsDemoted(t *testing.T) {
+	h := newFakeHub([]string{"code_review"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
+	r := runnerFor(h, Budget{})
+	r.Channels = []Channel{{Harness: HarnessOpenCode}, {Harness: HarnessClaude}}
+	r.ResolveRole = func(string) (string, bool, error) { return "reviewer", true, nil }
+
+	var used []Harness
+	var mu sync.Mutex
+	r.Dispatch = func(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
+		// The PRODUCTION dispatcher's first act, reproduced: build the command, and report a
+		// refusal to build it rather than running something else.
+		if _, err := BuildStepInvocation(req.Channel, req.Binding(), req.Prompt); err != nil {
+			return DispatchResult{ExitErr: err}, err
+		}
+		mu.Lock()
+		used = append(used, req.Channel.Harness)
+		mu.Unlock()
+		return DispatchResult{Output: "reviewed\n<!-- REVIEW_RESULT: PASS -->\ndone\n"}, nil
+	}
+
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(used) != 1 || used[0] != HarnessClaude {
+		t.Fatalf("the read-only step ran on %v, want claude only: opencode cannot express the "+
+			"capability, so running there would widen it exactly as before", used)
+	}
+	if report.Terminal != TerminalCompleted {
+		t.Errorf("terminal = %s (%+v); falling to a usable channel is ordinary control flow, not "+
+			"a failure of the work item", report.Terminal, report.Outcomes)
+	}
+}
+
+// TestRun_ARefusedAgentSelectorRetriesWithoutIt keeps the fix for ① from becoming an outage.
+//
+// `claude --agent polyforge:step-explorer` exits 1 on a machine whose installed plugin predates
+// the five-role catalog — which is this machine today: the plugin cache ships step-executor.md and
+// step-reviewer.md, the repo has all five. Failing the step there would trade a silent capability
+// widening for a hard failure of every explorer, designer and operator step. The retry drops the
+// selector, KEEPS the capability flags, and says so.
+//
+// Mutant watched: deleting the StepAgentSelectorRefused branch makes the work item fail.
+func TestRun_ARefusedAgentSelectorRetriesWithoutIt(t *testing.T) {
+	h := newFakeHub([]string{"prepare_context"}, fwi("a", "normal", "2026-01-01T00:00:00Z"))
+	r := runnerFor(h, Budget{})
+	r.ResolveRole = func(string) (string, bool, error) { return "explorer", true, nil }
+
+	var attempts []bool // NoAgentSelector, per attempt
+	var logs []string
+	var mu sync.Mutex
+	r.Logf = func(f string, a ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(f, a...))
+		mu.Unlock()
+	}
+	r.Dispatch = func(_ context.Context, req DispatchRequest) (DispatchResult, error) {
+		mu.Lock()
+		attempts = append(attempts, req.NoAgentSelector)
+		mu.Unlock()
+		if !req.NoAgentSelector {
+			// Verbatim shape of what claude 2.1.258 prints, measured on this machine.
+			return DispatchResult{Output: "--agent 'polyforge:step-explorer' not found. " +
+				"Available agents: claude, Explore, polyforge:step-executor, polyforge:step-reviewer\n"},
+				fmt.Errorf("exit status 1")
+		}
+		return DispatchResult{Output: "explored\nsummary\n"}, nil
+	}
+
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(attempts) != 2 || attempts[0] || !attempts[1] {
+		t.Fatalf("dispatch attempts (NoAgentSelector per attempt) = %v, want [false true]: one "+
+			"try with the selector, then exactly one without", attempts)
+	}
+	if report.Terminal != TerminalCompleted {
+		t.Errorf("terminal = %s (%+v): a stale plugin install is not the work item's fault",
+			report.Terminal, report.Outcomes)
+	}
+	// The degradation must be disclosed. A silent retry would hide that the step ran at the
+	// wrong model tier with the wrong prompt, which is the half the selector carries.
+	var told bool
+	for _, l := range logs {
+		if strings.Contains(l, "WITHOUT the agent selector") {
+			told = true
+		}
+	}
+	if !told {
+		t.Errorf("the retry was not reported. logs=%v", logs)
+	}
+
+	// Negative control: an ordinary step failure must NOT be retried this way, or every failing
+	// step would be run twice on a different command line.
+	h2 := newFakeHub([]string{"prepare_context"}, fwi("b", "normal", "2026-01-01T00:00:00Z"))
+	r2 := runnerFor(h2, Budget{})
+	var n int
+	r2.Dispatch = func(_ context.Context, _ DispatchRequest) (DispatchResult, error) {
+		n++
+		return DispatchResult{Output: "--- FAIL: TestThing\n"}, fmt.Errorf("exit status 1")
+	}
+	if _, err := r2.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("an ordinary step failure was dispatched %d times, want 1", n)
+	}
+}
+
+// TestRun_ALockHeldByThisRunsOwnAttemptIsRetriedNextRound is finding ③(b).
+//
+// "Skip, never retry" is the right policy and its stated reason is "the holder is another live
+// attempt, and nothing this run does will end it". At --max-parallel>=2 that reason can be FALSE:
+// worker A claims wi1, worker B loses the race on wi2 to A's own attempt, A wraps and releases the
+// lock — and wi2 has already been written off for the rest of the run. The next round filters it
+// out, finds nothing, and reports StopQueueDrained while the same run's final observation says
+// executable=1: an early stop that contradicts its own report.
+//
+// The discriminator is real rather than invented: every CONFLICT_LOCK_TAKEN aihub raises carries
+// `conflict_with.attempt_id`. Nothing waits on a lock here; the work item is simply offered again
+// next round, which is when the holder is gone.
+//
+// Mutants watched RED:
+//   - `skipped[o.Candidate.ID] = true` unconditionally on ResultLockBlocked (the pre-fix line)
+//   - heldByThisRun returning false always
+//   - registerAttempt's deregistration removed (turns the retry into an unbounded loop, caught by
+//     the claim-count assertion below)
+func TestRun_ALockHeldByThisRunsOwnAttemptIsRetriedNextRound(t *testing.T) {
+	wi1 := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
+	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
+	wi2.lockedByRunning = "wi1"
+	h := newFakeHub([]string{"code_change"}, wi1, wi2)
+	h.gate = make(chan struct{})
+	h.holdFirstStepOf = "wi1" // wi1 does not finish until wi2 has lost the race to its attempt
+
+	r := runnerFor(h, Budget{MaxParallel: 2, MaxRounds: 5})
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if report.Totals.Wrapped != 2 {
+		t.Fatalf("wrapped = %d, want 2. wi2's lock was held by THIS RUN's own attempt, so it was "+
+			"free one round later; skipping it for the whole run strands work the run could do. "+
+			"outcomes=%+v", report.Totals.Wrapped, report.Outcomes)
+	}
+	if report.StopReason != StopQueueDrained {
+		t.Errorf("stop reason = %s, want queue_drained", report.StopReason)
+	}
+	if report.Terminal != TerminalCompleted {
+		t.Errorf("terminal = %s, want COMPLETED", report.Terminal)
+	}
+	// Bounded: exactly one refusal and one success, never a busy-wait.
+	if n := h.claimAttempts["wi2"]; n != 2 {
+		t.Errorf("wi2 was claimed %d times, want exactly 2 (one refusal, one success). More than "+
+			"that is the busy-wait 'skip, never retry' exists to prevent", n)
+	}
+
+	// Negative control, and the half that must not regress: a FOREIGN holder is still skipped for
+	// the whole run. The fake gives that refusal attempt id "ra_foreign", which this run never
+	// claimed.
+	h2 := newFakeHub([]string{"code_change"}, func() fakeWI {
+		w := fwi("x", "normal", "2026-01-01T00:00:00Z")
+		w.lockHolder = "somebody-else#4"
+		return w
+	}())
+	rep2, err := runnerFor(h2, Budget{MaxRounds: 5}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := h2.claimAttempts["x"]; n != 1 {
+		t.Errorf("a work item held by a FOREIGN attempt was claimed %d times, want 1: waiting on "+
+			"a lock inside a scheduler that holds locks is how a deadlock is built", n)
+	}
+	if rep2.StopReason != StopNothingClaimable {
+		t.Errorf("stop reason = %s, want nothing_claimable", rep2.StopReason)
+	}
+}
+
+// TestRun_AnOwnAttemptThatNEVEREndsStopsBeingRetryable is the bound on the retry above, and it is
+// the reason registerAttempt deregisters on EVERY exit rather than only on wrap.
+//
+// A paused or cancelled attempt is left claimed and still holding its locks — so it looks exactly
+// like one of this run's own attempts, while being the one case where nothing this run does will
+// ever release it. If such an attempt stayed registered, its lock-blocked victim would be judged
+// "retry next round" every round forever: a busy-wait wearing a round loop's clothing, which is
+// precisely what aihub#640 `two_kinds_of_blocking` warns about ("等待是死锁的温床"). Deregistering
+// on return makes the live set empty at every round boundary, so the only retryable refusal is one
+// raised by a SIBLING WORKER IN THE SAME ROUND — and that sibling, having claimed, made progress.
+//
+// Mutant watched RED: making registerAttempt's returned function a no-op. Without the bound, wi2
+// is re-claimed on every one of the five permitted rounds.
+func TestRun_AnOwnAttemptThatNEVEREndsStopsBeingRetryable(t *testing.T) {
+	wi1 := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
+	// wi1 pauses mid-step: the loop returns WITHOUT calling pf_complete_attempt (§0e), so the
+	// attempt stays claimed and its locks stay held, for the rest of the run and beyond it.
+	wi1.pauseAtStep = "code_change"
+	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
+	wi2.lockedByRunning = "wi1"
+
+	h := newFakeHub([]string{"code_change"}, wi1, wi2)
+	h.gate = make(chan struct{})
+	h.holdFirstStepOf = "wi1"
+
+	const rounds = 5
+	r := runnerFor(h, Budget{MaxParallel: 2, MaxRounds: rounds})
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Two claims is the correct count and the assertion is written to say why, because "1" is
+	// wrong and "5" is the defect. The first refusal happens while wi1's attempt really is live,
+	// so deferring is right; by the second round that attempt has returned (paused), so it is no
+	// longer this run's to finish and wi2 is written off permanently. The bound is what matters:
+	// it must not scale with the number of rounds.
+	if n := h.claimAttempts["wi2"]; n > 2 {
+		t.Errorf("wi2 was claimed %d times over %d rounds. Its lock is held by a PAUSED attempt of "+
+			"this run — claimed, locks held, and never coming back — so a per-round retry is a "+
+			"busy-wait that only stops when the round budget runs out", n, rounds)
+	}
+	// The stop reason is the sharper half of the same discriminator: the loop must run out of
+	// things to try, not out of ROUNDS. max_rounds here means it was still retrying when the
+	// budget cut it off — i.e. it would have kept going forever without one.
+	if report.StopReason == StopMaxRounds {
+		t.Errorf("stop reason = %s: the loop was still retrying wi2 when the round budget ran out. "+
+			"Without a round budget this run does not terminate", report.StopReason)
+	}
+}
+
+// TestRun_ACancelledWorkItemNeedsAHumanNotALaterRun is finding ③(c).
+//
+// A `--stop` or Ctrl-C that lands mid-step used to end the run IDLE, exit 10 — "come back later,
+// no human needed". What it actually leaves is an attempt CLAIMED, status `running`, holding its
+// locks, and drain never picks a running work item back up: Executable asks the server for
+// `ready_only`, which is `queued`. So running it again makes no progress whatsoever, and the
+// machine-readable half of the notification design said the opposite of the prose disclosure
+// `--stop` prints two screens away.
+//
+// Mutant watched: reverting NeedsHuman to `r == ResultFailed` turns the exit-code assertion red.
+func TestRun_ACancelledWorkItemNeedsAHumanNotALaterRun(t *testing.T) {
+	h := newFakeHub([]string{"code_change", "commit_and_pr"},
+		fwi("a", "normal", "2026-01-01T00:00:00Z"))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := runnerFor(h, Budget{})
+	inner := h.dispatch
+	r.Dispatch = func(dctx context.Context, req DispatchRequest) (DispatchResult, error) {
+		out, err := inner(dctx, req)
+		cancel()
+		return out, err
+	}
+	report, err := r.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Totals.Cancelled != 1 {
+		t.Fatalf("cancelled = %d, want 1; outcomes=%+v", report.Totals.Cancelled, report.Outcomes)
+	}
+	if report.Terminal != TerminalFailed {
+		t.Fatalf("terminal = %s, want FAILED. The attempt is left claimed and holding its locks, "+
+			"and drain only ever claims `queued` work items, so IDLE — whose whole contract is "+
+			"\"come back later and it will work\" — is a promise nothing can keep", report.Terminal)
+	}
+	if got := ExitCode(report.Terminal); got != 12 {
+		t.Errorf("exit code = %d, want 12. For an unattended runner the exit code IS the contract: "+
+			"10 tells the caller no human is needed, and a stranded claim needs pf_force_takeover", got)
+	}
+
+	// Negative control, and the reason this is keyed on the OUTCOME rather than on StopCancelled:
+	// an interrupt that lands with nothing in flight strands nothing, and must still be IDLE.
+	h2 := newFakeHub([]string{"code_change"}, fwi("b", "normal", "2026-01-01T00:00:00Z"))
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	rep2, err := runnerFor(h2, Budget{}).Run(ctx2)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep2.Terminal != TerminalIdle {
+		t.Errorf("an interrupt before any claim ended %s, want IDLE: nothing was stranded, so "+
+			"re-running really is the fix", rep2.Terminal)
+	}
+}
+
+// TestRun_MaxDurationBoundsTheWallClock is finding ④.
+//
+// Budget carried MaxRounds/MaxWorkItems/MaxParallel and no time at all, while the design names
+// the dimension verbatim ("跑满 N 个 / T 时间"). Both existing caps default to unlimited, so a
+// `polyforge drain --detach` had no wall-clock ceiling of any kind — its only bound was
+// rounds x work-items x the 2h per-step timeout.
+//
+// Mutants watched RED:
+//   - deleting the context.WithDeadline block (the run never stops)
+//   - reporting StopCancelled instead of StopMaxDuration (the reason arm)
+func TestRun_MaxDurationBoundsTheWallClock(t *testing.T) {
+	h := newFakeHub([]string{"code_change"},
+		fwi("a", "normal", "2026-01-01T00:00:00Z"),
+		fwi("b", "normal", "2026-01-01T00:00:01Z"))
+	r := runnerFor(h, Budget{MaxDuration: 40 * time.Millisecond})
+	// A step that outlives the budget. It honours its context, exactly as exec.CommandContext
+	// does in production.
+	r.Dispatch = func(ctx context.Context, req DispatchRequest) (DispatchResult, error) {
+		select {
+		case <-ctx.Done():
+			return DispatchResult{Output: "killed\n"}, ctx.Err()
+		case <-time.After(10 * time.Second):
+			return DispatchResult{Output: "did the thing\nsummary\n"}, nil
+		}
+	}
+
+	done := make(chan RunReport, 1)
+	go func() {
+		rep, err := r.Run(context.Background())
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
+		done <- rep
+	}()
+	select {
+	case report := <-done:
+		if report.StopReason != StopMaxDuration {
+			t.Errorf("stop reason = %s, want max_duration. StopCancelled would tell an operator "+
+				"somebody stopped the run when in fact its own budget did", report.StopReason)
+		}
+		if report.Totals.Wrapped != 0 {
+			t.Errorf("wrapped = %d: the budget expired mid-step", report.Totals.Wrapped)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the run did not stop: --max-duration is not bounding anything, which is the " +
+			"state this finding is about")
+	}
+}
+
+// TestRun_LayerTwoNotifiesOnlyWhatItCanAddress covers the two notification changes aihub#678 makes,
+// both of which are about a note going to the wrong place or nowhere.
+//
+//   - A blocker the caller may not open has NO id: aihub sends its slug and substitutes the
+//     sentinel "hidden" for the id (invariant 2). The note used to be emitted with
+//     work_item_id="hidden", which 404s — every round, silently, on the one channel that reaches
+//     another human in an unattended run.
+//   - A queued requires_human_session work item is now a reason a run can end BLOCKED_EXTERNAL,
+//     and it must be NAMED — but on stderr and in the snapshot, never as a timeline note. See
+//     reportHumanSessionNeeded: aihub#636's note de-duplication keys on the emitting attempt, and
+//     drain's Notify sends none, so an hourly run would add identical notes forever.
+//
+// ⚠️ The hidden arm is asserted on the LOG, not only on the absence of a note, and the difference
+// is the point. blockingEdges already strips the sentinel to "", and both the production Notify
+// seam and this fake return early on an empty target — so deleting the guard here changes no
+// note that is sent. What it changes is whether anybody is TOLD: "somebody outside your project
+// visibility is holding this" is real information, and silently dropping the note on the floor is
+// how the 404-per-round version managed to look like it was working.
+//
+// Mutants watched RED: deleting the `!blocker.Notifiable()` guard (the hidden arm, via the log);
+// deleting the notifyHumanSessionNeeded call (the human-session arm).
+func TestRun_LayerTwoNotifiesOnlyWhatItCanAddress(t *testing.T) {
+	h := newFakeHub([]string{"code_change"})
+	r := runnerFor(h, Budget{})
+	var logs []string
+	var logMu sync.Mutex
+	r.Logf = func(f string, a ...any) {
+		logMu.Lock()
+		logs = append(logs, fmt.Sprintf(f, a...))
+		logMu.Unlock()
+	}
+	r.ObserveQueue = func(context.Context) (QueueState, error) {
+		return QueueState{
+			ExternallyBlocked: []BlockedWorkItem{{
+				WorkItemID: "wi_blocked", Slug: "p#9",
+				Blockers: []BlockerRef{
+					{ID: "wi_theirs", Slug: "other#3"}, // addressable
+					{Slug: "secret#1"},                 // cross-project: slug only, no id
+				},
+			}},
+			NeedsHumanSession: []Candidate{{ID: "wi_rhs", Slug: "p#4"}},
+		}, nil
+	}
+
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Terminal != TerminalBlockedExternal {
+		t.Fatalf("terminal = %s, want BLOCKED_EXTERNAL", report.Terminal)
+	}
+
+	targets := map[string]int{}
+	for _, n := range h.notes {
+		targets[n.WorkItemID]++
+	}
+	for _, want := range []string{"wi_blocked", "wi_theirs"} {
+		if targets[want] == 0 {
+			t.Errorf("no note reached %s; notes=%+v", want, h.notes)
+		}
+	}
+	for _, never := range []string{"hidden", "secret#1", "", "wi_rhs"} {
+		if targets[never] != 0 {
+			t.Errorf("a note was addressed to %q, which is not a work item id this caller can "+
+				"emit against; it 404s once per run and tells nobody anything", never)
+		}
+	}
+	var disclosed bool
+	for _, l := range logs {
+		if strings.Contains(l, "secret#1") && strings.Contains(l, "outside your project visibility") {
+			disclosed = true
+		}
+	}
+	if !disclosed {
+		t.Errorf("the un-addressable blocker was dropped without a word. Both the production "+
+			"Notify seam and this fake return early on an empty target, so an unguarded note "+
+			"simply vanishes — and \"somebody you cannot see is holding this\" is the one fact "+
+			"an operator can act on. logs=%v", logs)
+	}
+	// The requires_human_session leftovers must be NAMED somewhere, or exit 11 arrives with no
+	// explanation at all. Deliberately not a timeline note (see reportHumanSessionNeeded): the
+	// slugs go to stderr and into the snapshot, where a stable population belongs.
+	var explained bool
+	for _, l := range logs {
+		if strings.Contains(l, "requires_human_session") && strings.Contains(l, "p#4") {
+			explained = true
+		}
+	}
+	if !explained {
+		t.Errorf("nothing named the requires_human_session work item that made this run exit 11. "+
+			"logs=%v", logs)
 	}
 }

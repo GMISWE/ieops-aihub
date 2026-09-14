@@ -1,5 +1,7 @@
 package drain
 
+import "time"
+
 // RoundTally is what one round did, and it is the only input the convergence decision takes.
 // Keeping it a plain struct (rather than letting ClassifyRound reach back into the runner) is
 // what makes every branch below testable without a server.
@@ -46,14 +48,59 @@ func (t RoundTally) Diverging() bool {
 	return t.Created > 0 && t.Created >= t.Completed
 }
 
+// BlockerRef is one dependency edge's far end: the work item that is holding mine up.
+//
+// It is a struct rather than the bare id string it used to be because the two things the run does
+// with a blocker are DIFFERENT questions, and collapsing them produced a measured defect. Layer ②
+// needs something to write a note ON, which has to be a work item this caller may open; the
+// report and the log need something a person can READ, which is the slug. When a blocker lives in
+// a project the caller is not a member of, aihub deliberately answers with the slug and the
+// sentinel id "hidden" (internal/domain/dependencies.go, aihub#377 invariant 2) — so the one
+// value is present and the other is unusable, and the old code fed the unusable one straight to
+// pf_emit_event as `work_item_id: "hidden"`, producing a 404 on every single round (aihub#678 ③(a)).
+type BlockerRef struct {
+	// ID is the blocker's work item id, or "" when the caller may not open it.
+	ID string `json:"id,omitempty"`
+	// Slug is the blocker's slug. aihub sends it even for an inaccessible far end, on purpose,
+	// so this is the field that is always worth printing.
+	Slug string `json:"slug,omitempty"`
+}
+
+// Display is what to show a person: the slug when there is one, else the id, else a marker that
+// says which of the two is missing rather than an empty string.
+func (b BlockerRef) Display() string {
+	switch {
+	case b.Slug != "":
+		return b.Slug
+	case b.ID != "":
+		return b.ID
+	default:
+		return "(unnamed blocker)"
+	}
+}
+
+// Notifiable reports whether layer ② can write a note on this blocker. False for a blocker in a
+// project the caller cannot open: there is no id to address, and addressing the sentinel is how
+// the 404-per-round came about.
+func (b BlockerRef) Notifiable() bool { return b.ID != "" }
+
 // BlockedWorkItem is one in-scope work item held up by dependencies OUTSIDE the scope, together
 // with the blockers responsible. It exists so the BLOCKED_EXTERNAL notification has somewhere to
 // land: notification layer ② writes a note on this work item and on each blocker, and neither is
 // possible from a bare count.
 type BlockedWorkItem struct {
-	WorkItemID string   `json:"work_item_id"`
-	Slug       string   `json:"slug,omitempty"`
-	Blockers   []string `json:"blockers,omitempty"`
+	WorkItemID string       `json:"work_item_id"`
+	Slug       string       `json:"slug,omitempty"`
+	Blockers   []BlockerRef `json:"blockers,omitempty"`
+}
+
+// BlockerNames renders the blockers for a message.
+func (b BlockedWorkItem) BlockerNames() []string {
+	out := make([]string, 0, len(b.Blockers))
+	for _, ref := range b.Blockers {
+		out = append(out, ref.Display())
+	}
+	return out
 }
 
 // QueueState is what remains in scope after a round, as observed from the server. It is
@@ -81,6 +128,24 @@ type QueueState struct {
 	// Paused counts in-scope paused work items. Drain never resumes them by default
 	// (aihub#640 wi.content "权限边界"), but their existence means the project is not complete.
 	Paused int `json:"paused"`
+	// NeedsHumanSession lists in-scope work items that are QUEUED and that drain is structurally
+	// not allowed to execute, because `requires_human_session` is not false.
+	//
+	// 🔴 This is the bucket that did not exist, and its absence made COMPLETED — exit 0, "every
+	// in-scope work item is terminal" — the answer for a project whose queue still held work
+	// (aihub#678 ③(d)). ObserveQueue classified into executable / running / paused / blocked, and
+	// a queued requires_human_session=true work item is none of those: the server's
+	// readyOnlyPredicate requires `requires_human_session = false`, so it never appears in
+	// Executable, while its status keeps it out of the other three. It fell through every bucket,
+	// Empty() said the scope was clear, and the most reassuring of the four terminal states was
+	// reported on the strength of a question nobody had asked. `--plan` shared the same code and
+	// the same lie.
+	//
+	// ⚠️ "Not false", not "true". The column is nullable and the third state is real: NULL means
+	// unclassified, and `requires_human_session = false` is not satisfied by NULL either, so a
+	// NULL work item is equally unexecutable here. Treating NULL as false would put this bucket's
+	// own blind spot back.
+	NeedsHumanSession []Candidate `json:"needs_human_session,omitempty"`
 }
 
 // BlockedByOthers is how many in-scope work items are blocked from outside the scope.
@@ -89,7 +154,7 @@ func (q QueueState) BlockedByOthers() int { return len(q.ExternallyBlocked) }
 // Empty reports whether anything at all is left in scope.
 func (q QueueState) Empty() bool {
 	return q.Executable == 0 && q.BlockedByMine == 0 && q.BlockedByOthers() == 0 &&
-		q.Running == 0 && q.Paused == 0
+		q.Running == 0 && q.Paused == 0 && len(q.NeedsHumanSession) == 0
 }
 
 // Classify decides the run's Terminal state from the cumulative run totals and the final queue
@@ -112,11 +177,23 @@ func (q QueueState) Empty() bool {
 // anyFailed is cumulative over the whole run, not per-round: a failure in round 1 still needs a
 // human after round 5 succeeds, and letting a later clean round overwrite it would silently
 // discard the report.
+//
+// # Why a queued requires_human_session work item sorts with BLOCKED_EXTERNAL
+//
+// It is not "blocked by someone else's work item", so the literal reading of the state's name
+// does not cover it. The owner's own CRITERION does, and the criterion is what this switch is
+// built on: `four_terminal_states` says the IDLE / BLOCKED_EXTERNAL split is "等下去有没有意义" —
+// whether waiting is worth anything. Re-running drain tomorrow does not make a
+// requires_human_session work item executable; only a person sitting down with it does. IDLE's
+// contract is the opposite of that ("no person needed; re-running later is the fix"), so IDLE
+// would be as wrong as the COMPLETED this replaces, just less loudly. Reporting it as the state
+// that means "a human must act" is the honest use of the four the ruling fixes; inventing a fifth
+// would contradict the ruling that the exit code distinguishes exactly four.
 func Classify(anyFailed bool, q QueueState) Terminal {
 	switch {
 	case anyFailed:
 		return TerminalFailed
-	case q.BlockedByOthers() > 0:
+	case q.BlockedByOthers() > 0 || len(q.NeedsHumanSession) > 0:
 		return TerminalBlockedExternal
 	case !q.Empty():
 		return TerminalIdle
@@ -135,6 +212,15 @@ type Budget struct {
 	MaxWorkItems int
 	// MaxParallel caps how many work items execute concurrently within one round.
 	MaxParallel int
+	// MaxDuration caps the run's WALL CLOCK.
+	//
+	// 🔴 This dimension was missing entirely until aihub#678 ④, while the design named it
+	// verbatim ("跑满 N 个 / T 时间"). Without it a detached run's only ceiling was
+	// `MaxRounds × MaxWorkItems × stepTimeout`, both of which default to unlimited — so
+	// `polyforge drain --detach` had, in practice, no wall-clock bound at all. Runner.Run turns
+	// it into a context deadline rather than a round-boundary test; see the comment there for
+	// why, and for what that means for the terminal state.
+	MaxDuration time.Duration
 }
 
 // DefaultMaxParallel is the concurrency drain uses when --max-parallel is not given.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/internal/drain"
@@ -957,4 +960,623 @@ func TestProjectScenarioURL_RefusesRatherThanReturningEmpty(t *testing.T) {
 	if _, err := projectScenarioURL(context.Background(), client.New(bad.URL, "k"), "p"); err == nil {
 		t.Error("a 404 on the project lookup was swallowed")
 	}
+}
+
+// ─── aihub#673: --detach / --stop / --preset ──────────────────────────────────
+
+// TestParseDrainArgs_NewFlagsParse pins that the three flags the owner specified
+// in aihub#640's command_surface are actually read. Before aihub#673 all three
+// were zero-hit literals in this package.
+func TestParseDrainArgs_NewFlagsParse(t *testing.T) {
+	o, err := parseDrainArgs([]string{"--project=aihub", "--detach", "--preset=frugal"})
+	if err != nil {
+		t.Fatalf("parseDrainArgs: %v", err)
+	}
+	if !o.Detach {
+		t.Error("--detach did not set Detach")
+	}
+	if o.Preset != "frugal" {
+		t.Errorf("--preset=frugal gave Preset=%q, want %q", o.Preset, "frugal")
+	}
+
+	s, err := parseDrainArgs([]string{"--stop", "--run=20260914T120000Z-1"})
+	if err != nil {
+		t.Fatalf("parseDrainArgs(--stop --run): %v", err)
+	}
+	if !s.Stop {
+		t.Error("--stop did not set Stop")
+	}
+	if s.RunID != "20260914T120000Z-1" {
+		t.Errorf("--run gave RunID=%q", s.RunID)
+	}
+}
+
+// TestParseDrainArgs_StopNeedsNoProject pins that --stop parses without
+// --project.
+//
+// It is the flag you reach for when a scheduler is misbehaving, and requiring
+// the project name to stop it would mean the one command that ends a runaway run
+// is unavailable to somebody who only knows there IS one. RunDrain enforces the
+// same thing by resolving --stop before the --project check.
+func TestParseDrainArgs_StopNeedsNoProject(t *testing.T) {
+	o, err := parseDrainArgs([]string{"--stop"})
+	if err != nil {
+		t.Fatalf("parseDrainArgs(--stop) without --project: %v", err)
+	}
+	if !o.Stop {
+		t.Fatal("--stop did not set Stop")
+	}
+}
+
+// TestParseDrainArgs_RefusesContradictoryModes pins that mode conflicts are
+// REFUSED rather than resolved by precedence.
+//
+// Each pair has two defensible readings — does `--stop --detach` stop in the
+// background, or start one and stop another? — and this command claims and
+// executes real work items. Picking one silently is how a flag combination
+// becomes folklore.
+func TestParseDrainArgs_RefusesContradictoryModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--project=aihub", "--stop", "--detach"},
+		{"--project=aihub", "--stop", "--plan"},
+		{"--project=aihub", "--detach", "--plan"},
+		{"--project=aihub", "--stop", "--preset=frugal"},
+	} {
+		if _, err := parseDrainArgs(args); err == nil {
+			t.Errorf("parseDrainArgs(%v) was accepted; contradictory modes must be refused", args)
+		}
+	}
+}
+
+// TestParseDrainArgs_RefusesInertRunFlag pins that --run without --stop is
+// refused rather than ignored.
+//
+// This parser already refuses unknown flags on the stated grounds that a
+// silently-dropped flag on a scheduler reads as a budget that was honoured when
+// it was not. A flag that IS known but inert in the current mode is the same
+// defect wearing a better disguise: `polyforge drain --project=x --run=<id>`
+// looks like it targeted a run and targets nothing.
+func TestParseDrainArgs_RefusesInertRunFlag(t *testing.T) {
+	if _, err := parseDrainArgs([]string{"--project=aihub", "--run=20260914T120000Z-1"}); err == nil {
+		t.Error("parseDrainArgs accepted --run without --stop; a known-but-inert flag reads " +
+			"to the operator exactly like an honoured one")
+	}
+}
+
+// TestParseDrainArgs_RefusesEmptyPreset pins that `--preset=` is an error.
+//
+// The value is routinely a shell variable, and an unset one expands to nothing.
+// Treating the empty string as "use the configured default" would make a broken
+// invocation indistinguishable from a deliberate one.
+func TestParseDrainArgs_RefusesEmptyPreset(t *testing.T) {
+	if _, err := parseDrainArgs([]string{"--project=aihub", "--preset="}); err == nil {
+		t.Error("parseDrainArgs accepted an empty --preset=")
+	}
+}
+
+// TestDetachChildArgs_DropsOnlyDetach pins the two properties the detached
+// child's argument vector needs.
+//
+// Keeping --detach would make the child detach again, and again: an infinite
+// spawn chain, each generation writing a new run directory. Reconstructing the
+// flags from drainOptions instead of filtering the raw vector would silently
+// drop any flag this function has not been taught about, which is a defect that
+// only appears the next time somebody adds one.
+func TestDetachChildArgs_DropsOnlyDetach(t *testing.T) {
+	got := detachChildArgs([]string{"--project=aihub", "--detach", "--max-parallel=3", "--preset=frugal"})
+	want := []string{"drain", "--project=aihub", "--max-parallel=3", "--preset=frugal"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detachChildArgs() = %v, want %v", got, want)
+	}
+	for _, a := range got {
+		if a == "--detach" {
+			t.Fatal("detachChildArgs kept --detach; the child would detach again, forever")
+		}
+	}
+}
+
+// TestDetachedRunID_ReadsThenUnsets pins that the handed-down run id is consumed
+// exactly once.
+//
+// The unset is not tidiness. Step agents inherit this process's environment, so
+// a `polyforge drain` started from inside a step would adopt its parent's run id
+// and the two processes would write the same snapshot.json, each overwriting the
+// other's view of a different run.
+func TestDetachedRunID_ReadsThenUnsets(t *testing.T) {
+	t.Setenv(detachRunIDEnv, "20260914T120000Z-424242")
+
+	if got := detachedRunID(); got != "20260914T120000Z-424242" {
+		t.Fatalf("detachedRunID() = %q, want the value from the environment", got)
+	}
+	if v, ok := os.LookupEnv(detachRunIDEnv); ok {
+		t.Errorf("%s is still set to %q after being read; a nested drain would inherit it",
+			detachRunIDEnv, v)
+	}
+	if got := detachedRunID(); got != "" {
+		t.Errorf("detachedRunID() = %q on a second call, want \"\"", got)
+	}
+}
+
+// TestResolvePresetModels_MapsTierToModelPerHarness pins the mapping drain
+// dispatches with, and the two exclusions that matter.
+func TestResolvePresetModels_MapsTierToModelPerHarness(t *testing.T) {
+	mc := &config.MachineConfig{Roles: &config.MachineRoles{
+		Presets: map[string]*config.RolesPreset{
+			"frugal": {Tiers: map[string][]config.RoleCandidate{
+				"default": {{Harness: "pi", Model: "cheap-default"}},
+				"raised":  {{Harness: "pi", Model: "dear-raised"}},
+			}},
+		},
+	}}
+	channels := []drain.Channel{{Harness: drain.HarnessClaude}, {Harness: drain.HarnessPi}}
+
+	got, label, err := resolvePresetModels(mc, "frugal", channels, presetTestProbes)
+	if err != nil {
+		t.Fatalf("resolvePresetModels: %v", err)
+	}
+	if !strings.Contains(label, "frugal") {
+		t.Errorf("label = %q, want it to name the preset so the snapshot records provenance", label)
+	}
+	if got[drain.HarnessPi]["default"] != "cheap-default" {
+		t.Errorf("pi/default = %q, want %q", got[drain.HarnessPi]["default"], "cheap-default")
+	}
+	if got[drain.HarnessPi]["raised"] != "dear-raised" {
+		t.Errorf("pi/raised = %q, want %q", got[drain.HarnessPi]["raised"], "dear-raised")
+	}
+	// Claude Code must never be given a model from this table. aihub#555
+	// measured that passing --model to `claude -p` silently OVERRIDES the agent
+	// file's own frontmatter, and config.RoleCandidate's contract is that a
+	// candidate's harness is pi/codex/opencode -- never cc.
+	if _, ok := got[drain.HarnessClaude]; ok {
+		t.Errorf("claude was given tier models %+v; passing --model to Claude Code silently "+
+			"overrides the agent file frontmatter (aihub#555)", got[drain.HarnessClaude])
+	}
+}
+
+// TestResolvePresetModels_UnknownPresetIsFatal pins that drain refuses to start
+// on a preset it cannot resolve, rather than running the default table.
+//
+// The direction of the failure is the point. An operator who asked for `frugal`
+// and silently got something dearer has no signal anywhere: the run works, the
+// snapshot looks normal, and nothing says the request was dropped.
+func TestResolvePresetModels_UnknownPresetIsFatal(t *testing.T) {
+	mc := &config.MachineConfig{Roles: &config.MachineRoles{
+		Tiers: map[string][]config.RoleCandidate{"default": {{Harness: "pi", Model: "bare"}}},
+	}}
+	if _, _, err := resolvePresetModels(mc, "nope", []drain.Channel{{Harness: drain.HarnessPi}},
+		presetTestProbes); err == nil {
+		t.Error("resolvePresetModels accepted an unknown preset; it must refuse so the run " +
+			"does not proceed on models nobody asked for")
+	}
+}
+
+// TestResolvePresetModels_NoTableIsNotAnError pins that a machine which
+// configured nothing keeps drain's existing behaviour exactly: no models
+// resolved, every harness picks its own default, no error.
+func TestResolvePresetModels_NoTableIsNotAnError(t *testing.T) {
+	got, label, err := resolvePresetModels(&config.MachineConfig{}, "",
+		[]drain.Channel{{Harness: drain.HarnessPi}}, presetTestProbes)
+	if err != nil {
+		t.Fatalf("resolvePresetModels on an unconfigured machine: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("resolvePresetModels = %+v on an unconfigured machine, want empty", got)
+	}
+	if label == "" {
+		t.Error("resolvePresetModels returned an empty label; the snapshot records it as provenance")
+	}
+}
+
+// TestDispatchWithPresetModel_FillsFromTierButNeverOverrides pins the dispatch
+// seam's two rules: a step's model comes from its ROLE's tier, and an explicitly
+// requested model is never overwritten.
+//
+// It asserts on the request the wrapper passes on rather than on a spawned
+// process, because the point under test is the mapping, not the exec.
+func TestDispatchWithPresetModel_FillsFromTierButNeverOverrides(t *testing.T) {
+	tierModels := map[drain.Harness]map[string]string{
+		drain.HarnessPi: {"default": "from-default-tier", "raised": "from-raised-tier"},
+	}
+	tierOf, err := roleTiers()
+	if err != nil {
+		t.Fatalf("roleTiers: %v", err)
+	}
+
+	// Pick two real roles out of the embedded catalog that sit on different
+	// tiers, so this test cannot pass by accident on a single-tier catalog.
+	var defaultRole, raisedRole string
+	for name, tier := range tierOf {
+		switch tier {
+		case "default":
+			if defaultRole == "" {
+				defaultRole = name
+			}
+		case "raised":
+			if raisedRole == "" {
+				raisedRole = name
+			}
+		}
+	}
+	if defaultRole == "" || raisedRole == "" {
+		t.Fatalf("the embedded role catalog has no default-tier and raised-tier role to test with "+
+			"(tiers: %+v); this test's premise is gone, not merely unmet", tierOf)
+	}
+
+	var seen []drain.Channel
+	capture := func(_ context.Context, req drain.DispatchRequest) (drain.DispatchResult, error) {
+		seen = append(seen, req.Channel)
+		return drain.DispatchResult{Output: "ok"}, nil
+	}
+	wrapped := wrapDispatchWithPresetModel(tierModels, tierOf, capture)
+
+	for _, tc := range []struct {
+		name string
+		req  drain.DispatchRequest
+		want string
+		why  string
+	}{
+		{
+			name: "default-tier role gets the default-tier model",
+			req:  drain.DispatchRequest{Role: defaultRole, Channel: drain.Channel{Harness: drain.HarnessPi}},
+			want: "from-default-tier",
+			why:  "the role's tier selects the model",
+		},
+		{
+			name: "raised-tier role gets the raised-tier model",
+			req:  drain.DispatchRequest{Role: raisedRole, Channel: drain.Channel{Harness: drain.HarnessPi}},
+			want: "from-raised-tier",
+			why:  "tiers must differentiate, or the preset is decorative",
+		},
+		{
+			name: "an explicitly requested model is never overwritten",
+			req: drain.DispatchRequest{Role: defaultRole,
+				Channel: drain.Channel{Harness: drain.HarnessPi, Model: "from---channel"}},
+			want: "from---channel",
+			why:  "--channel=pi/model is explicit and beats configuration",
+		},
+		{
+			name: "a harness with no tier models is left alone",
+			req:  drain.DispatchRequest{Role: defaultRole, Channel: drain.Channel{Harness: drain.HarnessClaude}},
+			want: "",
+			why:  "Claude Code must keep its agent-file frontmatter (aihub#555)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = nil
+			if _, err := wrapped(context.Background(), tc.req); err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if len(seen) != 1 {
+				t.Fatalf("dispatch called %d times, want 1", len(seen))
+			}
+			if seen[0].Model != tc.want {
+				t.Errorf("dispatched model = %q, want %q (%s)", seen[0].Model, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestRoleTiers_IndexesTheEmbeddedCatalog pins that the role->tier index is
+// populated from the real catalog. An empty index would make every preset
+// silently inert, which is a failure that looks exactly like "no preset
+// configured".
+func TestRoleTiers_IndexesTheEmbeddedCatalog(t *testing.T) {
+	got, err := roleTiers()
+	if err != nil {
+		t.Fatalf("roleTiers: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("roleTiers() is empty; every preset would be silently inert")
+	}
+	for role, tier := range got {
+		if tier == "" {
+			t.Errorf("role %q has an empty tier", role)
+		}
+	}
+}
+
+// TestCmdlineIsDrainRun pins the pid-reuse guard's decision logic.
+//
+// The second clause is the one worth stating. "Is it polyforge" alone would be
+// satisfied by the long-lived `polyforge serve` MCP process every editor session
+// starts -- by far the commonest polyforge process on these machines -- so a
+// recycled pid would get the team's MCP server SIGTERMed by a command that
+// thought it was stopping a scheduler.
+func TestCmdlineIsDrainRun(t *testing.T) {
+	const self = "/root/.local/bin/polyforge"
+	tests := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{"a real detached drain", "/usr/local/bin/polyforge drain --project=aihub", true},
+		{"a drain with more flags", "/root/.local/bin/polyforge drain --project=aihub --max-parallel=3", true},
+		// The published artefacts are named polyforge-<goos>-<goarch>
+		// (publish-bins.yml), not "polyforge", so this must match.
+		{"a published binary's name", "/usr/local/bin/polyforge-linux-amd64 drain --project=aihub", true},
+		// A locally built or renamed binary carries none of that, and the FIRST
+		// live test of --stop refused a real run for exactly this reason. It is
+		// matched by being the same file this process is running as.
+		{"a renamed binary that is the same file as us", "/root/.local/bin/polyforge drain --all", true},
+		{"the MCP server, same binary", "/usr/local/bin/polyforge serve", false},
+		{"another polyforge subcommand", "/usr/local/bin/polyforge doctor", false},
+		{"an unrelated process that got the pid", "/usr/bin/postgres -D /var/lib/postgresql", false},
+		{"an unrelated process that merely says drain", "/usr/bin/tail -f /var/log/drain.log", false},
+		// Only argv[0] identifies the program. Searching the whole command line
+		// let a log path or a working directory satisfy the binary half.
+		{"an unrelated tool whose ARGS mention polyforge", "/usr/bin/tail -f /var/log/polyforge.log drain", false},
+		{"a wrapper script that merely runs polyforge", "/bin/sh /opt/wrap/polyforge drain --project=x", false},
+		// This case is the reason the "polyforge" clause exists, and it was
+		// added after a mutation run: dropping that clause escaped the first
+		// version of this table, because no case there combined "not polyforge"
+		// with a BARE `drain` argv token. Without it the guard would signal any
+		// recycled pid whose command line happens to take a subcommand by that
+		// name.
+		{"an unrelated tool with a bare drain subcommand", "/usr/bin/somedb drain --force", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cmdlineIsDrainRun(tt.cmdline, self); got != tt.want {
+				t.Errorf("cmdlineIsDrainRun(%q) = %v, want %v", tt.cmdline, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPidLooksLikeDrain_CheckedFlag pins the two-value contract of the /proc
+// reader: "could not tell" must stay distinguishable from "not a drain", because
+// --stop refuses on the second and proceeds-with-disclosure on the first.
+func TestPidLooksLikeDrain_CheckedFlag(t *testing.T) {
+	// A pid that cannot exist must report that it could not be checked, never a
+	// confident "not a drain".
+	if _, checked := pidLooksLikeDrain(-1); checked {
+		t.Error("pidLooksLikeDrain(-1) reported that it checked a pid that cannot exist")
+	}
+
+	ok, checked := pidLooksLikeDrain(os.Getpid())
+	if !checked {
+		t.Skip("/proc is unavailable here; --stop discloses the skipped guard rather than " +
+			"pretending it ran")
+	}
+	// This test binary is `cli.test`, not a drain, so the guard must say so.
+	// That is the assertion: the check discriminates rather than waving things
+	// through.
+	if ok {
+		t.Error("pidLooksLikeDrain(self) accepted the test binary as a drain run; " +
+			"the guard does not discriminate and would not prevent a pid-reuse kill")
+	}
+}
+
+// presetTestProbes stands in for probeForHarness. It resolves every model for
+// the harnesses that have a catalog in production and returns nil for claude,
+// exactly as probeForHarness does -- a live probe would shell out to `pi` /
+// `codex`, which are unauthenticated in CI, so the real one would resolve
+// nothing and the assertions would pass vacuously.
+func presetTestProbes(harness string) CatalogProbe {
+	switch harness {
+	case "pi", "codex", "opencode":
+		return allModelsProbe{}
+	default:
+		return nil
+	}
+}
+
+type allModelsProbe struct{}
+
+func (allModelsProbe) HasModel(string) (bool, error) { return true, nil }
+
+// TestStartDetached_ReturnsAUsablePid is a regression test for a defect that
+// every unit test missed and the first live run found immediately.
+//
+// os.Process.Release sets Pid to -1 on Unix. The first version of --detach
+// called Release and then printed cmd.Process.Pid, so it reported
+//
+//	pid:    -1
+//
+// which breaks the single output contract aihub#640 `entrypoint_not_a_session`
+// fixes for this flag ("spawn 后台进程后立即返回 pid+日志路径") and hands the
+// caller a pid that cannot be signalled, watched or even looked up. --stop reads
+// its pid from the snapshot rather than from this line, so nothing else in the
+// system would have reported the problem.
+//
+// The assertion is simply "the pid is usable": positive, and not this process.
+func TestStartDetached_ReturnsAUsablePid(t *testing.T) {
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devnull.Close() }()
+
+	out, err := os.CreateTemp(t.TempDir(), "detach-*.log")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer func() { _ = out.Close() }()
+
+	// `true` rather than a real drain: what is under test is the pid handoff,
+	// and a command that exits immediately keeps the test from depending on a
+	// harness, a credential or a server.
+	pid, err := startDetached("/usr/bin/env", []string{"true"}, os.Environ(), devnull, out)
+	if err != nil {
+		t.Fatalf("startDetached: %v", err)
+	}
+	if pid <= 0 {
+		t.Fatalf("startDetached returned pid %d; Release() zeroes cmd.Process.Pid, so the pid must "+
+			"be read BEFORE releasing the child. --detach printed -1 for exactly this reason", pid)
+	}
+	if pid == os.Getpid() {
+		t.Errorf("startDetached returned this process's own pid (%d)", pid)
+	}
+}
+
+// ─── aihub#673 review follow-ups ──────────────────────────────────────────────
+
+// TestRunDrainDetach_RegistersTheRunBeforeReturning is the regression test for
+// the BLOCKER a clean-context review found: --detach spawned the child and
+// returned without writing either the snapshot or the `latest` pointer.
+//
+// The child does write both, but only after resolving its user id, reading the
+// project's scenario URL and PREFLIGHTING EVERY CHANNEL, which spawns a real
+// harness process per candidate. For that whole window — seconds to tens of
+// seconds — `drain --stop` with no --run read `latest` and got the PREVIOUS run:
+// if that one had finished it printed "already finished. Nothing to stop." and
+// exited 0 while the new run went on claiming work items unattended, and if it
+// had not, it SIGTERMed the wrong run. The pid-reuse guard cannot catch either,
+// because it asks "is this pid a drain", not "is it THIS run".
+//
+// The assertion is that after runDrainDetach returns, both records name the run
+// it just printed.
+func TestRunDrainDetach_RegistersTheRunBeforeReturning(t *testing.T) {
+	home := t.TempDir()
+
+	// A previous, FINISHED run, so a regression reproduces the exact bad
+	// outcome rather than merely "latest is empty": with `latest` still naming
+	// this one, --stop would report success and stop nothing.
+	prev := "20260101T000000Z-1"
+	if err := drain.WriteSnapshot(drain.RunDir(home, prev), &drain.Snapshot{
+		RunID: prev, PID: 1, Finished: true, Terminal: drain.TerminalCompleted,
+	}); err != nil {
+		t.Fatalf("seed previous snapshot: %v", err)
+	}
+	if err := drain.WriteLatest(home, prev); err != nil {
+		t.Fatalf("seed latest: %v", err)
+	}
+
+	// `--project` is a real project name only so the spawned child has
+	// something to fail on quickly; the child is never waited for and what is
+	// under test is what the PARENT recorded before returning.
+	opts, err := parseDrainArgs([]string{"--project=aihub", "--detach"})
+	if err != nil {
+		t.Fatalf("parseDrainArgs: %v", err)
+	}
+	out := captureStdout(t, func() {
+		runDrainDetach(home, []string{"--project=aihub", "--detach"}, opts)
+	})
+
+	runID := drain.ReadLatest(home)
+	if runID == prev {
+		t.Fatalf("after --detach, latest still names the PREVIOUS run %q; `drain --stop` would "+
+			"report \"already finished. Nothing to stop.\" and exit 0 while the new run kept "+
+			"claiming work items", prev)
+	}
+	if runID == "" {
+		t.Fatal("after --detach, latest names no run at all")
+	}
+	if !strings.Contains(out, runID) {
+		t.Errorf("--detach printed a different run id than it recorded.\nrecorded: %q\nprinted:\n%s",
+			runID, out)
+	}
+
+	s, err := drain.ReadSnapshot(drain.RunDir(home, runID))
+	if err != nil {
+		t.Fatalf("--detach did not write a readable snapshot, so `polyforge watch --run=%s` "+
+			"(the command it tells you to run) fails: %v", runID, err)
+	}
+	if s.RunID != runID {
+		t.Errorf("snapshot run_id = %q, want %q", s.RunID, runID)
+	}
+	if s.PID <= 0 {
+		t.Errorf("snapshot pid = %d; --stop reads its target pid from here", s.PID)
+	}
+	if s.Finished {
+		t.Error("the initial snapshot says Finished; --stop would refuse to stop a run that " +
+			"has only just started")
+	}
+	if s.Project != "aihub" {
+		t.Errorf("snapshot project = %q, want %q", s.Project, "aihub")
+	}
+	// Kill the child: this test spawns a real process and must not leak it.
+	// A leaked drain on this box is not hypothetical — orphaned processes from a
+	// subagent once burned 7.5 of 12 cores for eleven days.
+	if s.PID > 0 {
+		_ = syscall.Kill(s.PID, syscall.SIGKILL)
+	}
+}
+
+// TestSignalTarget_GroupWhenLeader pins that --stop signals the whole process
+// group when it can, which is what reaches the step agents' own children.
+//
+// A review found that SIGTERM to a single pid is NOT what Ctrl-C does: the tty
+// delivers Ctrl-C to the entire foreground group, while runHarness uses
+// exec.CommandContext with no Cancel, so cancellation SIGKILLs the harness
+// process only and every grandchild is orphaned onto init. On this box that has
+// a measured history: orphaned load generators once burned 7.5 of 12 cores for
+// eleven days.
+func TestSignalTarget_GroupWhenLeader(t *testing.T) {
+	// This test process is a group leader under `go test`'s own setup in most
+	// environments, but not guaranteed, so the assertion is driven by what the
+	// kernel actually reports rather than by an assumption.
+	self := os.Getpid()
+	pgid, err := syscall.Getpgid(self)
+	if err != nil {
+		t.Skipf("Getpgid unavailable: %v", err)
+	}
+
+	target, whole := signalTarget(self)
+	if pgid == self {
+		if !whole || target != -self {
+			t.Errorf("signalTarget(%d) = (%d, %v) for a process that IS its own group leader; "+
+				"want (%d, true) so the signal reaches the step agents' children",
+				self, target, whole, -self)
+		}
+	} else if whole || target != self {
+		t.Errorf("signalTarget(%d) = (%d, %v) for a process that is NOT a group leader (pgid %d); "+
+			"want (%d, false) -- signalling -pid there would miss or hit an unrelated group",
+			self, target, whole, pgid, self)
+	}
+}
+
+// TestValidRunID pins the shape check on the handed-down run id. The value is
+// interpolated straight into a filesystem path, so `../../x` would write outside
+// the drain directory.
+func TestValidRunID(t *testing.T) {
+	// The real generator's output must pass, or the check would reject every
+	// detached run -- which is the way this guard could do harm.
+	if got := drain.NewRunID(time.Now(), os.Getpid()); !validRunID(got) {
+		t.Errorf("validRunID rejected drain.NewRunID's own output %q", got)
+	}
+	for _, bad := range []string{
+		"", "../../etc", "20260914T124435Z-3448278/../..", "not-a-run-id",
+		"20260914T124435Z", "20260914T124435Z-", "/abs/path",
+	} {
+		if validRunID(bad) {
+			t.Errorf("validRunID(%q) = true, want false", bad)
+		}
+	}
+}
+
+// TestDetachedRunID_DiscardsMalformed pins that a malformed handed-down id is
+// discarded rather than used or fatal: RunDrain then mints its own, which beats
+// failing a scheduler over an environment variable.
+func TestDetachedRunID_DiscardsMalformed(t *testing.T) {
+	t.Setenv(detachRunIDEnv, "../../escape")
+	if got := detachedRunID(); got != "" {
+		t.Errorf("detachedRunID() = %q for a malformed value, want \"\"", got)
+	}
+	if _, ok := os.LookupEnv(detachRunIDEnv); ok {
+		t.Error("a malformed value was left in the environment for a nested drain to inherit")
+	}
+}
+
+// captureStdout mirrors captureStderr (roles_generate_test.go) for stdout, which
+// is where --detach's run id / pid / log path contract is printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	_ = r.Close()
+	return buf.String()
 }

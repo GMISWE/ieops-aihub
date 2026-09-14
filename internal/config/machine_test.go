@@ -373,3 +373,304 @@ func TestSaveMachineConfigRolesExample(t *testing.T) {
 		t.Errorf("SaveMachineConfig() footer does not mention roles.tiers; got:\n%s", b)
 	}
 }
+
+// ─── aihub#673: tier-table presets ────────────────────────────────────────────
+
+// TestResolveTiersPrecedence pins the one rule that makes a preset mean anything:
+// an explicit --preset beats the machine's [roles] preset, which beats the bare
+// [roles.tiers] table.
+//
+// The precedence is the whole contract. `polyforge roles generate`, the
+// serve-startup codex profile generation and `polyforge drain` all resolve
+// through this function precisely so a machine cannot answer "which models do I
+// use" differently depending on which one was asked, so an ordering defect here
+// is not a local bug -- it is the two-口径 hazard aihub#673 exists to close,
+// reintroduced one level down.
+func TestResolveTiersPrecedence(t *testing.T) {
+	bare := []RoleCandidate{{Harness: "pi", Model: "bare-table"}}
+	frugal := []RoleCandidate{{Harness: "pi", Model: "frugal-model"}}
+	maxp := []RoleCandidate{{Harness: "pi", Model: "max-model"}}
+
+	full := func() *MachineConfig {
+		return &MachineConfig{Roles: &MachineRoles{
+			Tiers:  map[string][]RoleCandidate{"default": bare},
+			Preset: "frugal",
+			Presets: map[string]*RolesPreset{
+				"frugal": {Tiers: map[string][]RoleCandidate{"default": frugal}},
+				"max":    {Tiers: map[string][]RoleCandidate{"default": maxp}},
+			},
+		}}
+	}
+
+	tests := []struct {
+		name      string
+		mc        *MachineConfig
+		override  string
+		wantModel string // "" means "no table resolved"
+	}{
+		{
+			name:      "override beats the configured preset",
+			mc:        full(),
+			override:  "max",
+			wantModel: "max-model",
+		},
+		{
+			name:      "configured preset beats the bare table",
+			mc:        full(),
+			override:  "",
+			wantModel: "frugal-model",
+		},
+		{
+			name: "bare table is used when no preset is selected",
+			mc: &MachineConfig{Roles: &MachineRoles{
+				Tiers: map[string][]RoleCandidate{"default": bare},
+			}},
+			override:  "",
+			wantModel: "bare-table",
+		},
+		{
+			name: "an override still wins when there is no configured preset",
+			mc: &MachineConfig{Roles: &MachineRoles{
+				Tiers:   map[string][]RoleCandidate{"default": bare},
+				Presets: map[string]*RolesPreset{"max": {Tiers: map[string][]RoleCandidate{"default": maxp}}},
+			}},
+			override:  "max",
+			wantModel: "max-model",
+		},
+		{
+			name:      "a machine that configured nothing resolves no table",
+			mc:        &MachineConfig{},
+			override:  "",
+			wantModel: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tiers, source, err := tt.mc.ResolveTiers(tt.override)
+			if err != nil {
+				t.Fatalf("ResolveTiers(%q) unexpected error: %v", tt.override, err)
+			}
+			if source == "" {
+				t.Errorf("ResolveTiers(%q) returned an empty source; every caller prints it "+
+					"so an operator can see which table produced the result", tt.override)
+			}
+			var got string
+			if len(tiers["default"]) > 0 {
+				got = tiers["default"][0].Model
+			}
+			if got != tt.wantModel {
+				t.Errorf("ResolveTiers(%q) default tier model = %q, want %q (source=%q)",
+					tt.override, got, tt.wantModel, source)
+			}
+		})
+	}
+}
+
+// TestResolveTiersRefusesUnknownPreset pins that an unresolvable preset name is
+// an ERROR, not a quiet fall back to [roles.tiers].
+//
+// This is the single most important assertion in this file. Falling back would
+// be invisible in every output the operator sees: they ask for `frugal`, the
+// binary runs the default table, nothing disagrees with them, and the bill
+// arrives later. A refusal costs one typo-correction; a silent substitution can
+// run for weeks. The test therefore also requires the message to NAME the
+// available presets, because "unknown preset" on its own does not tell somebody
+// whether they misspelled the name or never defined it.
+func TestResolveTiersRefusesUnknownPreset(t *testing.T) {
+	mc := &MachineConfig{Roles: &MachineRoles{
+		Tiers: map[string][]RoleCandidate{"default": {{Harness: "pi", Model: "bare-table"}}},
+		Presets: map[string]*RolesPreset{
+			"frugal": {Tiers: map[string][]RoleCandidate{"default": {{Harness: "pi", Model: "cheap"}}}},
+			"max":    {Tiers: map[string][]RoleCandidate{"default": {{Harness: "pi", Model: "dear"}}}},
+		},
+	}}
+
+	tiers, _, err := mc.ResolveTiers("frugl") // a plausible typo, not nonsense
+	if err == nil {
+		t.Fatalf("ResolveTiers(\"frugl\") returned no error; it must refuse rather than fall back "+
+			"to [roles.tiers] (got tiers=%+v)", tiers)
+	}
+	if tiers != nil {
+		t.Errorf("ResolveTiers on an unknown preset returned a table (%+v); it must return none, "+
+			"or a caller that only checks the table will run the wrong models", tiers)
+	}
+	for _, want := range []string{"frugl", "frugal", "max"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("ResolveTiers error %q does not mention %q; it must name both the bad name "+
+				"and the available ones", err, want)
+		}
+	}
+}
+
+// TestResolveTiersRefusesPresetWithNoTiers pins that a declared-but-empty preset
+// is refused too. Resolving it to an empty table would silently discard
+// [roles.tiers] as well and leave every role inheriting its harness's default
+// model -- a quieter version of the same failure as an unknown name.
+func TestResolveTiersRefusesPresetWithNoTiers(t *testing.T) {
+	mc := &MachineConfig{Roles: &MachineRoles{
+		Tiers:   map[string][]RoleCandidate{"default": {{Harness: "pi", Model: "bare-table"}}},
+		Presets: map[string]*RolesPreset{"hollow": {}},
+	}}
+
+	if _, _, err := mc.ResolveTiers("hollow"); err == nil {
+		t.Fatal("ResolveTiers on a preset that declares no tiers returned no error; " +
+			"an empty table would silently discard [roles.tiers] too")
+	}
+}
+
+// TestResolveTiersNilReceiverAndNilRoles pins that the three "configured
+// nothing" shapes are answers rather than crashes. A nil *MachineConfig reaches
+// this function on the path runCLI takes when config.toml does not parse.
+func TestResolveTiersNilReceiverAndNilRoles(t *testing.T) {
+	var nilMC *MachineConfig
+	for _, tc := range []struct {
+		name string
+		mc   *MachineConfig
+	}{
+		{"nil receiver", nilMC},
+		{"nil Roles", &MachineConfig{MachineID: "m-1"}},
+		{"empty Roles", &MachineConfig{Roles: &MachineRoles{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tiers, source, err := tc.mc.ResolveTiers("")
+			if err != nil {
+				t.Fatalf("ResolveTiers(\"\") error: %v", err)
+			}
+			if len(tiers) != 0 {
+				t.Errorf("ResolveTiers(\"\") = %+v, want an empty table", tiers)
+			}
+			if source == "" {
+				t.Error("ResolveTiers(\"\") returned an empty source string")
+			}
+		})
+	}
+	// A preset asked for on a machine that defines none must still refuse, not
+	// return the empty table as though the request had been honoured.
+	if _, _, err := nilMC.ResolveTiers("frugal"); err == nil {
+		t.Error("ResolveTiers(\"frugal\") on a nil config returned no error; " +
+			"a requested preset that cannot exist must be refused")
+	}
+}
+
+// TestMachineConfigPresetsRoundTrip pins that presets survive Marshal ->
+// Unmarshal with their candidate ORDER intact, the same property
+// TestMachineConfigRolesRoundTrip pins for [roles.tiers]. Order is load-bearing:
+// ResolveModel walks a tier's candidates in declaration order and takes the
+// first that resolves, so a reordering silently changes which model runs.
+func TestMachineConfigPresetsRoundTrip(t *testing.T) {
+	mc := &MachineConfig{
+		MachineID: "m-1",
+		Roles: &MachineRoles{
+			Preset: "frugal",
+			Presets: map[string]*RolesPreset{
+				"frugal": {Tiers: map[string][]RoleCandidate{
+					"default": {
+						{Harness: "pi", Model: "first-choice"},
+						{Harness: "pi", Model: "second-choice"},
+					},
+					"raised": {{Harness: "codex", Model: "gpt-5-codex"}},
+				}},
+			},
+		},
+	}
+
+	b, err := toml.Marshal(mc)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+
+	// The KEY PATH on disk is asserted, not just the round trip, and that
+	// addition came out of a mutation run: renaming the `presets` toml tag
+	// escaped a pure round-trip assertion entirely, because marshal and
+	// unmarshal then agree with each other about the new name and the value
+	// survives. A round trip cannot see a symmetric rename.
+	//
+	// It matters because this table is written BY HAND. `[roles.presets.<name>.tiers]`
+	// is the text an operator types into config.toml and the text
+	// SaveMachineConfig's footer documents, so the key name is a contract with
+	// people, not merely with the encoder.
+	// Each expectation is anchored with a leading newline, and that is not
+	// cosmetic. An unanchored "preset = 'frugal'" is a SUBSTRING of
+	// "active_preset = 'frugal'", so renaming the toml tag escaped this very
+	// assertion on a mutation run: the check passed while the key an operator
+	// has to type had changed underneath it.
+	for _, want := range []string{"\n[roles.presets.frugal.tiers]", "\npreset = 'frugal'"} {
+		if !contains(string(b), want) {
+			t.Errorf("Marshal() did not produce %q; a hand-written config.toml using the\n"+
+				"documented spelling would not load. Got:\n%s", want, b)
+		}
+	}
+
+	var round MachineConfig
+	if err := toml.Unmarshal(b, &round); err != nil {
+		t.Fatalf("Unmarshal() error: %v\ntoml:\n%s", err, b)
+	}
+	if round.Roles == nil || round.Roles.Presets["frugal"] == nil {
+		t.Fatalf("round-tripped preset is missing; marshaled toml:\n%s", b)
+	}
+	if round.Roles.Preset != "frugal" {
+		t.Errorf("round-tripped [roles] preset = %q, want %q", round.Roles.Preset, "frugal")
+	}
+	got := round.Roles.Presets["frugal"].Tiers
+	want := mc.Roles.Presets["frugal"].Tiers
+	if !reflect.DeepEqual(got["default"], want["default"]) {
+		t.Errorf("round-tripped preset Tiers[default] = %+v, want %+v (order must survive)",
+			got["default"], want["default"])
+	}
+	if !reflect.DeepEqual(got["raised"], want["raised"]) {
+		t.Errorf("round-tripped preset Tiers[raised] = %+v, want %+v", got["raised"], want["raised"])
+	}
+}
+
+// TestMachineConfigRolesStillOmittedWithPresetFields re-pins the aihub#642
+// "costs a machine that never touches it" contract AFTER aihub#673 added Preset
+// and Presets to MachineRoles.
+//
+// TestMachineConfigRolesOmittedWhenUnset above already asserts this, and that is
+// exactly why this one exists separately: that test was written before the new
+// fields and would keep passing if a future edit made MachineRoles non-optional
+// in some other way. This states the post-change obligation in its own words --
+// adding fields to MachineRoles must never make an unconfigured machine start
+// emitting a [roles] table, because config.toml is written back by
+// SaveMachineConfig and junk written there is junk every later read inherits.
+func TestMachineConfigRolesStillOmittedWithPresetFields(t *testing.T) {
+	b, err := toml.Marshal(&MachineConfig{MachineID: "m-1"})
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	for _, forbidden := range []string{"[roles]", "[roles.tiers", "[roles.presets", "preset ="} {
+		if contains(string(b), forbidden) {
+			t.Errorf("Marshal() of an untouched machine emitted %q:\n%s", forbidden, b)
+		}
+	}
+	var round MachineConfig
+	if err := toml.Unmarshal(b, &round); err != nil {
+		t.Fatalf("Unmarshal() error: %v", err)
+	}
+	if round.Roles != nil {
+		t.Errorf("round-tripped Roles = %+v, want nil", round.Roles)
+	}
+}
+
+// TestSaveMachineConfigDocumentsPresets pins that a fresh config.toml tells its
+// reader presets exist, in the same spirit as TestSaveMachineConfigRolesExample:
+// a feature nobody can discover from the file they are editing is a feature
+// nobody uses.
+func TestSaveMachineConfigDocumentsPresets(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	if err := SaveMachineConfig(&MachineConfig{MachineID: "m-1"}); err != nil {
+		t.Fatalf("SaveMachineConfig() error: %v", err)
+	}
+	b, err := os.ReadFile(MachineConfigPath())
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if !contains(string(b), "roles.presets") {
+		t.Errorf("SaveMachineConfig() footer does not mention roles.presets; got:\n%s", b)
+	}
+}
+
+func contains(s, sub string) bool { return indexOf(s, sub) >= 0 }

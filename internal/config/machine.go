@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -46,7 +48,121 @@ type MachineRoles struct {
 	// the generated agent file omits the model field (so it inherits the
 	// caller's model) and generation prints a loud, non-suppressible warning
 	// naming the tier and harness rather than guessing an ID (aihub#642 AC7).
+	//
+	// This is the preset-LESS table: the one in effect when no preset is
+	// selected. It remains fully supported; presets are additive.
 	Tiers map[string][]RoleCandidate `toml:"tiers,omitempty"`
+
+	// Preset names this machine's active preset, one of Presets' keys. Empty
+	// means "use Tiers". It is the machine-level default that every entry
+	// point honours, so that `polyforge roles generate`, the serve-startup
+	// codex profile generation and `polyforge drain` cannot disagree about
+	// which models this machine uses. See ResolveTiers.
+	Preset string `toml:"preset,omitempty"`
+
+	// Presets holds named snapshots of the whole tier table (aihub#642
+	// draft_preset_semantics, confirmed by the owner 2026-09-14 and recorded
+	// at aihub#642 attrs.OWNER_CONFIRMATION_2026_09_14_preset_semantics):
+	// "preset = 「档位 → 模型表」的命名快照（如 balanced / frugal / max），切
+	// preset = 换整张表".
+	//
+	// SWAPPING, not merging, is the whole semantic. A preset does not layer
+	// over Tiers tier-by-tier; selecting one replaces the table outright. The
+	// owner's reason for narrowing it this far is on the record too:
+	// oh-my-opencode's preset can name models directly because it is a single
+	// harness, and polyforge is multi-harness, so a preset here may only
+	// decide WHICH tier table is in force.
+	Presets map[string]*RolesPreset `toml:"presets,omitempty"`
+}
+
+// RolesPreset is one `[roles.presets.<name>]` table: a complete, named
+// alternative to MachineRoles.Tiers.
+type RolesPreset struct {
+	// Tiers has exactly the shape and meaning of MachineRoles.Tiers.
+	Tiers map[string][]RoleCandidate `toml:"tiers,omitempty"`
+}
+
+// ResolveTiers returns the tier→candidate table in force and names where it came
+// from, so a caller can print the provenance rather than merely act on it.
+//
+// 🔴 This function is the ONE place that decides which table is in force, and
+// that is its entire reason to exist. `polyforge roles generate`
+// (internal/cli/roles_generate.go), the serve-startup codex profile generation
+// (cmd/polyforge/main.go) and `polyforge drain` (internal/cli/drain.go) all
+// resolve through it. Before aihub#673 the first two reached into
+// mc.Roles.Tiers directly and drain did not read the table at all, so a machine
+// could already resolve different models depending on which entry point ran —
+// the "同一台机器两个口径" hazard aihub#673 was filed to close. Adding a preset
+// layer that only one caller honoured would have reintroduced it one level up.
+//
+// Precedence, highest first:
+//
+//  1. override — `--preset=<name>` on the command line, for one invocation
+//  2. mc.Roles.Preset — `[roles] preset = "<name>"`, this machine's default
+//  3. mc.Roles.Tiers — `[roles.tiers]`, the preset-less table
+//
+// An unknown preset name is an ERROR naming the available presets, never a
+// silent fall back to Tiers. Falling back would be exactly the failure this
+// function prevents: the operator believes they are running `frugal`, the
+// binary quietly runs something else, and nothing in the output disagrees with
+// them. A name that does not resolve is a typo the operator can fix in seconds
+// once told; a silent substitution can run for weeks.
+//
+// A preset that exists but declares no tiers is refused for the same reason:
+// handing back an empty table would silently discard [roles.tiers] as well and
+// leave every role inheriting its harness's default model.
+//
+// A nil receiver, a nil Roles and an empty table are all legitimate: they mean
+// "this machine configured nothing", and the returned table is nil, which every
+// caller already handles as "no candidates, use the harness default".
+func (mc *MachineConfig) ResolveTiers(override string) (map[string][]RoleCandidate, string, error) {
+	var roles *MachineRoles
+	if mc != nil {
+		roles = mc.Roles
+	}
+
+	name, source := override, "--preset"
+	if name == "" && roles != nil {
+		name, source = roles.Preset, "~/.polyforge/config.toml [roles] preset"
+	}
+	if name == "" {
+		if roles == nil || len(roles.Tiers) == 0 {
+			// Phrased to read correctly where it is USED. Every caller
+			// interpolates this into "tier table from %s", and the earlier
+			// wording ("no tier table configured ...") produced
+			// "tier table from no tier table configured ...".
+			return nil, "no configured table (each harness's own default model)", nil
+		}
+		return roles.Tiers, "~/.polyforge/config.toml [roles.tiers]", nil
+	}
+
+	if roles == nil || len(roles.Presets) == 0 {
+		return nil, "", fmt.Errorf(
+			"preset %q was requested via %s but %s defines no [roles.presets.<name>] tables at all",
+			name, source, MachineConfigPath())
+	}
+	p, ok := roles.Presets[name]
+	if !ok {
+		return nil, "", fmt.Errorf("unknown preset %q (requested via %s); %s defines: %s",
+			name, source, MachineConfigPath(), strings.Join(sortedKeys(roles.Presets), ", "))
+	}
+	if p == nil || len(p.Tiers) == 0 {
+		return nil, "", fmt.Errorf(
+			"preset %q (requested via %s) declares no tiers; add a [roles.presets.%s.tiers] table to %s. "+
+				"Refused rather than resolved to an empty table, which would silently discard "+
+				"[roles.tiers] too and leave every role on its harness's default model",
+			name, source, name, MachineConfigPath())
+	}
+	return p.Tiers, fmt.Sprintf("preset %q (via %s)", name, source), nil
+}
+
+func sortedKeys(m map[string]*RolesPreset) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RoleCandidate is one (harness, model) pair in a tier's candidate list.
@@ -139,7 +255,21 @@ func SaveMachineConfig(mc *MachineConfig) error {
 		"# candidates in priority order, and generation uses the first one that\n" +
 		"# resolves in that harness's local model catalog:\n" +
 		"# [roles.tiers]\n" +
-		"# default = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n"
+		"# default = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n" +
+		"\n# Presets are NAMED SNAPSHOTS of that whole table. Selecting one SWAPS the\n" +
+		"# entire table -- it does not merge tier-by-tier with [roles.tiers] above.\n" +
+		"# `polyforge roles generate`, the serve-startup codex profile generation and\n" +
+		"# `polyforge drain` all honour the same selection, so this machine cannot end\n" +
+		"# up resolving different models depending on which one you ran:\n" +
+		"# [roles]\n" +
+		"# preset = \"frugal\"           # this machine's active preset\n" +
+		"# [roles.presets.frugal.tiers]\n" +
+		"# default = [{ harness = \"pi\", model = \"claude-haiku-4-5\" }]\n" +
+		"# raised  = [{ harness = \"pi\", model = \"claude-sonnet-4-5\" }]\n" +
+		"# [roles.presets.max.tiers]\n" +
+		"# default = [{ harness = \"pi\", model = \"claude-opus-4-1\" }]\n" +
+		"# Override for one run with `polyforge drain --preset=<name>` or\n" +
+		"# `polyforge roles generate <harness> --out <dir> --preset=<name>`.\n"
 	return os.WriteFile(MachineConfigPath(), append(append([]byte(header), b...), []byte(footer)...), 0600)
 }
 

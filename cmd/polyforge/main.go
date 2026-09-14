@@ -224,10 +224,28 @@ func generateCodexProfiles(mc *config.MachineConfig) error {
 		return fmt.Errorf("load roles: %w", err)
 	}
 
-	var tiers map[string][]config.RoleCandidate
-	if mc != nil && mc.Roles != nil {
-		tiers = mc.Roles.Tiers
+	// 🔴 Resolved through the ONE resolver, not read straight off
+	// mc.Roles.Tiers as this line used to be (aihub#673). This is one of the
+	// two production readers of the tier table; the other is
+	// internal/cli.generateRoles. If this boot path ignored the machine's
+	// [roles] preset while `polyforge roles generate` and `polyforge drain`
+	// honoured it, the same machine would resolve different models depending on
+	// which entry point ran -- the exact "同一台机器两个口径" hazard aihub#673
+	// was filed to close.
+	//
+	// No override is passed: this is a boot path with no command line. It
+	// honours the machine-level [roles] preset and nothing else.
+	//
+	// An error is returned rather than swallowed, and the caller logs it
+	// without exiting -- the pre-existing contract that role generation must
+	// never be able to break MCP server startup still holds. A misspelled
+	// preset therefore degrades to "codex profiles not regenerated this boot,
+	// loudly", not to "server will not start".
+	tiers, tierSource, err := mc.ResolveTiers("")
+	if err != nil {
+		return err
 	}
+	fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
 
 	probe := &codexProfileCatalogProbe{}
 	resolved := make(map[string]string, len(roleList))
@@ -456,7 +474,7 @@ Artifact viewer:
   artifact view <memory_id>   Fetch spec/plan HTML and open in browser
 
 Role/tier agent generation (aihub#642):
-  roles generate <pi|codex> --out <dir>
+  roles generate <pi|codex> --out <dir> [--preset=<name>]
                               Render per-role agent files (pf-<role>.md for pi,
                               step-<role>.toml for codex) from
                               internal/roles/definitions/*.yaml and this
@@ -465,6 +483,19 @@ Role/tier agent generation (aihub#642):
                               files are generated at build time instead
                               (committed via "go generate ./internal/roles/...")
                               -- this subcommand never touches them.
+                              --preset generates from a named tier table
+                              instead of the machine's configured selection.
+
+Tier-table presets (aihub#673): a preset is a NAMED SNAPSHOT of the whole
+tier->model table, and selecting one SWAPS the table rather than merging with
+it. All three readers honour the same selection -- "roles generate", the
+serve-startup codex profile generation, and "polyforge drain" -- so one machine
+cannot resolve different models depending on which entry point ran:
+    [roles]
+    preset = "frugal"              # this machine's default
+    [roles.presets.frugal.tiers]
+    default = [{ harness = "pi", model = "claude-haiku-4-5" }]
+An unknown preset name is refused, never silently ignored.
 
 Codex profile auto-generation (aihub#655, serve startup only, not a
 subcommand): when the codex CLI is on PATH, every "polyforge serve" boot
@@ -515,13 +546,32 @@ Engine (aihub#654, local-only, for a future headless orchestrator):
 
 Layer 3 continuous scheduling (aihub#640):
   drain --project=<name> [--all] [--plan] [--max-parallel=<n>]
-        [--max-rounds=<n>] [--max-work-items=<n>] [--channel=<h[/model],...>] [--json]
+        [--max-rounds=<n>] [--max-work-items=<n>] [--channel=<h[/model],...>]
+        [--preset=<name>] [--detach] [--json]
                               Repeatedly select the work items that are executable
                               right now (queued, rhs=false, no unfinished blocking
                               dependency, in scope), run them across rounds, and stop
                               with a terminal state. Exit codes: 0 COMPLETED,
                               10 IDLE, 11 BLOCKED_EXTERNAL, 12 FAILED.
                               --plan reports what WOULD run and claims nothing.
+                              --preset picks the tier->model table to dispatch with
+                              (see [roles.presets] below); --channel still wins
+                              wherever it names a model.
+                              --detach runs it in the background (setsid; there is no
+                              systemd here) and prints run id + pid + log path.
+  drain --stop [--run=<id>]   Stop the running drain on this machine -- the most
+                              recent run, or the one named by --run. Sends SIGTERM,
+                              the same signal Ctrl-C sends, so the run takes its
+                              normal graceful-cancellation path and writes a proper
+                              terminal snapshot. It NEVER escalates to SIGKILL:
+                              that would skip the final snapshot write and leave the
+                              run looking like a crash.
+                              Work items whose step was in flight are left CLAIMED
+                              and holding their locks (unchanged from Ctrl-C); --stop
+                              names them so they can be recovered.
+                              Deliberately a drain flag, not a top-level "halt":
+                              /pf-stop is the WORK-ITEM lifecycle verb
+                              (--pause/--wrap/--fail) and must not be shadowed.
   watch [--run=<id>] [--follow] [--list] [--json]
                               Show what a running drain is doing. Reads only that
                               run's local snapshot: zero network, so it never hangs

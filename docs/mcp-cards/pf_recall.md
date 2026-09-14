@@ -4,7 +4,7 @@
 {
   "tool": "pf_recall",
   "description_sha256": "ad0170367823e8481a50ac51523b48131f2f22f738d4a15d24234dc12ffeaae3",
-  "input_schema_sha256": "60538caf51ff437342c4b9ed3969d17c2e0c31c4b2ed75294d862dfa73904adc",
+  "input_schema_sha256": "b4c16095e09e28760e784f8d5b4ee98eb79ad70246a819d9d75e3bbeaee1bf16",
   "params": {
     "cursor": {
       "type": "string",
@@ -71,7 +71,7 @@ defect.
 | param | type | required | hop 1 promise |
 |---|---|---|---|
 | `project` | string | yes | project name |
-| `query` | string | no | semantic search query |
+| `query` | string | no | semantic search query; the vector path embeds it WITH the model's instruct prefix while stored rows stay bare, so absolute cosines shift down on any server carrying this behaviour and the `lexical` section still matches this string verbatim (`aihub#669`) |
 | `type` | array | no | ARRAY of type names; `.*` is a prefix wildcard and `\|` is NOT a separator — both held by `TestUnmatchedTypes` |
 | `work_item_id` | string | no | filter by work item — canonical id or slug |
 | `top_k` | string | no | default 20, ceiling 200; a JSON number is accepted (`TestWireQueryRecallTopKAcceptsAJSONNumber`) |
@@ -388,6 +388,37 @@ passing nothing returned the same 20 items in the same order.
   `internal/domain/memory_recall_router_db_test.go`
   (`TestRecallRouterEmptyTypeFilterStaysSemantic` and
   `TestRecallRouterWorkItemScopedBypassesVectorPath`).
+- **The query is embedded with an instruct prefix and stored rows are not**
+  (`aihub#669`, owner ruling 2026-09-14), held by
+  `internal/domain/embed_query_prefix_test.go`
+  (`TestMemoryVectorPathEmbedsThePrefixedQuery`) against a recording provider that
+  reports the exact bytes the provider received.
+  `internal/domain/memory_vector.go` (`RecallWithVector`) hands it
+  `internal/domain/embed_input.go` (`QueryEmbedInput`) of `req.Query` rather than
+  `req.Query` itself, and nothing anywhere writes the prefix back to that field,
+  which `internal/domain/embed_query_prefix_test.go`
+  (`TestNothingWritesThroughTheRequestQueryField` and
+  `TestOnlyTheQuerySideKnowsAboutThePrefix`) refuses at every frame rather than at
+  the one call site. The reason is that `internal/domain/memory_lexical.go`
+  (`recallLexical`) tokenizes that same field afterwards and matches every token
+  as a literal substring, so a prefixed field would empty the aihub#360 section
+  on every recall — `TestPrefixWouldDestroyTheLexicalSection` is that mechanism,
+  asserted. The argument shape is pinned a second time and independently by
+  `internal/domain/embed_writer_parity_test.go`
+  (`TestEveryEmbedWriteIsSourcedFromTheSharedBuilder`), whose read-site exemption
+  records the exact source text of both query-side embed calls.
+  Measured over 44 frozen queries on production (`aihub#660`, 2026-09-14):
+  recall@1 20 to 22, @5 26 to 29, @10 unchanged at 30; real queries scoring below
+  a garbage control 17/36 to 0/36; lexical target hits 2 and 2.
+  The gain is re-ranking rather than reach: the 12-query miss set is identical in
+  both arms of that run.
+  🔴 It lowers EVERY similarity rather than raising the right answer's, so a
+  `similarity_threshold` calibrated against a server without it is reading a
+  shifted scale,
+  and the lowest real query of those 44 clears the garbage control by only 0.0607.
+  <!-- prose-only: because=measurement -->
+  That 0.0607 is the ceiling for any future relative threshold, and nothing
+  watches it.
 
 ## hop 5 — what comes back
 

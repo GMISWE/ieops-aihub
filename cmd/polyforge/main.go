@@ -13,6 +13,7 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/cli"
 	"github.com/GMISWE/ieops-aihub/internal/config"
@@ -163,12 +164,111 @@ type codexProfileCatalogProbe struct {
 	once   sync.Once
 	models map[string]bool
 	err    error
+	// timeout overrides codexProbeTimeout, and exists so the test that proves
+	// the deadline works does not have to spend the production one waiting for
+	// it. Zero means the shipped default, so every non-test construction — all
+	// of which use the zero value — gets codexProbeTimeout without naming it.
+	//
+	// A field rather than a package var: a var would be mutable global state
+	// shared by whatever else lands in package main, and the thing being made
+	// configurable here belongs to this probe.
+	timeout time.Duration
 }
+
+// effectiveTimeout is codexProbeTimeout unless this probe was built with one.
+func (p *codexProfileCatalogProbe) effectiveTimeout() time.Duration {
+	if p.timeout > 0 {
+		return p.timeout
+	}
+	return codexProbeTimeout
+}
+
+// codexProbeTimeout bounds the one subprocess this file runs before the MCP
+// server begins serving.
+//
+// 🔴 HANGING IS NOT AN ERROR, and that is the whole defect this constant exists
+// for. The call site treats a probe failure as a warning and carries on, which
+// makes every FAILURE mode of `codex debug models` harmless — but a codex that
+// neither succeeds nor fails (an auth prompt waiting on a tty it does not have,
+// a network read with no deadline) returns from neither branch, and
+// exec.Command has no deadline of its own. This runs in main() BEFORE
+// server.Serve, so a hung codex does not degrade codex profile generation: it
+// stops this process from ever speaking MCP. Every Claude Code / pi session on
+// the machine starts its own polyforge MCP server, so one wedged codex binary
+// presents as "MCP will not connect" everywhere at once — the IR3 symptom, with
+// a cause nothing in the polyforge process is even logging, because the process
+// is blocked before its first line of protocol.
+//
+// The value is a ceiling on a local process listing a static catalog, not a
+// budget for it: `codex debug models` answers in milliseconds when it answers at
+// all, so 5s is far past any honest slow path and still an imperceptible
+// one-time cost on a boot that is already doing config and network setup. It is
+// deliberately NOT tied to the server's own context: cancelling this probe must
+// abandon the probe, never the server.
+//
+// ⚠️ A TIMEOUT IS THE FIX, NOT BACKGROUNDING IT. Moving the probe off the boot
+// path would remove the stall and also remove the ordering generateCodexProfiles
+// depends on — it writes $CODEX_HOME profiles that a codex session started right
+// after this one is entitled to find. Bounding the wait keeps the ordering and
+// costs a known, small amount.
+const codexProbeTimeout = 5 * time.Second
+
+// codexProbeWaitDelay is the grace period after cancellation, and WITHOUT IT THE
+// TIMEOUT ABOVE DOES NOT ACTUALLY BOUND ANYTHING.
+//
+// 🔴 MEASURED WHILE WRITING THIS FIX, and it is the reason the fix is two
+// constants rather than one. exec.CommandContext cancels by killing the process
+// it started — and only that process. Output() does not return when the child
+// dies; it returns when the stdout pipe reaches EOF, which happens when the LAST
+// holder of the write end closes it. A child that forked before hanging leaves a
+// grandchild holding that pipe, so Wait blocks on the pipe long after the child
+// is dead and the deadline has passed.
+//
+// The first version of this fix had the context and no WaitDelay. Against a
+// `/bin/sh` wrapper that exec'd `sleep 600` — the exact shape of a wrapper
+// script, which is how codex is installed by several package managers — the
+// probe did not return at all: the shell was killed on schedule, the sleep
+// survived holding the pipe, and `go test` had to be killed by hand after two
+// and a half minutes. A timeout that fires and then blocks anyway is worse than
+// no timeout, because it reads as fixed.
+//
+// WaitDelay is the documented remedy for both halves (a child that ignores the
+// kill, and a child that exits leaving its pipes open): Wait force-closes the
+// descriptors and returns this long after cancellation. One second is generous
+// for a local process already sent a signal, and it makes the worst case
+// codexProbeTimeout + codexProbeWaitDelay = 6s, which is the number the boot
+// path is actually bounded by.
+//
+// ⚠️ WHAT THIS DOES NOT DO, stated so nobody reads it as more than it is: the
+// grandchild is not reaped, so a hung codex that forked stays hung, detached.
+// That is strictly better than before — the same process was hung either way and
+// used to take every MCP session on the machine down with it — but it is not a
+// process-group kill, and if orphaned codex processes ever show up in anger the
+// fix is SysProcAttr{Setpgid: true} plus a cmd.Cancel that signals -pgid, not a
+// longer delay here.
+const codexProbeWaitDelay = 1 * time.Second
 
 func (p *codexProfileCatalogProbe) load() {
 	p.once.Do(func() {
-		out, err := exec.Command("codex", "debug", "models").Output()
+		timeout := p.effectiveTimeout()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "codex", "debug", "models")
+		// See codexProbeWaitDelay: the context alone kills the child and then
+		// blocks on a pipe a grandchild still holds. Both lines are the fix.
+		cmd.WaitDelay = codexProbeWaitDelay
+		out, err := cmd.Output()
 		if err != nil {
+			// The timeout is reported as itself. context.DeadlineExceeded reaches
+			// the caller as "signal: killed" from Output() alone, which reads like
+			// an operator killed codex rather than like polyforge gave up on it,
+			// and that is the one distinction whoever is debugging a boot stall
+			// needs.
+			if ctx.Err() != nil {
+				p.err = fmt.Errorf("codex debug models: gave up after %s (%w); "+
+					"codex profile generation is skipped for this boot", timeout, ctx.Err())
+				return
+			}
 			p.err = fmt.Errorf("codex debug models: %w", err)
 			return
 		}

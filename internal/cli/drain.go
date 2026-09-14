@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/drain"
@@ -885,8 +886,17 @@ func polyforgeHome() (string, error) {
 	return filepath.Join(home, ".polyforge"), nil
 }
 
+// ulidSeq makes newULID's output unique even when two callers land in the same nanosecond.
+var ulidSeq atomic.Uint64
+
 // newULID mints a step-attempt id. The loop needs ids that are unique and sort by creation time;
 // it does not need canonical ULID encoding, and the server treats them as opaque strings.
+//
+// Called concurrently, once per step, from every worker in a round, so it carries a counter
+// rather than trusting the clock alone to separate two calls. A timestamp is not a uniqueness
+// guarantee: two goroutines can read the same nanosecond, and a duplicated step-attempt id is
+// the kind of defect that shows up as a work item whose step state is quietly wrong rather than
+// as a crash.
 func newULID() string {
-	return fmt.Sprintf("sa_%d_%d", time.Now().UTC().UnixNano(), os.Getpid())
+	return fmt.Sprintf("sa_%d_%d_%d", time.Now().UTC().UnixNano(), os.Getpid(), ulidSeq.Add(1))
 }

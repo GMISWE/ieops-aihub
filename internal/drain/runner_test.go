@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,7 +248,12 @@ func runnerFor(h *fakeHub, b Budget) *Runner {
 	if b.MaxParallel == 0 {
 		b.MaxParallel = 1
 	}
-	n := 0
+	// Atomic, not a plain `n++`: Runner calls NewULID from every worker goroutine, so an
+	// unsynchronised counter here is a data race in the TEST that `-race` reports against
+	// production line numbers. It is also not merely a test artifact — it says the real
+	// NewULID must be safe to call concurrently, which is why the production one (newULID in
+	// internal/cli) carries an atomic counter too.
+	var n atomic.Int64
 	return &Runner{
 		Project:  "testproj",
 		Scope:    Scope{UserID: "u_me"},
@@ -255,7 +261,7 @@ func runnerFor(h *fakeHub, b Budget) *Runner {
 		RunDir:   "/tmp/drain-test",
 		Channels: []Channel{{Harness: HarnessClaude}},
 		Now:      time.Now,
-		NewULID:  func() string { n++; return fmt.Sprintf("sa_%d", n) },
+		NewULID:  func() string { return fmt.Sprintf("sa_%d", n.Add(1)) },
 
 		Executable:      h.executable,
 		AllInScope:      h.allInScope,

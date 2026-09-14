@@ -8,22 +8,37 @@
 > `Read` this file when you are actually running an interactive (`requires_human_session=true`)
 > execute loop, or when a tool does not publish a parameter the resident fragment uses.
 
-**Go package pointer (aihub#654).** `internal/engine` now implements pieces (a)-(e) of this
-document behind `polyforge engine <verb>`: (a) §0's startup sequence (`startup.go`), (b) the
-step-bracket `pf_update_step` sequencing described in `_common/references/lifecycle-details.md`
-§1 (`bracket.go`), (c) review-marker parsing (`review.go`), (d) the `role:` catalog/heuristic
-fallback (`role.go`), and (e) wrap-time worktree cleanup (`wrap.go`), each with its own Go tests
-(`internal/engine/*_test.go`, `internal/cli/engine_test.go`). This page still carries the
-pseudocode a dispatched B/C loop reads and executes directly; the two are not yet unified into
-one call path (deferred to aihub#657, which also owns thinning this prose down to literal
-`polyforge engine ...` wrappers once it lands).
+**Go package (aihub#654 / aihub#657).** `internal/engine` implements pieces (a)-(e) of this
+document and `polyforge engine <verb>` (**§0h**) is its CLI surface: (a) §0's startup sequence
+(`startup.go`), (b) the step-bracket `pf_update_step` sequencing described in
+`_common/references/lifecycle-details.md` §1 (`bracket.go`), (c) review-marker parsing
+(`review.go`), (d) the `role:` catalog/heuristic fallback (`role.go`), and (e) wrap-time
+worktree cleanup (`wrap.go`), each with its own Go tests (`internal/engine/*_test.go`,
+`internal/cli/engine_test.go`). The loops below now CALL those verbs instead of restating them.
+What remains on this page is the argument shapes, the failure branches and the reasoning a
+caller needs in order to CHECK an answer - deliberately not a second implementation of it, which
+is what a hand-executed copy of the same logic had become.
 
 ---
 
-## 0. Startup - the exact commands
+## 0. Startup - one command, and what it does for you
+
+```bash
+polyforge engine startup --workspace-root=<workspace_root> --worktree-root=<worktree_root> \
+  --scenario-url=<project.scenario> --wi-type=<wi_type> [--project=<project>]
+```
+
+prints `{scenario_path, legacy_fallback, sha, template_source, steps:[{id, content, expanded}]}`
+and writes `<worktree_root>/.pf_meta.json`. That one call IS steps 2-6 below; only step 1 stays a
+tool call. `legacy_fallback: true` means it resolved the pre-aihub#327 clone path - say so, and
+recommend re-running `polyforge init`.
+
+`internal/engine/startup.go` is the implementation and `internal/engine/startup_test.go` pins
+every branch. Steps 2-6 are kept here as the SPEC of that command - what to expect in its output,
+what each failure means, and how to do it by hand on a harness whose binary predates §0h.
 
 1. Read the wi info: `wi_info = pf_list_work_items(ids=[<current_wi_id>])`.
-2. Resolve the scenario repo path from `.polyforge.yaml`. `owner` and `repo` are the last two
+2. **Scenario repo path**, from `.polyforge.yaml`. `owner` and `repo` are the last two
    path segments of `project.scenario` with `.git` stripped
    (`git@github.com:GMISWE/polyforge-coding.git` -> `GMISWE`, `polyforge-coding`; a URL with
    only ONE path segment has no owner and keeps the bare repo name):
@@ -36,40 +51,30 @@ one call path (deferred to aihub#657, which also owns thinning this prose down t
    file exists, never which repo it came from (aihub#327).
 
    **Legacy fallback - and it is guarded.** A workspace whose last `polyforge init` predates
-   this layout still holds the clone at `<workspace_root>/.repo/<repo>/`. Use it only when
+   this layout still holds the clone at `<workspace_root>/.repo/<repo>/`. It is used only when
    `git -C <workspace_root>/.repo/<repo> remote get-url origin` names the same repo as
    `project.scenario` (ignore scheme, credentials and `.git`). If it names a different repo,
-   or the directory is absent, STOP and report that `polyforge init` has not been run with a
-   binary that knows this layout. An unguarded fallback re-opens the exact silent mix-up in
-   every workspace that has not re-inited.
-3. **SHA pinning** - write it to `.pf_meta.json` in the worktree root:
-   ```bash
-   sha = git -C <scenario_path> rev-parse HEAD
-   # <worktree_root>/.pf_meta.json: {"scenario_sha": "<sha>", "started_at": "<ISO8601>"}
+   or the directory is absent, the command fails - STOP and report that `polyforge init` has not
+   been run with a binary that knows this layout. An unguarded fallback re-opens the exact
+   silent mix-up in every workspace that has not re-inited.
+3. **SHA pinning** - `git -C <scenario_path> rev-parse HEAD`, reported as `sha` and written to
+   `<worktree_root>/.pf_meta.json` as `{"scenario_sha": "<sha>", "started_at": "<ISO8601>"}`.
+4. **Resolve the .md file** at that pinned SHA, with a fallback chain (`template_source` names
+   the rung that won):
    ```
-4. **Resolve the .md file** using that pinned SHA, with a fallback chain:
-   ```
-   1. git show <sha>:{wi_type}.{project}.md   <- project-specific
-   2. git show <sha>:{wi_type}.md             <- generic fallback (warn and continue)
+   1. git show <sha>:{wi_type}.{project}.md   <- project-specific ("project")
+   2. git show <sha>:{wi_type}.md             <- generic fallback ("generic"; warn and continue)
    3. neither exists -> pf_complete_attempt(failed), report and list the available .md files, stop
    ```
-5. **Scan `## Step:` sections** (document order):
-   ```
-   scan by the regex ^## Step: (\w+)\s*$ (strict line start, ignore inside code fences)
-   produce an ordered step list: [(step_id, content), ...]
-   ```
-6. **Expand `@include` directives** (pair-parsing rule). `@include:` and `level:` are a bound
-   pair: `level:` must be the line immediately after `@include:`, and its scope is only that
-   include. Multiple includes each have their own level (or no level).
-   ```
-   scan the section content line by line:
-   - on @include: <path>
-       -> read the next line; if it is "level: <value>" record the level, else level=null
-       -> expand via git show <sha>:<path> (if missing, call pf_complete_attempt(failed) and stop)
-       -> if there is a level, insert a line before the expanded content: "Review level: <value>"
-   - any other line: keep as-is
-   concatenate the expanded content with the remaining prose
-   ```
+5. **Scan `## Step:` sections** by `^## Step: (\w+)\s*$` (strict line start, ignoring any such
+   heading inside a code fence), in document order -> `steps[].id` / `steps[].content`.
+6. **Expand `@include` directives** into `steps[].expanded` (pair-parsing rule). `@include:` and
+   `level:` are a bound pair: `level:` must be the line immediately after `@include:`, and its
+   scope is only that include. Multiple includes each have their own level (or no level). Each
+   include is read with `git show <sha>:<path>`; a missing one is fatal, so
+   `pf_complete_attempt(failed)` and stop. Where a level is present, the line
+   `Review level: <value>` is inserted before that include's expanded content.
+
    `level:` does NOT select a model. It is `common/review`'s review-depth argument and the loop
    passes it through as `Review level: <value>` - nothing more. See §0f.
 
@@ -122,12 +127,18 @@ the agents, or re-keying the choice all go red rather than shipping as prose dri
 
 ## 0c. `fail_step_and_attempt` - the review-FAIL path, verbatim
 
-`engine.native.md` abbreviates this call pair. When `parse_review_result` returns `FAIL`:
+`engine.native.md` abbreviates this call pair. When `polyforge engine parse-review` returns
+`FAIL`, ask §0h for the step half and make what it prints:
+
+```bash
+polyforge engine bracket-plan --step-id=<step_id> --status=failed \
+  --step-attempt-id=<sa_id> --error-type=review_fail
+```
+
+It prints exactly ONE `pf_update_step(status="failed")` call and never a next one - `next_step`
+is not valid on a failure and the loop stops here anyway. Then, yourself:
 
 ```python
-# next_step is NOT valid on a failure - the loop stops here anyway.
-pf_update_step(work_item_id=<current>, step_id=step_id, status="failed",
-               step_attempt_id=sa_id, error_type="review_fail")
 pf_complete_attempt(work_item_id=<current>, status="failed",
                     note="failed reason: review_fail at step " + step_id)
 break   # stop the whole loop, skip the completed report; output the review issues
@@ -135,6 +146,8 @@ break   # stop the whole loop, skip the completed report; output the review issu
 
 Both calls, in that order. `pf_update_step(failed)` alone leaves the attempt running;
 `pf_complete_attempt(failed)` alone leaves the step showing `in_progress` forever.
+`pf_complete_attempt` is deliberately NOT part of `bracket-plan`'s output: it is terminal
+attempt state, once per wi, outside the per-step bracket that verb models.
 
 ## 0d. The startup three-segment report, with its literal values
 
@@ -311,6 +324,48 @@ this file and the loop above is pseudocode it executes by hand. The `workflow_id
   than assume ambient context will be there, because for A it will be present twice and for B/C
   it is the only copy.
 
+## 0h. `polyforge engine <verb>` - what both loops call instead of re-deriving it (aihub#657)
+
+`internal/engine` is the single implementation of the mechanics this file used to spell out as
+pseudocode, and `polyforge engine <verb>` is its CLI surface. Every verb is local-only - no
+aihub API call, no network - and prints JSON on stdout, so any harness with a shell can run one
+and read the answer. They are a COMPUTE surface, never a side-effect one: none of them makes an
+MCP call, so `pf_update_step` / `pf_complete_attempt` remain the loop's own calls, made after
+reading what the verb printed.
+
+| verb | replaces the pseudocode for | stdout |
+|---|---|---|
+| `startup` | §0 steps 2-6 | `{scenario_path, legacy_fallback, sha, template_source, steps:[{id,content,expanded}]}`, and writes `.pf_meta.json` |
+| `resolve-role` | `is_review(step_id)`, and a step's explicit `role:` | `{role, tier, read_only, source}`, `source` one of `declared` / `catalog` / `heuristic` |
+| `parse-review` | `parse_review_result` | `{"result": "PASS"}`, or `WARN` / `FAIL`: the LAST `<!-- REVIEW_RESULT: ... -->` marker in the output, and `WARN` when there is none - never `PASS`, never an auto-`FAIL` |
+| `bracket-plan` | the step bracket, both its forms | an ORDERED array of the `pf_update_step` calls to make |
+| `cleanup-worktrees` | wrap-time worktree removal (`_common/references/lifecycle-details.md` §0) | `{removed:[...], errors:{}}` |
+
+### `bracket-plan` - the one the loop runs on every step
+
+```bash
+polyforge engine bracket-plan --step-id=<step_id> --status=<completed|failed> \
+  --step-attempt-id=<sa_id> --next-step-id=<next_step_id> \
+  --next-step-attempt-id=<next_sa_id> --supports-next-step \
+  --artifact-summary=<artifact_summary> --error-type=<error_type>
+```
+
+Make each printed call with exactly the arguments it lists, in the order printed. Nothing has
+happened when the command returns: it is a plan.
+
+- Omit `--next-step-id` / `--next-step-attempt-id` on the LAST step, and on `--status=failed`
+  (`next_step` is rejected on a failure, not ignored).
+- Omit `--supports-next-step` when `pf_update_step` does not publish `next_step` (§2). The plan
+  then has TWO calls rather than one fused call, and the second carries
+  `step_attempt_id=<next_sa_id>` - exactly the threading the two-call form gets wrong by hand.
+- Omit `--artifact-summary` / `--error-type` where they do not apply.
+
+`internal/cli/engine_bc_contract_test.go` reads the flags out of THIS block, runs a freshly
+built binary with them, and compares the result against `engine.PlanStepBracket` called directly
+in Go - over the same step-sequence fixtures, asserting an identical `pf_update_step` sequence.
+A flag renamed or dropped here therefore goes red rather than drifting silently, which is what
+makes deleting the pseudocode safe rather than merely shorter.
+
 ## 1. Execute (rhs=true, interactive mode) - the loop in full
 
 > **Why this one is deferred, when the auto loop is not.** Interactive mode is a *per-step*
@@ -322,47 +377,41 @@ this file and the loop above is pseudocode it executes by hand. The `workflow_id
 > this is the first thing that should come back.
 
 ```python
-# Same bracket as auto mode: start the first step, then complete-and-advance. No pf_get_step
-# is needed FOR THE BRACKET (it carries no version token); it is still the authority for
-# prior-step context.
+# Same bracket as auto mode - the SAME `polyforge engine bracket-plan` command with the same
+# flags (§0h), so both loops produce an identical pf_update_step sequence for the same step.
+# No pf_get_step is needed FOR THE BRACKET (it carries no version token); it is still the
+# authority for prior-step context.
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
+pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
 
-for i, (step_id, content) in enumerate(sections):
-    expanded = expand_includes(content, sha)
-
+for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
     output: f"## Step {step_id}\n\n{expanded}"
 
     wait for user input:
       "continue" / "done" / "ok"  -> fall through to the completed report below, then move to the
                                      next step
-      "skip"                      -> COMPLETE it, with a summary that says it was skipped:
-                                     pf_update_step(step_id, status="completed",
-                                       step_attempt_id=sa_id,
-                                       artifact_summary="skipped - <the user's reason>",
-                                       next_step=..., next_step_attempt_id=...)
-                                     i.e. the same complete-and-advance call as the
-                                     "continue" path, differing only in the summary text.
-      "fail"                      -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id);
+      "skip"                      -> COMPLETE it, with a summary that says it was skipped: the
+                                     same bracket-plan call as the "continue" path, only with
+                                     --artifact-summary="skipped - <the user's reason>".
+      "fail"                      -> bracket-plan --status=failed --step-attempt-id=<sa_id>
+                                     (§0c's shape, without --error-type unless a review said so);
+                                     make what it prints, then
                                      pf_complete_attempt(failed, note="failed reason: <user description>");
                                      break (stop the whole loop)
 
-    if step_id.endswith("_review") or step_id in ("review", "code_review", "release_review"):
+    if is_review(step_id):   # `polyforge engine resolve-role --step-id=<step_id>` -> reviewer
         "PASS" / "continue"  -> fall through to the completed report below
         "WARN <desc>"        -> record the warning, ask whether to continue; if yes, report
                                 completed as usual
-        "FAIL <desc>"        -> pf_update_step(step_id, status="failed", step_attempt_id=sa_id,
-                                error_type="review_fail");
-                                pf_complete_attempt(failed, note="failed reason: <desc>"); break
+        "FAIL <desc>"        -> §0c, with note="failed reason: <desc>"; break
 
     # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here:
-    # report this step completed AND start the next one, in one call.
-    next_sa = new_ulid() if i + 1 < len(sections) else None
-    pf_update_step(work_item_id=<current>, step_id=step_id, status="completed",
-                   step_attempt_id=sa_id,
-                   artifact_summary=<one-line summary of what this step produced>,
-                   next_step=sections[i+1].step_id if next_sa else None,
-                   next_step_attempt_id=next_sa)
+    # report this step completed AND start the next one.
+    next_sa = new_ulid() if i + 1 < len(steps) else None
+    run bracket-plan(--step-id=step_id, --status=completed, --step-attempt-id=sa_id,
+                     --next-step-id / --next-step-attempt-id only when next_sa exists,
+                     --artifact-summary=<one-line summary of what this step produced>)
+    make every pf_update_step call it prints, in that order
     sa_id = next_sa
 
 # all steps done -> wrap + worktree cleanup (_common/lifecycle.md ## Once per wi, whose full
@@ -409,10 +458,10 @@ conflate them.
 
 Applies to BOTH loops. Check what the tools publish; do not infer it from a version string.
 
-- **No `next_step` on `pf_update_step`** -> drop the two `next_*` arguments and start each step
-  with its own `pf_update_step(..., status="in_progress", step_attempt_id=...)` at the top of the
-  loop, as before. Passing `next_step` anyway means it is silently dropped and the next step
-  never starts.
+- **No `next_step` on `pf_update_step`** -> drop `--supports-next-step` from `bracket-plan`
+  (§0h). It then prints TWO calls instead of one: `status="completed"` for this step, and a
+  separate `status="in_progress"` for the next one with `step_attempt_id` threaded onto it.
+  Passing `next_step` anyway means it is silently dropped and the next step never starts.
 - **No `note` on `pf_complete_attempt`** -> emit
   `pf_emit_event(event_type="note", payload={text: "failed reason: ..."})` **before** the
   terminal call. Do not pass `note` to a tool that does not publish it: it is accepted and

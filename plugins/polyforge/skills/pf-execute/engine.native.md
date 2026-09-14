@@ -2,68 +2,54 @@
 
 > Injected when `superpowers` is absent; bracket / ship / wrap come from `_common/lifecycle.md`.
 > **`Read @@PLUGIN_ROOT@@/skills/pf-execute/references/engine-native-details.md` before step 1**
-> - startup commands, the `@include` rule, the rhs=true loop, older-binary fallbacks.
+> - §0h's `polyforge engine` verbs, the rhs=true loop, older-binary fallbacks.
 
-## Startup - run the on-demand file §0 first
+## Startup - one command, not six steps
 
-§0 carries all six startup steps verbatim: the scenario clone at
-`<workspace_root>/.repo/<owner>__<repo>/`, **pinning its SHA** into `.pf_meta.json`, template
-resolution, section scan, `@include` expansion at that sha. `Read` it - the fallback chain, the
-pinning and the `@include`/`level:` pair rule are each easy to get subtly wrong.
+`polyforge engine startup --workspace-root=<ws> --worktree-root=<wt> --wi-type=<wi_type>
+--scenario-url=<project.scenario> [--project=<name>]` IS §0 - clone at
+`<workspace_root>/.repo/<owner>__<repo>/`, SHA pinned into `.pf_meta.json`, template resolved,
+sections scanned, `@include`s expanded at that sha - and prints
+`{scenario_path, legacy_fallback, sha, template_source, steps:[{id, content, expanded}]}`.
+Do not hand-run those steps. `Read` §0 when it errors.
 
 Prior-step context = `pf_get_step` -> `completed_steps`; nothing writes a worktree step file.
 
 ## Execute (rhs=false, auto mode)
 
 ```python
-# Model tier by STEP KIND (aihub#338): review steps dispatch on the raised tier, every other
-# step on the default. Keyed on the step id, never on `level:` - that is review DEPTH, a
-# different parameter that happens to share the key name (§0f has the mapping and its gate).
-# The models live ONLY in the agent files (agents/*.md); the loop picks WHICH agent.
+# The tier is a STEP KIND -> AGENT choice (aihub#338/#555); the models live ONLY in the agent
+# files (agents/*.md), so the loop picks WHICH agent and never passes a model - an explicit one
+# silently OVERRIDES the file. `polyforge engine resolve-role --step-id=<sid>` IS the predicate:
+# is_review(sid) = sid.endswith("_review") or sid in ("review","code_review","release_review").
 STEP_AGENT, REVIEW_AGENT = "polyforge:step-executor", "polyforge:step-reviewer"
-def is_review(sid):
-    return sid.endswith("_review") or sid in ("review", "code_review", "release_review")
 
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=sections[0].step_id, status="in_progress")
+pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
 
-for i, (step_id, content) in enumerate(sections):
-    expanded = expand_includes(content, sha)
-
-    # Dispatch by copying §0b's Agent-call template VERBATIM. subagent_type is the ONLY
-    # model channel: the agent file carries the model, and an explicit model argument
-    # silently OVERRIDES the file (aihub#555 measured) - NEVER pass one.
+for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
     dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT, prompt=§0b)
+    # ^ copy §0b's template VERBATIM; subagent_type is the only channel that reaches a model.
 
     if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
         break   # stop the loop; no retry, and do NOT call pf_complete_attempt (§0e)
 
     if is_review(step_id):
-        result = parse_review_result(subagent_output)
-        if result == "FAIL":
-            # §0c: pf_update_step(status="failed", step_attempt_id=sa_id,
-            # error_type="review_fail") THEN pf_complete_attempt(status="failed", note=...)
-            break   # both, in that order; then output the review issues
-        elif result == "WARN":
-            print the warning and continue
+        # parse_review_result = `polyforge engine parse-review --file=<the subagent's output>`
+        result = that verb's {"result": "PASS"|"WARN"|"FAIL"}
+        if result == "FAIL":  do §0c, then break   # then output the review issues
+        if result == "WARN":  print the warning and continue
 
-    # complete this step and start the next in ONE call (_common/lifecycle.md ## Bracket
-    # every step). Omit both next_* args on the last step.
-    next_sa = new_ulid() if i + 1 < len(sections) else None
-    pf_update_step(..., step_id=step_id, status="completed", step_attempt_id=sa_id,
-                   artifact_summary=<the subagent's returned summary line>,
-                   next_step=sections[i+1].step_id if next_sa else None,
-                   next_step_attempt_id=next_sa)
-    sa_id = next_sa
+    # Complete this step and start the next: run `polyforge engine bracket-plan` (§0h has the
+    # flags), make every pf_update_step call it prints in that order, then set
+    # sa_id = the --next-step-attempt-id you gave it. It owns the fused-vs-two-call choice and
+    # the step_attempt_id threading; omit both next_* on the last step.
 
 # all steps done -> wrap + cleanup (_common/lifecycle.md ## Once per wi)
 ```
 
-**`parse_review_result(output)`** = the LAST `<!-- REVIEW_RESULT: (PASS|WARN|FAIL) -->` match;
-no marker -> warn it is missing and return `WARN`, never an auto-fail.
-
-**The model tier is keyed on the step's KIND, never on `level:`** - §0f has the contract, the
-mapping and its gate.
+**The model tier is keyed on the step's KIND, never on `level:`** - that is review DEPTH, a
+different parameter sharing the key name. §0f has the contract, the mapping and its gate.
 
 ## Execute (rhs=true, interactive mode)
 

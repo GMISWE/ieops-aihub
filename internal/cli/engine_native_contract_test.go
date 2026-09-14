@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/engine"
 )
 
 // Contract gate for the native engine's step-progress and pause instructions.
@@ -35,6 +37,10 @@ import (
 //           an instruction placed after the work is not a resume instruction.
 //   Tag C — the auto loop has an explicit paused-attempt exit that terminates without retrying
 //           and without completing the attempt.
+//   Tag E — (aihub#657) the resident loop CALLS `polyforge engine <verb>` for the mechanics
+//           internal/engine now owns, and does not keep a second copy of them beside the call.
+//           Added when the pseudocode was deleted: until then the loop WAS the implementation,
+//           so "does it restate the implementation" was not a question that could be asked.
 //   Negative control — every file is non-empty and every "must not contain" check is paired with
 //           a positive anchor in the same file, so a renamed file or a typo'd path fails loudly
 //           instead of satisfying the ban for free.
@@ -192,6 +198,51 @@ func TestEngineNativeContract(t *testing.T) {
 				"an attempt that must stay paused.", rel, pauseTool, completeTool, n, pauseNoComplete)
 		}
 	})
+
+	// ── Tag E (aihub#657) ─────────────────────────────────────────────────────────────────
+	// The resident loop delegates its mechanics to `polyforge engine <verb>` instead of
+	// restating them. Both halves are asserted, because each alone is satisfiable for free: a
+	// document can name the verbs AND keep the pseudocode beside them (two answers and no way
+	// to tell which is current — the aihub#413 shape), or drop the pseudocode and name nothing
+	// (a loop with no instructions at all).
+	t.Run("TagE_MechanicsAreDelegatedNotRestated", func(t *testing.T) {
+		const rel = "skills/pf-execute/engine.native.md"
+		body := readEngineDoc(t, pluginRoot, rel)
+
+		for _, verb := range engineDelegatedVerbs {
+			if !strings.Contains(body, verb) {
+				t.Errorf("%s does not name %q. aihub#657 deleted the pseudocode this verb "+
+					"replaced, so without the call the loop is told neither how to do the work "+
+					"nor where the implementation it is a caller of lives.", rel, verb)
+			}
+		}
+
+		// The specific restatement that was removed: the bracket's next_* argument assembly,
+		// which lived here as a second copy of _common/lifecycle.md's and is now
+		// `polyforge engine bracket-plan`'s job (engine-native-details.md §0h). Assembling it
+		// by hand is the lifecycle-details.md §1 trap — a two-call fallback that drops
+		// step_attempt_id leaves current_step_attempt NULL and nothing reports it.
+		for _, restated := range []string{"next_step=", "next_step_attempt_id="} {
+			if strings.Contains(body, restated) {
+				t.Errorf("%s assembles %q by hand again. That is the argument juggling "+
+					"bracket-plan exists to own; a second copy here drifts from "+
+					"engine.PlanStepBracket with nothing comparing the two, which is exactly "+
+					"what internal/cli/engine_bc_contract_test.go was written to prevent.",
+					rel, restated)
+			}
+		}
+	})
+}
+
+// engineDelegatedVerbs are the CLI calls the resident loop must name, one per piece of
+// mechanics aihub#657 removed from it. `cleanup-worktrees` is deliberately NOT here: it is a
+// once-per-wi call and lives in _common/references/lifecycle-details.md §0, on the other side
+// of the resident/on-demand split whose budget is the reason this thinning happened at all.
+var engineDelegatedVerbs = []string{
+	"polyforge engine startup",
+	"polyforge engine resolve-role",
+	"polyforge engine parse-review",
+	"polyforge engine bracket-plan",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -441,6 +492,101 @@ func TestEngineNativeLevelVocabularyContract(t *testing.T) {
 					"prose claims", frag)
 			}
 		}
+
+		// aihub#657 ADDS the check below rather than replacing the three above, and the reason
+		// is worth stating because the obvious reading of the thinning is the opposite one.
+		//
+		// Before aihub#654 the predicate existed once, in markdown, and a substring check was
+		// all there was to check. aihub#654 gave it a second home in Go (engine.IsReviewStep)
+		// and aihub#657 rewrote the markdown to point at it. Two copies of one predicate is the
+		// aihub#294 drift class, and a substring assertion is blind to exactly that failure: it
+		// passes as happily on a markdown copy that has quietly diverged from the Go one as on
+		// a copy that agrees. So the markdown's own spelling is now PARSED and reconciled
+		// against the implementation it claims to describe, in both directions.
+		//
+		// The three substring checks stay because they are what makes this parse possible: an
+		// extractor is only evidence if its anchors are pinned, and deleting them would leave
+		// the reconciliation reading an empty set — the silent-success failure this whole suite
+		// exists to prevent.
+		if !strings.Contains(body, "polyforge engine resolve-role") {
+			t.Errorf("skills/pf-execute/engine.native.md no longer names `polyforge engine " +
+				"resolve-role`. Since aihub#657 that verb IS the predicate's implementation " +
+				"(internal/engine's IsReviewStep, via ResolveRole's tier 3) and the markdown is " +
+				"a caller of it. Without the pointer the markdown copy is free-floating prose " +
+				"again, and a reader has no way to find out which of the two is authoritative.")
+		}
+	})
+
+	// EngineReviewPredicateMatchesTheGoImplementation is the reconciliation the subtest above
+	// now depends on. It reads the review-step vocabulary out of BOTH engine documents and
+	// compares the predicate they describe against engine.IsReviewStep over a probe corpus.
+	//
+	// Direction matters and both are asserted. A markdown set SMALLER than the Go one demotes a
+	// review step to the default tier in any harness following the markdown by hand; a set
+	// LARGER than the Go one raises a non-review step to the read-only reviewer agent, which
+	// fails the step outright when it tries to edit. Neither is visible in a substring check.
+	t.Run("EngineReviewPredicateMatchesTheGoImplementation", func(t *testing.T) {
+		suffix, exact := engineReviewVocabulary(
+			readEngineDoc(t, pluginRoot, "skills/pf-execute/engine.native.md"),
+			readEngineDoc(t, pluginRoot, "skills/pf-execute/references/engine-native-details.md"),
+		)
+
+		// Anti-vacuity, first: an extractor that found nothing would agree with any
+		// implementation at all on the corpus below, since both halves would answer false.
+		if suffix == "" {
+			t.Fatalf("neither engine document states the review-step SUFFIX. The reconciliation "+
+				"below would then only cover the %d exact names and would silently stop covering "+
+				"the suffix rule, which is the half that catches step ids the catalog has never "+
+				"seen.", len(exact))
+		}
+		if len(exact) == 0 {
+			t.Fatal("neither engine document enumerates the exact review step ids, so the " +
+				"comparison below reduces to the suffix rule and asserts nothing about " +
+				"`review` / `code_review` / `release_review`")
+		}
+
+		docSaysReview := func(stepID string) bool {
+			if strings.HasSuffix(stepID, suffix) {
+				return true
+			}
+			return exact[stepID]
+		}
+
+		// The corpus is the documents' own names plus every step id shape that has actually
+		// caused trouble: review_fix (it applies findings, it is ordinary editing work, and
+		// endswith must NOT match it — §0f says so in prose, and this is that prose asserted),
+		// and two words that merely CONTAIN "review".
+		corpus := []string{"review_fix", "spec", "plan", "code_change", "commit_and_pr", "wrap",
+			"design_review", "security_review", "reviewer", "previewing", "review"}
+		for name := range exact {
+			corpus = append(corpus, name)
+		}
+		sort.Strings(corpus)
+
+		agreements := 0
+		for _, stepID := range corpus {
+			want := engine.IsReviewStep(stepID)
+			if got := docSaysReview(stepID); got != want {
+				t.Errorf("step id %q: the engine documents say is_review = %v, "+
+					"engine.IsReviewStep says %v. The markdown is executed by hand on the B/C "+
+					"path and the Go function by `polyforge engine resolve-role`, so the two "+
+					"loops would dispatch this step to DIFFERENT agents — the raised read-only "+
+					"reviewer or the default write-capable executor — for the same wi.",
+					stepID, got, want)
+				continue
+			}
+			agreements++
+		}
+
+		// A corpus on which the two never disagree could also be a corpus on which the
+		// predicate is constant. Pin that it is not.
+		if !engine.IsReviewStep("code_review") || engine.IsReviewStep("review_fix") {
+			t.Errorf("engine.IsReviewStep is no longer discriminating on the corpus "+
+				"(code_review=%v, review_fix=%v), so agreement with it means nothing",
+				engine.IsReviewStep("code_review"), engine.IsReviewStep("review_fix"))
+		}
+		t.Logf("reconciled %d step ids against engine.IsReviewStep (suffix %q, exact %v)",
+			agreements, suffix, keysOf(exact))
 	})
 
 	t.Run("PinnedVocabularyMatchesLiveScenarioRepo", func(t *testing.T) {
@@ -491,6 +637,47 @@ func TestEngineNativeLevelVocabularyContract(t *testing.T) {
 		}
 		t.Logf("scenario repo: declared %v, in use %v", keysOf(declared), keysOf(used))
 	})
+}
+
+// The review-step predicate as the two engine documents spell it. Two forms, because the two
+// documents legitimately write it differently: the resident loop writes Python, and §0f's
+// mapping table writes a markdown table cell. Both are read, and their results are UNIONED —
+// a predicate stated in one document and contradicted in the other must produce a set that
+// disagrees with the Go implementation rather than one the extractor quietly picks a winner for.
+var (
+	// The suffix rule: endswith("_review"), backticked or not.
+	reviewSuffixRe = regexp.MustCompile(`endswith\("([a-z_]+)"\)`)
+
+	// The resident loop's Python tuple: sid in ("review","code_review","release_review")
+	reviewTupleRe = regexp.MustCompile(`sid in \(([^)]*)\)`)
+
+	// §0f's table cell: `sid` in `review` / `code_review` / `release_review`
+	reviewTableRe = regexp.MustCompile("`sid` in ((?:`[a-z_]+`(?: / )?)+)")
+
+	// The identifiers inside either of those groups, whatever quotes or separators surround them.
+	reviewNameRe = regexp.MustCompile(`[a-z][a-z0-9_]*`)
+)
+
+// engineReviewVocabulary returns the review-step suffix and the exact step ids the engine
+// documents name, read out of the documents themselves rather than restated here. A caller
+// that finds an empty result must treat it as "the documents stopped saying it", never as
+// "the documents say nothing matches" — the subtest above fails loudly on both empties for
+// exactly that reason.
+func engineReviewVocabulary(docs ...string) (suffix string, exact map[string]bool) {
+	exact = map[string]bool{}
+	for _, body := range docs {
+		if m := reviewSuffixRe.FindStringSubmatch(body); m != nil && suffix == "" {
+			suffix = m[1]
+		}
+		for _, re := range []*regexp.Regexp{reviewTupleRe, reviewTableRe} {
+			for _, m := range re.FindAllStringSubmatch(body, -1) {
+				for _, name := range reviewNameRe.FindAllString(m[1], -1) {
+					exact[name] = true
+				}
+			}
+		}
+	}
+	return suffix, exact
 }
 
 func keysOf(m map[string]bool) []string {

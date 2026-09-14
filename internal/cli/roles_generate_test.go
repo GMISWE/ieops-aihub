@@ -785,7 +785,7 @@ func TestUnresolvedModelWarning_NamesTheActualCause(t *testing.T) {
 		// unconditionally, which is the wrong section whenever a preset is
 		// selected -- the operator edits a table nothing reads.
 		for name, why := range map[string]ResolveFailure{
-			"probe error": {ProbeErr: os.ErrClosed},
+			"probe error":  {ProbeErr: os.ErrClosed},
 			"no candidate": {},
 			"all missed":   {Candidates: []string{"sub2api-anthropic/gone"}},
 		} {

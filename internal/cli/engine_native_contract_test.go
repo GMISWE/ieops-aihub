@@ -526,24 +526,36 @@ func TestEngineNativeLevelVocabularyContract(t *testing.T) {
 	// LARGER than the Go one raises a non-review step to the read-only reviewer agent, which
 	// fails the step outright when it tries to edit. Neither is visible in a substring check.
 	t.Run("EngineReviewPredicateMatchesTheGoImplementation", func(t *testing.T) {
-		suffix, exact := engineReviewVocabulary(
+		suffixes, exact := engineReviewVocabulary(
 			readEngineDoc(t, pluginRoot, "skills/pf-execute/engine.native.md"),
 			readEngineDoc(t, pluginRoot, "skills/pf-execute/references/engine-native-details.md"),
 		)
 
 		// Anti-vacuity, first: an extractor that found nothing would agree with any
 		// implementation at all on the corpus below, since both halves would answer false.
-		if suffix == "" {
+		if len(suffixes) == 0 {
 			t.Fatalf("neither engine document states the review-step SUFFIX. The reconciliation "+
 				"below would then only cover the %d exact names and would silently stop covering "+
 				"the suffix rule, which is the half that catches step ids the catalog has never "+
 				"seen.", len(exact))
+		}
+		// ...and the documents must agree with EACH OTHER before either is compared to Go. Three
+		// copies of this suffix ship (engine.native.md's loop, §0f's mapping table, §0f's
+		// review_fix paragraph); if they disagree, at most one can match engine.IsReviewStep and
+		// a reader has no way to tell which.
+		if len(suffixes) > 1 {
+			t.Fatalf("the engine documents state %d DIFFERENT review-step suffixes (%v). They are "+
+				"copies of one predicate, so a reader following the wrong copy dispatches review "+
+				"steps to the write-capable executor. Reconciling any one of them against "+
+				"engine.IsReviewStep would certify the disagreement rather than catch it.",
+				len(suffixes), keysOf(suffixes))
 		}
 		if len(exact) == 0 {
 			t.Fatal("neither engine document enumerates the exact review step ids, so the " +
 				"comparison below reduces to the suffix rule and asserts nothing about " +
 				"`review` / `code_review` / `release_review`")
 		}
+		suffix := keysOf(suffixes)[0]
 
 		docSaysReview := func(stepID string) bool {
 			if strings.HasSuffix(stepID, suffix) {
@@ -658,16 +670,25 @@ var (
 	reviewNameRe = regexp.MustCompile(`[a-z][a-z0-9_]*`)
 )
 
-// engineReviewVocabulary returns the review-step suffix and the exact step ids the engine
-// documents name, read out of the documents themselves rather than restated here. A caller
-// that finds an empty result must treat it as "the documents stopped saying it", never as
-// "the documents say nothing matches" — the subtest above fails loudly on both empties for
+// engineReviewVocabulary returns EVERY review-step suffix and exact step id the engine documents
+// name, read out of the documents themselves rather than restated here.
+//
+// Both returns are sets over ALL occurrences in ALL documents, and `suffixes` being a set is the
+// load-bearing part. An earlier version took the first suffix it found and ignored the rest,
+// which meant the two copies in engine-native-details.md (§0f's mapping table and the review_fix
+// paragraph) were never read at all: changing BOTH of them to `_reviewed` left this gate green,
+// because engine.native.md is passed first and won. A predicate stated in one document and
+// contradicted in another must produce a set the caller can see is inconsistent, not one an
+// extractor quietly picks a winner from.
+//
+// A caller that finds an empty result must treat it as "the documents stopped saying it", never
+// as "the documents say nothing matches" — the subtest above fails loudly on both empties for
 // exactly that reason.
-func engineReviewVocabulary(docs ...string) (suffix string, exact map[string]bool) {
-	exact = map[string]bool{}
+func engineReviewVocabulary(docs ...string) (suffixes, exact map[string]bool) {
+	suffixes, exact = map[string]bool{}, map[string]bool{}
 	for _, body := range docs {
-		if m := reviewSuffixRe.FindStringSubmatch(body); m != nil && suffix == "" {
-			suffix = m[1]
+		for _, m := range reviewSuffixRe.FindAllStringSubmatch(body, -1) {
+			suffixes[m[1]] = true
 		}
 		for _, re := range []*regexp.Regexp{reviewTupleRe, reviewTableRe} {
 			for _, m := range re.FindAllStringSubmatch(body, -1) {
@@ -677,7 +698,7 @@ func engineReviewVocabulary(docs ...string) (suffix string, exact map[string]boo
 			}
 		}
 	}
-	return suffix, exact
+	return suffixes, exact
 }
 
 func keysOf(m map[string]bool) []string {

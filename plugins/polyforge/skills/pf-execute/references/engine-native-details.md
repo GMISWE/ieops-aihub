@@ -131,8 +131,8 @@ the agents, or re-keying the choice all go red rather than shipping as prose dri
 `FAIL`, ask §0h for the step half and make what it prints:
 
 ```bash
-polyforge engine bracket-plan --step-id=<step_id> --status=failed \
-  --step-attempt-id=<sa_id> --error-type=review_fail
+polyforge engine bracket-plan --step-id='<step_id>' --status='failed' \
+  --step-attempt-id='<sa_id>' --error-type='review_fail'
 ```
 
 It prints exactly ONE `pf_update_step(status="failed")` call and never a next one - `next_step`
@@ -344,27 +344,40 @@ reading what the verb printed.
 ### `bracket-plan` - the one the loop runs on every step
 
 ```bash
-polyforge engine bracket-plan --step-id=<step_id> --status=<completed|failed> \
-  --step-attempt-id=<sa_id> --next-step-id=<next_step_id> \
-  --next-step-attempt-id=<next_sa_id> --supports-next-step \
-  --artifact-summary=<artifact_summary> --error-type=<error_type>
+polyforge engine bracket-plan --step-id='<step_id>' --status='<completed|failed>' \
+  --step-attempt-id='<sa_id>' --next-step-id='<next_step_id>' \
+  --next-step-attempt-id='<next_sa_id>' --supports-next-step \
+  --artifact-summary='<artifact_summary>' --error-type='<error_type>'
 ```
 
 Make each printed call with exactly the arguments it lists, in the order printed. Nothing has
 happened when the command returns: it is a plan.
 
+- **QUOTE every value, as shown.** The flag parser matches the literal prefix `--name=` and
+  treats anything else as an argument it does not recognise - which it DROPS, with exit 0 and
+  nothing on stderr. So an unquoted `--artifact-summary=pr=x/y#1 base=main` reaches the binary
+  as two words, the summary silently becomes `pr=x/y#1`, and the step is filed with a truncated
+  record. `artifact_summary` is prose and routinely contains spaces, so this is the normal case,
+  not an edge one.
+- `--next-step-attempt-id` is a NEW ulid that YOU mint, once, before the call. No verb mints
+  ids; `bracket-plan` only threads the one you give it into the right call of the plan, and the
+  same value becomes the next iteration's `--step-attempt-id`.
 - Omit `--next-step-id` / `--next-step-attempt-id` on the LAST step, and on `--status=failed`
   (`next_step` is rejected on a failure, not ignored).
 - Omit `--supports-next-step` when `pf_update_step` does not publish `next_step` (§2). The plan
   then has TWO calls rather than one fused call, and the second carries
   `step_attempt_id=<next_sa_id>` - exactly the threading the two-call form gets wrong by hand.
 - Omit `--artifact-summary` / `--error-type` where they do not apply.
+- `--step-id`, `--status` and `--step-attempt-id` are REQUIRED on every call, failures included;
+  the command errors without them rather than assuming anything.
 
-`internal/cli/engine_bc_contract_test.go` reads the flags out of THIS block, runs a freshly
-built binary with them, and compares the result against `engine.PlanStepBracket` called directly
-in Go - over the same step-sequence fixtures, asserting an identical `pf_update_step` sequence.
-A flag renamed or dropped here therefore goes red rather than drifting silently, which is what
-makes deleting the pseudocode safe rather than merely shorter.
+`internal/cli/engine_bc_contract_test.go` reads the flags out of THIS block, renders them
+**through a real shell** (which is how a session runs them, and the only way the quoting rule
+above is actually exercised), runs a freshly built binary, and compares the result against
+`engine.PlanStepBracket` called directly in Go - over the same step-sequence fixtures, asserting
+an identical `pf_update_step` sequence. A flag renamed, dropped or unquoted here therefore goes
+red rather than drifting silently, which is what makes deleting the pseudocode safe rather than
+merely shorter. It gates §0c's invocation the same way.
 
 ## 1. Execute (rhs=true, interactive mode) - the loop in full
 
@@ -392,9 +405,10 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
                                      next step
       "skip"                      -> COMPLETE it, with a summary that says it was skipped: the
                                      same bracket-plan call as the "continue" path, only with
-                                     --artifact-summary="skipped - <the user's reason>".
-      "fail"                      -> bracket-plan --status=failed --step-attempt-id=<sa_id>
-                                     (§0c's shape, without --error-type unless a review said so);
+                                     --artifact-summary='skipped - <the user's reason>'.
+      "fail"                      -> bracket-plan --step-id='<step_id>' --status='failed'
+                                     --step-attempt-id='<sa_id>' (§0c's shape, without
+                                     --error-type unless a review said so);
                                      make what it prints, then
                                      pf_complete_attempt(failed, note="failed reason: <user description>");
                                      break (stop the whole loop)
@@ -406,11 +420,14 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
         "FAIL <desc>"        -> §0c, with note="failed reason: <desc>"; break
 
     # only the "continue/done/ok" path (or review PASS / WARN-continue) reaches here:
-    # report this step completed AND start the next one.
+    # report this step completed AND start the next one. Same command, same flag set, same
+    # quoting as §0h - including --supports-next-step, which is what keeps this loop's
+    # pf_update_step sequence identical to auto mode's instead of always degrading to two calls.
     next_sa = new_ulid() if i + 1 < len(steps) else None
-    run bracket-plan(--step-id=step_id, --status=completed, --step-attempt-id=sa_id,
-                     --next-step-id / --next-step-attempt-id only when next_sa exists,
-                     --artifact-summary=<one-line summary of what this step produced>)
+    run bracket-plan(--step-id='<step_id>', --status='completed', --step-attempt-id='<sa_id>',
+                     --supports-next-step when pf_update_step publishes next_step (§2),
+                     --next-step-id / --next-step-attempt-id='<next_sa>' only when next_sa exists,
+                     --artifact-summary='<one-line summary of what this step produced>')
     make every pf_update_step call it prints, in that order
     sa_id = next_sa
 

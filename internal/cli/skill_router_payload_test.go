@@ -141,15 +141,15 @@ const (
 // routed skill; aihub#553 grew engine.native.md (native branch only) by a net +47 for the
 // explicit dispatch-model instruction.
 //
-// aihub#657 re-baselined native 9,361 -> 8,862 by DELETING duplicated logic rather than
+// aihub#657 re-baselined native 9,361 -> 8,961 by DELETING duplicated logic rather than
 // re-tiering it. aihub#654 landed internal/engine and `polyforge engine <verb>`, so
 // engine.native.md's startup prose, its parse_review_result definition and its hand-assembled
 // pf_update_step bracket (which was a second copy of _common/lifecycle.md's) each became a
 // one-line call to a verb whose behaviour has Go tests. Re-tiering relocates a maintenance
-// burden to a colder file; this removed one, which is why the branch came back 499 characters
-// lighter and its worst case went from 389 under the harness limit to 888.
+// burden to a colder file; this removed one, which is why the branch came back 400 characters
+// lighter and its worst case went from 389 under the harness limit to 789.
 //
-// ⚠️ Two facts the 9,361 is evidence for. FIRST, this floor is not self-maintaining: it read
+// ⚠️ Three facts the 9,361 is evidence for. FIRST, this floor is not self-maintaining: it read
 // 9,274 while the payload measured 9,361, because aihub#642 (b80bf4b) rewrote
 // hooks/pf-skill-router and grew the native assembly by 87 characters without re-baselining.
 // The gate stayed green throughout — 9,361 is inside the 150-char slack band — so the invariant
@@ -157,20 +157,22 @@ const (
 // contributor is asked to do, NOT something this test detects on its own. SECOND, that growth
 // came from the ASSEMBLER, not from any fragment: editing the hook moves these numbers while
 // touching no file this map names, so "I changed no fragment" is not a reason to skip the
-// re-baseline.
+// re-baseline. THIRD, native was not the only stale row: the four header-only floors read
+// 1,701 against a measured 1,702 and were corrected by aihub#657 in the same pass. Four of six
+// entries stale at once is what "the invariant is a convention, not a check" costs in practice.
 //
 // Every floor sits on the measured payload per this map's own invariant — the native gate
-// (8,862+150) clears both real ceilings with margin this branch has not had since aihub#338:
-// the ~9,460 discriminator bound applies to the PAYLOAD (which is 598 under it), and the
-// worst-case check on the gate (9,012 + 2 pointers x 125 = 9,262) stays under the harness
+// (8,961+150) clears both real ceilings with margin this branch has not had since aihub#338:
+// the ~9,460 discriminator bound applies to the PAYLOAD (which is 499 under it), and the
+// worst-case check on the gate (9,111 + 2 pointers x 125 = 9,361) stays under the harness
 // limit.
 var routerBudget = map[string]int{
 	"pf-execute/superpowers": 6939 + routerGateSlack,
-	"pf-execute/native":      8862 + routerGateSlack,
-	"pf-plan/native":         1701 + routerGateSlack,
-	"pf-plan/superpowers":    1701 + routerGateSlack,
-	"pf-spec/native":         1701 + routerGateSlack,
-	"pf-spec/superpowers":    1701 + routerGateSlack,
+	"pf-execute/native":      8961 + routerGateSlack,
+	"pf-plan/native":         1702 + routerGateSlack,
+	"pf-plan/superpowers":    1702 + routerGateSlack,
+	"pf-spec/native":         1702 + routerGateSlack,
+	"pf-spec/superpowers":    1702 + routerGateSlack,
 }
 
 // routerBranches are the engine branches the router can select. The gate measures every one:

@@ -35,15 +35,16 @@ for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` 
         break   # stop the loop; no retry, and do NOT call pf_complete_attempt (§0e)
 
     if is_review(step_id):
-        # parse_review_result = `polyforge engine parse-review --file=<the subagent's output>`
+        # parse_review_result = `polyforge engine parse-review`, subagent output on STDIN
         result = that verb's {"result": "PASS"|"WARN"|"FAIL"}
         if result == "FAIL":  do §0c, then break   # then output the review issues
         if result == "WARN":  print the warning and continue
 
-    # Complete this step and start the next: run `polyforge engine bracket-plan` (§0h has the
-    # flags), make every pf_update_step call it prints in that order, then set
-    # sa_id = the --next-step-attempt-id you gave it. It owns the fused-vs-two-call choice and
-    # the step_attempt_id threading; omit both next_* on the last step.
+    # Complete this step and start the next: mint next_sa = new_ulid() (None on the last step),
+    # run `polyforge engine bracket-plan` (§0h: its flags, and QUOTE every value - an unquoted
+    # summary is truncated at the first space, exit 0), make every pf_update_step call it prints
+    # in that order, then sa_id = next_sa. It owns the fused-vs-two-call choice and the threading.
+    next_sa = new_ulid() if i + 1 < len(steps) else None
 
 # all steps done -> wrap + cleanup (_common/lifecycle.md ## Once per wi)
 ```

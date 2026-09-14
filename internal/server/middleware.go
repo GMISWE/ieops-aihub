@@ -483,11 +483,20 @@ func checkProjectAccess(c echo.Context, u *UserContext, project, minRole string)
 	// string to 0. A role that does not reach viewer is not a membership, so it
 	// must not be told the project exists either.
 	//
-	// What can put an unrecognised string in this map: it is built from
-	// projects.members — by BearerAuth above and by loadUserByAPIKeyID in
-	// ui_handlers_auth.go, both through roleForUserInMembers, which returns the
+	// What can put an unrecognised string in this map: it is built by BearerAuth
+	// above and by loadUserByAPIKeyID in ui_handlers_auth.go, both through
+	// projectRoleForCaller, whose members half (roleForUserInMembers) returns the
 	// JSONB's role verbatim and never checks it against a vocabulary.
 	// TestProjectRolesHaveOneDerivation holds that to the two of them.
+	//
+	// Since aihub#668 that is no longer the map's only source: an OWNER is ranked
+	// projectOwnerMapRole, a constant from this file rather than a value out of
+	// the database. That arm cannot produce an unrecognised string, so it changes
+	// nothing about the paragraph below — but "this map is projects.members" is
+	// now the smaller half of the truth, and three neighbouring comments still
+	// say it (router.go's handleListWorkItems ids= branch, ui_handlers_wi.go's
+	// uiProjectGate, internal/mcp/tools_lifecycle.go's pf_whoami note). Each
+	// remains true about the members half, which is what each is arguing about.
 	// domain.UpdateProject is the only validator, and it is application-level only:
 	// projects.members is JSONB with no CHECK constraint, so any write that does not
 	// go through UpdateProject can store anything. Measured on the fully migrated

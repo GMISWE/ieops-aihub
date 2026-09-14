@@ -5494,6 +5494,56 @@ jobs:
           ! grep -q -- '--- SKIP' predict_visibility.log \
             || { echo "::error::an aihub#665 visibility arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#668: UserContext.ProjectRoles was derived from projects.members
+      # alone, at both of the sites TestProjectRolesHaveOneDerivation names, so a
+      # non-admin who OWNED a project but was absent from its members list
+      # reached every map-based gate in internal/server as a stranger. Measured
+      # through the real router on e34d066: the owner of a members-empty project
+      # got 404 on POST /v1/conflicts/predict AND 404 on GET /v1/work_items/<id>
+      # — in his own project. domain.checkProjectAccess's level 2 has admitted
+      # exactly this person since it was written; the map never read the column.
+      #
+      # The affected population was ZERO when this landed, and the row is still
+      # one unprivileged call away: POST /v1/projects carries no admin guard and
+      # domain.CreateProject's INSERT does not name `members`, so every project a
+      # non-admin creates starts at `DEFAULT '[]'` with its owner outside it.
+      #
+      # 🔴 THE DENY ARMS ARE NAMED TOO, AND HERE THAT IS THE WHOLE POINT. The
+      # risk direction of this fix is the exact reverse of aihub#665's: a lazy
+      # allow branch that admits the owner by admitting everybody would look like
+      # a fix and would reopen the disclosure aihub#665 spent 20 mutants closing.
+      # So the stranger in this fixture OWNS a project of his own and is a
+      # maintainer in it — "any owner passes" and "anyone with standing anywhere
+      # passes" both redden the arms below, and only "the owner of THIS project
+      # passes" is green. The DB-free half (the projectRoleForCaller table and
+      # the derivation gate) runs in the "Unit tests" step and needs no step here.
+      - name: aihub#668 project-owner visibility DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/server/ -run '^TestProjectOwnerCanSeeTheirOwnProject$' -count=1 -v 2>&1 | tee owner_visibility.log
+          for want in 'TestProjectOwnerCanSeeTheirOwnProject/the_owner_is_not_refused_their_own_projects_pre_claim_gate' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/the_owner_reaches_their_own_projects_work_items_by_the_honest_route_too'; do
+            grep -q -- "--- PASS: $want (" owner_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#668 false rejection of a project owner is not actually verified against a database"; exit 1; }
+          done
+          for want in 'TestProjectOwnerCanSeeTheirOwnProject/negative_control_owning_another_project_grants_no_sight_of_this_one' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/negative_control_the_stranger_is_refused_under_dry_run_too' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/negative_control_the_strangers_refusal_is_byte_identical_to_a_missing_project' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/negative_control_the_stranger_is_still_blind_by_the_honest_route'; do
+            grep -q -- "--- PASS: $want (" owner_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the deny arms this suite is also satisfied by a build that lets EVERY caller see EVERY project, which is the aihub#665 disclosure restored"; exit 1; }
+          done
+          for want in 'TestProjectOwnerCanSeeTheirOwnProject/fixture_the_owner_owns_the_project_and_is_absent_from_its_members' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/fixture_the_owner_is_not_an_admin' \
+                      'TestProjectOwnerCanSeeTheirOwnProject/fixture_the_stranger_owns_and_maintains_a_project_of_his_own'; do
+            grep -q -- "--- PASS: $want (" owner_visibility.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); without the fixture checks the allow arm passes for an admin or for an ordinary member and the deny arms refuse a caller with no standing anywhere — both are weaker statements than the ones this suite is written to make"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' owner_visibility.log \
+            || { echo "::error::an aihub#668 owner-visibility arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

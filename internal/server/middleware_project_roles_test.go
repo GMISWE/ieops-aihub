@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -122,6 +123,103 @@ func TestRoleForUserInMembers_EmptyCallerNeverMatches(t *testing.T) {
 	}
 }
 
+// TestProjectRoleForCaller is aihub#668's DB-free half.
+//
+// The behaviour it pins is a two-line function, and the reason it is worth a
+// table is that three of the six rows are the ways a "let the owner in" change
+// is normally got wrong: by letting a LOWER member role win over ownership, by
+// letting the owner of one project in everywhere, and by admitting an empty
+// caller id. The end-to-end arms live in project_owner_visibility_db_test.go
+// and need a database; these do not, so they run in the ordinary unit step and
+// a mutant cannot hide behind a missing AIHUB_TEST_DB.
+func TestProjectRoleForCaller(t *testing.T) {
+	const members = `[{"user_id":"u_member","role":"writer"},{"user_id":"u_lowowner","role":"viewer"}]`
+
+	cases := []struct {
+		name      string
+		members   string
+		owner     string
+		caller    string
+		wantRole  string
+		wantFound bool
+		why       string
+	}{
+		{
+			name: "the owner is admitted with no members entry at all", members: `[]`,
+			owner: "u_owner", caller: "u_owner",
+			wantRole: "maintainer", wantFound: true,
+			why: "the exact row domain.CreateProject writes for a non-admin caller: " +
+				"owner_user_id set, members at its DEFAULT '[]'",
+		},
+		{
+			name: "ownership outranks a lower member role", members: members,
+			owner: "u_lowowner", caller: "u_lowowner",
+			wantRole: "maintainer", wantFound: true,
+			why: "domain.checkProjectAccess returns at level 2 without ever reading level 3, " +
+				"so taking the members entry here would leave the two families disagreeing " +
+				"about a smaller and much harder-to-find set of people",
+		},
+		{
+			name: "a member who is not the owner keeps their own role", members: members,
+			owner: "u_owner", caller: "u_member",
+			wantRole: "writer", wantFound: true,
+			why: "the owner arm must not promote everybody; a writer stays a writer",
+		},
+		{
+			name: "a caller who is neither owner nor member gets nothing", members: members,
+			owner: "u_owner", caller: "u_stranger",
+			wantRole: "", wantFound: false,
+			why: "🔴 the negative control. aihub#665 closed a measured cross-project " +
+				"disclosure; a fix for the false rejection that admitted this caller would " +
+				"reopen it",
+		},
+		{
+			name: "an empty caller id never matches an empty owner id", members: members,
+			owner: "", caller: "",
+			wantRole: "", wantFound: false,
+			why: "projects.owner_user_id is NOT NULL with a FK to users(id), so an empty " +
+				"string there needs a users row with an empty id — an upstream accident, " +
+				"and one that would otherwise hand project-wide access to any caller whose " +
+				"own id was empty",
+		},
+		{
+			name: "an empty caller id never matches a real owner id", members: members,
+			owner: "u_owner", caller: "",
+			wantRole: "", wantFound: false,
+			why: "the same guard from the other side",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			role, found, err := projectRoleForCaller([]byte(tc.members), tc.owner, tc.caller)
+			if err != nil {
+				t.Fatalf("unexpected decode error on well-formed members: %v", err)
+			}
+			if found != tc.wantFound || role != tc.wantRole {
+				t.Errorf("got (%q, %v), want (%q, %v) — %s", role, found, tc.wantRole, tc.wantFound, tc.why)
+			}
+		})
+	}
+
+	t.Run("the owner arm does not swallow the malformed-members warning", func(t *testing.T) {
+		// Both call sites do `if decodeErr != nil { warnMalformedMembersOnce(...) }`
+		// BEFORE they look at found, so an owner arm that returned a nil error
+		// would silence the once-per-process operator warning for exactly the
+		// projects whose members JSONB is dirty AND whose owner is asking.
+		role, found, err := projectRoleForCaller(
+			[]byte(`[{"user_id":"u_a","role":"writer"},5]`), "u_owner", "u_owner")
+		if !found || role != "maintainer" {
+			t.Fatalf("a malformed members element cost the OWNER his access: role=%q found=%v", role, found)
+		}
+		if err == nil {
+			t.Error("the decode error was dropped on the owner path, so warnMalformedMembersOnce " +
+				"never fires for a dirty row in a project the owner reads — the row stays " +
+				"dirty and nothing says so")
+		}
+	})
+}
+
 // TestRoleForUserInMembers_NotAnArray pins the case where keeping the partial
 // result could plausibly be worse than bailing out: it is not. A whole-value
 // type error leaves the slice nil, so no role is granted either way.
@@ -214,9 +312,19 @@ func TestDirtyMemberStillAuthorizes(t *testing.T) {
 //
 // So the anchor is the authorization map, not a function name: EVERY function in
 // this package that writes UserContext.ProjectRoles must obtain the role from
-// roleForUserInMembers, and none of them may decode JSON themselves. A fourth
+// projectRoleForCaller, and none of them may decode JSON themselves. A fourth
 // copy — in a file that does not exist yet — fails this the moment it assigns
 // into that map.
+//
+// aihub#668 moved the anchor one function outwards and the gate got STRICTER
+// rather than looser, which is the thing to check when a gate's own subject is
+// renamed. The role is now two decisions, not one — ownership settled first,
+// then the members lookup — so the chain is pinned end to end: the writers must
+// call projectRoleForCaller (below), and projectRoleForCaller must get the
+// members half from roleForUserInMembers (the arm after this one). Pinning only
+// the outer call would have let a future edit re-inline the members parsing
+// inside projectRoleForCaller and stay green, which is aihub#315 one function
+// further along.
 //
 // It reads the AST rather than the files' text, so reformatting, line wrapping,
 // or how the call is spelled cannot defeat it.
@@ -250,18 +358,46 @@ func TestProjectRolesHaveOneDerivation(t *testing.T) {
 			}
 			writers[fd.Name.Name] = name
 
-			shared, unmarshals := countMembersParsing(fd)
+			shared, unmarshals := countCalls(fd, "projectRoleForCaller")
 			if shared == 0 {
-				t.Errorf("%s (%s) writes ProjectRoles but never calls roleForUserInMembers; that is a second derivation of the caller's role, which is the whole of aihub#315", fd.Name.Name, name)
+				t.Errorf("%s (%s) writes ProjectRoles but never calls projectRoleForCaller; that is a second derivation of the caller's role, which is the whole of aihub#315 — and since aihub#668 it is also a second answer to \"is this caller the owner\", which is how the map came to disagree with domain.checkProjectAccess's level 2 in the first place", fd.Name.Name, name)
 			}
 			if unmarshals != 0 {
 				t.Errorf("%s (%s) writes ProjectRoles and decodes JSON inline %d time(s); the members derivation must stay in roleForUserInMembers so the next fix cannot miss a copy", fd.Name.Name, name, unmarshals)
+			}
+
+			// aihub#668: the ownership half is a SQL question, not a Go one — a
+			// writer that never selects owner_user_id hands projectRoleForCaller
+			// an empty string and the owner arm is dead code at that site. This
+			// is the arm that caught it: the query lives in the function, so the
+			// column name is checked where the map is written.
+			if !selectsOnOwnerColumn(fd) {
+				t.Errorf("%s (%s) writes ProjectRoles but no query in it restricts on "+
+					"`owner_user_id = $1`. The rows the caller OWNS would then never be "+
+					"returned, projectRoleForCaller would never be asked about them, and the "+
+					"aihub#668 defect would be back with the fix still visible in the diff",
+					fd.Name.Name, name)
 			}
 		}
 	}
 
 	if checked == 0 {
 		t.Fatalf("no non-test .go files were parsed; the walk is broken, not the code")
+	}
+
+	// The inner hop: projectRoleForCaller must not grow its own copy of the
+	// members parsing. Without this the outer assertion above is satisfied by a
+	// projectRoleForCaller that decodes the JSONB itself, which is exactly the
+	// duplication aihub#315 removed — one function further out.
+	inner, innerFile := findPackageFuncDecl(t, "projectRoleForCaller")
+	innerShared, innerUnmarshals := countCalls(inner, "roleForUserInMembers")
+	if innerShared != 1 {
+		t.Errorf("projectRoleForCaller (%s) calls roleForUserInMembers %d time(s), want exactly 1; "+
+			"the members derivation must stay in that one function", innerFile, innerShared)
+	}
+	if innerUnmarshals != 0 {
+		t.Errorf("projectRoleForCaller (%s) decodes JSON itself %d time(s); that is the aihub#315 "+
+			"copy reappearing one function further out", innerFile, innerUnmarshals)
 	}
 	// Both known writers must be present. Without this the test passes vacuously
 	// the day someone renames the field and the walk silently matches nothing —
@@ -296,9 +432,9 @@ func writesProjectRoles(fd *ast.FuncDecl) bool {
 	return found
 }
 
-// countMembersParsing returns how many times fd calls roleForUserInMembers and
-// how many times it decodes JSON itself.
-func countMembersParsing(fd *ast.FuncDecl) (shared, unmarshals int) {
+// countCalls returns how many times fd calls the named package-local function
+// and how many times it decodes JSON itself.
+func countCalls(fd *ast.FuncDecl, want string) (shared, unmarshals int) {
 	ast.Inspect(fd, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -306,7 +442,7 @@ func countMembersParsing(fd *ast.FuncDecl) (shared, unmarshals int) {
 		}
 		switch f := call.Fun.(type) {
 		case *ast.Ident:
-			if f.Name == "roleForUserInMembers" {
+			if f.Name == want {
 				shared++
 			}
 		case *ast.SelectorExpr:
@@ -318,6 +454,79 @@ func countMembersParsing(fd *ast.FuncDecl) (shared, unmarshals int) {
 		return true
 	})
 	return shared, unmarshals
+}
+
+// selectsOnOwnerColumn reports whether any string literal in fd RESTRICTS on
+// projects.owner_user_id — `owner_user_id = $1` — rather than merely containing
+// the words. Textual inside an AST-bounded range on purpose: the question is
+// about the contents of a SQL string, which the parser sees as one opaque
+// literal, and the bound is what stops the next function's query answering for
+// this one.
+//
+// 🔴 IT LOOKS FOR THE PREDICATE AND NOT THE NAME, AND THAT DISTINCTION WAS
+// MEASURED. The first version of this helper asked whether the literal contained
+// "owner_user_id" at all, and a mutant SURVIVED it: one that selected an empty
+// SQL string literal aliased AS owner_user_id and dropped the ownership clause
+// from the WHERE. The column name was still in the query text, so the assertion
+// was satisfied — while the rows the caller owns were no longer selected and the
+// derivation was handed "" for every project. An assertion that matches an
+// identifier rather than a behaviour is satisfied by the identifier.
+//
+// This is the weaker half of the pair regardless. The arm that actually kills
+// that mutant is behavioural and lives in project_owner_visibility_db_test.go
+// ("the_ui_session_derivation_agrees_with_the_api_one"), which calls the /ui
+// derivation directly and reads the map it produces; this one exists so the
+// omission is also caught in the DB-free step.
+func selectsOnOwnerColumn(fd *ast.FuncDecl) bool {
+	// Whitespace-insensitive: `owner_user_id = $1`, `owner_user_id=$1` and a
+	// line-wrapped variant are the same predicate, and gofmt does not normalise
+	// the inside of a raw string literal.
+	want := regexp.MustCompile(`owner_user_id\s*=\s*\$1`)
+	found := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if want.MatchString(lit.Value) {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// findPackageFuncDecl returns one top-level function declaration from this package's
+// non-test sources, and fails if it is absent.
+//
+// A missing function must be a FAILURE and not a vacuous pass: every assertion
+// made against the result is a count, and counts taken from a nil declaration
+// are all zero, which reads as "it calls nothing" rather than "it is gone".
+func findPackageFuncDecl(t *testing.T, name string) (*ast.FuncDecl, string) {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		fname := e.Name()
+		if e.IsDir() || !strings.HasSuffix(fname, ".go") || strings.HasSuffix(fname, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, fname, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", fname, perr)
+		}
+		for _, decl := range file.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == name {
+				return fd, fname
+			}
+		}
+	}
+	t.Fatalf("no function named %q in this package's non-test sources; if it was renamed, rename "+
+		"it here too rather than leaving an assertion that matches nothing", name)
+	return nil, ""
 }
 
 // TestRoleLevelIsTheDomainLadder is the gate aihub#443 was missing.

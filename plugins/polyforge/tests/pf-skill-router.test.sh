@@ -80,15 +80,22 @@ done
 echo "== pf-execute =="
 o="$(run polyforge:pf-execute "$ws_off")"
 ck "$o" "parse_review_result" "execute native main loop injected"
-# aihub#338 layer 3 / aihub#555: the native loop picks an AGENT from the STEP KIND; the agent
-# definition files (agents/*.md) carry the models, so the payload names agents and never model
-# names. Assert the two agent constants and the predicate separately — a single-name check
-# stayed green through the whole aihub#358 period, when the selector existed but never matched.
-ck "$o" "STEP_AGENT"                "execute native fragment defines the default-tier agent"
-ck "$o" "REVIEW_AGENT"              "execute native fragment defines the raised-tier agent"
-ck "$o" "polyforge:step-executor"   "execute native default agent id present"
-ck "$o" "polyforge:step-reviewer"   "execute native review agent id present"
-ck "$o" "sid.endswith("             "execute native selects the review agent by step kind"
+# aihub#338 layer 3 / aihub#555 / aihub#642 / aihub#664: the native loop picks an AGENT via a
+# ROLE resolved by `polyforge engine resolve-role`, never by restating a predicate in prose;
+# the agent definition files (agents/*.md) carry the models, so the payload names agents and
+# never model names. Assert the dict name and all five agent ids separately — a single-name
+# check stayed green through the whole aihub#358 period, when the selector existed but never
+# matched, and (pre-aihub#664) through the two-way is_review predicate silently widening
+# explorer/operator/designer steps onto the write-capable default agent.
+ck "$o" "ROLE_AGENT"                "execute native fragment defines the role->agent dict"
+ck "$o" "polyforge engine resolve-role" "execute native fragment delegates role choice to the CLI verb"
+ck "$o" "polyforge:step-executor"   "execute native executor agent id present"
+ck "$o" "polyforge:step-operator"   "execute native operator agent id present"
+ck "$o" "polyforge:step-explorer"   "execute native explorer agent id present"
+ck "$o" "polyforge:step-reviewer"   "execute native reviewer agent id present"
+ck "$o" "polyforge:step-designer"   "execute native designer agent id present"
+ck_not "$o" "REVIEW_AGENT" "execute native fragment no longer restates the retired two-way predicate"
+ck_not "$o" "STEP_AGENT"   "execute native fragment no longer restates the retired two-way predicate"
 ck_not "$o" "dispatch Agent(model=" "execute native dispatch passes no explicit model (aihub#555)"
 # aihub#338 layer 2: IR1-IR3 ride this hook because a dispatched subagent never sees the
 # SessionStart payload. Verbatim coverage is gated in internal/cli/skill_router_payload_test.go;

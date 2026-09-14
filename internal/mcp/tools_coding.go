@@ -82,11 +82,11 @@ func (s *Server) newCommitLockGate(wiID, repo string) *commitLockGate {
 // concession to a real case — it was a way to switch the gate off by deleting a
 // file, guarding nothing. Deleting the state file now costs the whole tool,
 // which is where a bypass has to cost more than compliance.
-func (g *commitLockGate) run(ctx context.Context, paths []string) error {
+func (g *commitLockGate) run(ctx context.Context, pending coding.PendingCommit) error {
 	// Recorded before anything can fail, so that "the gate was asked about N
 	// files" survives every failure below and report() never has to guess.
 	g.invoked = true
-	g.checked = len(paths)
+	g.checked = len(pending.Paths)
 
 	sf, err := config.ResolveStateFile(g.wiID)
 	if err != nil {
@@ -94,12 +94,18 @@ func (g *commitLockGate) run(ctx context.Context, paths []string) error {
 			"credentials, so nothing was committed: %w", err))
 	}
 
+	// 🔴 `merge` is forwarded, and it is the only field here that changes what a
+	// REFUSAL says rather than what the check decides (aihub#662). The server
+	// cannot derive it — MERGE_HEAD is in this worktree, not in the database —
+	// so dropping it here would silently restore the destructive remedy while
+	// every other assertion about this body stayed green.
 	res, err := g.s.client.ReconcileCommitLocks(ctx, sf.WIID, map[string]any{
 		"attempt_id":     sf.AttemptID,
 		"claim_epoch":    sf.ClaimEpoch,
 		"session_secret": sf.SessionSecret,
 		"repo":           g.repo,
-		"paths":          paths,
+		"paths":          pending.Paths,
+		"merge":          pending.Merge,
 	})
 	if err != nil {
 		if isAihubCode(err, "CONFLICT_LOCK_TAKEN") {
@@ -175,32 +181,43 @@ func (g *commitLockGate) report(out map[string]any, stageCommitErr error) map[st
 			"nothing was checked and nothing was committed; `error` says what failed and " +
 			"`side_effects` says whether anything was left in the index"
 	case !g.invoked:
-		// runCommitGate reached the short-circuit: the index matched HEAD, so
-		// there was no change set to protect.
+		// runCommitGate reached the short-circuit: the pending commit writes
+		// nothing, so there was no change set to protect.
+		//
+		// ⚠️ This used to say "no staged changes", which was true while the
+		// written set WAS the staged set. Since aihub#662 a merge commit's
+		// written set is the paths differing from every parent, so this branch
+		// is also reached with a fully populated index — a merge that carries
+		// both sides across and contributes nothing of its own. Naming only the
+		// empty-index cause would make this the same positive falsehood the
+		// could_not_run row above exists to prevent, one case further along. The
+		// gate cannot tell the two apart (it was never called), so the detail
+		// states the disjunction rather than picking a side.
 		out["lock_gate"] = "not_run"
-		out["lock_gate_detail"] = "no staged changes, so no files needed locking"
+		out["lock_gate_detail"] = "this commit writes nothing a lock could protect, so no files needed " +
+			"locking: either the index matched HEAD, or it is a merge that contributes no path of its own"
 	case isAihubCode(g.err, "CONFLICT_LOCK_TAKEN"):
 		out["lock_gate"] = "refused"
 		out["lock_gate_detail"] = fmt.Sprintf(
-			"%d changed file(s) were checked and at least one is held by another live attempt, so "+
+			"%d written file(s) were checked and at least one is held by another live attempt, so "+
 				"nothing was committed; `error` names every blocked path, its holder and what to do",
 			g.checked)
 	case !g.ran:
 		out["lock_gate"] = "could_not_run"
 		out["lock_gate_detail"] = fmt.Sprintf(
-			"the lock check over %d changed file(s) did not complete, so nothing was committed "+
+			"the lock check over %d written file(s) did not complete, so nothing was committed "+
 				"(fail-closed: \"could not check\" is not \"checked and clear\"); the files are still "+
 				"staged, so retrying costs nothing", g.checked)
 	case len(g.acquired) > 0:
 		out["lock_gate"] = "acquired"
 		out["locks_acquired_for"] = g.acquired
 		out["lock_gate_detail"] = fmt.Sprintf(
-			"%d of %d changed file(s) were outside this attempt's lock set and are now locked by it until the attempt ends",
+			"%d of %d written file(s) were outside this attempt's lock set and are now locked by it until the attempt ends",
 			len(g.acquired), g.checked)
 	default:
 		out["lock_gate"] = "covered"
 		out["lock_gate_detail"] = fmt.Sprintf(
-			"all %d changed file(s) were already covered; no lock was taken", g.checked)
+			"all %d written file(s) were already covered; no lock was taken", g.checked)
 	}
 	return out
 }
@@ -280,12 +297,13 @@ func (s *Server) registerCodingTools() {
 		Name: "pf_commit",
 		Description: "Commit staged changes in the work item's worktree and emit a commit event on the wi timeline. " +
 			"THIS CALL CAN ACQUIRE LOCKS, a heavier semantic than \"commit\" normally carries, so read this before using it. " +
-			"Before committing it lists the files the commit would contain and compares them against the file_scope locks THIS ATTEMPT ACTUALLY HOLDS " +
+			"Before committing it lists the files the commit WRITES and compares them against the file_scope locks THIS ATTEMPT ACTUALLY HOLDS " +
 			"(the live lock set, NOT declared_resources; the two routinely disagree). " +
-			"Any changed file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
-			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder: actor, work item and attempt. " +
-			"When every changed file is already covered, no lock is taken and nothing is written. " +
-			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (the index matched HEAD, so there was no change set to lock, reachable here only for a merge commit, which is made from MERGE_HEAD rather than from staged changes; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
+			"For a MERGE commit that written set is narrower than the staged set: a path the merge carries across unchanged from one parent is inherited, not written, so only paths differing from EVERY parent are checked and locked. " +
+			"Any written file no held lock covers is locked for this attempt automatically and stays locked until the attempt ends, so committing WIDENS your lock set. " +
+			"If another live attempt already holds one of those files the commit is REFUSED with CONFLICT_LOCK_TAKEN: nothing is committed, the files stay staged, and the error names every blocked path plus its holder: actor, work item and attempt. On a merge the refusal's advice is DIFFERENT, because unstaging a blocked path there records the merge as deleting that file. " +
+			"When every written file is already covered, no lock is taken and nothing is written. " +
+			"On SUCCESS the response says which happened in `lock_gate`: covered | acquired (with locks_acquired_for) | not_run (this commit writes nothing a lock could protect, reachable here only for a merge commit, which is created from MERGE_HEAD rather than from a change set; `sha` in the same response is still the commit that was created). A refusal or a failed check comes back as a plain error string with no `lock_gate` field at all. " +
 			"There is no pass-through: a lock check that cannot reach the server fails the commit rather than allowing it.",
 		InputSchema: objectSchema(map[string]any{
 			"workspace_root": prop("string", "Workspace root path"),

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/GMISWE/ieops-aihub/internal/engine"
+	"github.com/GMISWE/ieops-aihub/internal/roles"
 )
 
 // Cross-implementation contract gate for the step bracket (aihub#657).
@@ -777,6 +778,211 @@ func TestEngineFailPathInvocationIsGated(t *testing.T) {
 		t.Errorf("§0c says the command prints exactly ONE call; it printed %d: %s",
 			len(got), bcFormat(got))
 	}
+}
+
+// bcRunResolveRoleViaShell runs one `polyforge engine resolve-role` invocation under `sh -c` and
+// decodes stdout as engineResolveRoleOutput. Sibling of bcRunViaShell above, which decodes
+// []engine.StepCall — resolve-role's stdout is a different JSON shape entirely, so it needs its
+// own decoder rather than a cast.
+func bcRunResolveRoleViaShell(t *testing.T, line string) engineResolveRoleOutput {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", line)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("sh -c %q: %v\nstderr: %s\nengine.native.md's loop types exactly this line into a "+
+			"shell; if it does not run, the instruction is dead text.", line, err, stderr.String())
+	}
+	var out engineResolveRoleOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("sh -c %q: stdout is not a resolve-role JSON object (%v): %s",
+			line, err, stdout.String())
+	}
+	return out
+}
+
+// TestEngineResolveRoleBCContract is aihub#664's cross-implementation gate for the ROLE CHOICE
+// itself — same shape as TestEngineBCContract above (Go path vs. a freshly built binary driven
+// through a real shell), but for `polyforge engine resolve-role` instead of `bracket-plan`.
+//
+// WHY THIS EXISTS ON TOP OF engine_native_dispatch_model_test.go
+// ----------------------------------------------------------------
+// That file's TestEngineNativeDispatchSelectsAgentNotModel proves the DOCUMENT is internally
+// consistent: engine.native.md's ROLE_AGENT dict covers the catalog, and each entry's agent file
+// carries the right disallowedTools. It never runs `polyforge engine resolve-role` at all — a
+// docs-only gate cannot tell the difference between a CLI verb that behaves as documented and one
+// that has silently drifted (a bug in engine.ResolveRole itself, or in runEngineResolveRole's
+// flag/JSON plumbing, would leave that gate exactly as green as it is today). This test closes
+// that gap the same way TestEngineBCContract closes it for bracket-plan: it calls
+// engine.ResolveRole directly (path A / the Go implementation) and separately shells out to a
+// freshly built `polyforge engine resolve-role` (path B/C, the one a human/LLM session actually
+// runs), and requires the two to agree — not just on the role NAME, but on the capability that
+// name is supposed to carry, walked all the way through to the agent file's disallowedTools
+// frontmatter. That last hop is aihub#664's actual closure: a role could resolve to the "right"
+// name on both paths and still route to an agent file with the wrong tool policy.
+//
+// prepare_context is included by name, not just via a generic explorer fixture: it is the exact
+// step id aihub#664's bug report names as the silent capability widening (explorer/read-only via
+// the Go path, executor/write-capable via the old two-way B/C predicate).
+func TestEngineResolveRoleBCContract(t *testing.T) {
+	pluginRoot := pluginRootDir(t)
+	bin := bcBuildBinary(t)
+	catalog, err := roles.LoadRoles()
+	if err != nil {
+		t.Fatalf("roles.LoadRoles: %v", err)
+	}
+	engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
+	roleAgent, ok := parseRoleAgentDict(engineDoc)
+	if !ok {
+		t.Fatalf("%s: ROLE_AGENT dict not found or empty — cannot resolve a role to an agent file "+
+			"at all, so this contract has nothing to walk the capability chain through", dispatchEngineDoc)
+	}
+
+	// capabilityAgrees is the shared closing half of every fixture below: given a role BOTH
+	// paths agreed on, resolve it to its agent file through engine.native.md's OWN dict (never
+	// hardcoded here — see aihub#663's "the file names are not hardcoded" note in the sibling
+	// test) and assert the file's disallowedTools frontmatter is exactly what
+	// roles.CompileCapability says that role's read_only bit compiles to.
+	capabilityAgrees := func(t *testing.T, roleName string) {
+		t.Helper()
+		agentID, routed := roleAgent[roleName]
+		if !routed {
+			t.Fatalf("ROLE_AGENT in %s has no entry for role %q, which both paths just resolved to — "+
+				"the loop would look up ROLE_AGENT[role] and get nothing", dispatchEngineDoc, roleName)
+		}
+		r := dispatchCatalogRole(t, catalog, agentID, "ROLE_AGENT[\""+roleName+"\"]")
+		if r.Name != roleName {
+			t.Fatalf("ROLE_AGENT[%q] = %q resolves to role %q in the catalog — the dict's own key "+
+				"does not name the role its value actually is", roleName, agentID, r.Name)
+		}
+		shape, cerr := roles.CompileCapability(r.Capability.ReadOnly, "cc")
+		if cerr != nil {
+			t.Fatalf("roles.CompileCapability(%v, \"cc\"): %v", r.Capability.ReadOnly, cerr)
+		}
+		fm, fmOK := agentFrontmatter(readAgentDoc(t, pluginRoot, dispatchAgentFile(roleName)))
+		if !fmOK {
+			t.Fatalf("%s: no --- frontmatter fence found", dispatchAgentFile(roleName))
+		}
+		if fm["disallowedTools"] != shape.CCDisallowedTools {
+			t.Errorf("role %q resolved end-to-end (Go and B/C agree) to %s, which declares "+
+				"disallowedTools %q, but internal/roles/definitions/%s.yaml declares "+
+				"read_only=%v, which compiles to %q. A step whose role both implementations agree "+
+				"on can still dispatch to an agent with the wrong write capability.",
+				roleName, dispatchAgentFile(roleName), fm["disallowedTools"], roleName,
+				r.Capability.ReadOnly, shape.CCDisallowedTools)
+		}
+	}
+
+	type fixture struct {
+		stepID       string
+		declaredRole string // "" for none
+	}
+	fixtures := []fixture{
+		{stepID: "code_change"},     // -> executor
+		{stepID: "commit_and_pr"},   // -> operator
+		{stepID: "prepare_context"}, // aihub#664's own example -> explorer (read-only)
+		{stepID: "code_review"},     // -> reviewer
+		{stepID: "spec"},            // -> designer
+		{stepID: "aihub664_bc_contract_never_in_any_catalog_review"}, // catalog miss, "_review" suffix -> heuristic reviewer
+		{stepID: "aihub664_bc_contract_never_in_any_catalog_plain"},  // catalog miss, no review shape -> heuristic executor
+		{stepID: "code_change", declaredRole: "designer"},            // declared beats the catalog's own step-id mapping
+	}
+
+	for _, fx := range fixtures {
+		name := fx.stepID
+		if fx.declaredRole != "" {
+			name += "/declared=" + fx.declaredRole
+		}
+		t.Run(name, func(t *testing.T) {
+			want, _, _, rerr := engine.ResolveRole(catalog, fx.stepID, fx.declaredRole)
+			if rerr != nil {
+				t.Fatalf("engine.ResolveRole(%q, declared=%q): %v", fx.stepID, fx.declaredRole, rerr)
+			}
+
+			line := bcShellQuote(bin) + " engine resolve-role --step-id=" + bcShellQuote(fx.stepID)
+			if fx.declaredRole != "" {
+				line += " --declared-role=" + bcShellQuote(fx.declaredRole)
+			}
+			got := bcRunResolveRoleViaShell(t, line)
+
+			if got.Role != want.Name {
+				t.Errorf("Go engine.ResolveRole resolves step %q to role %q, but the freshly built "+
+					"binary's `polyforge engine resolve-role` (run through a real shell) resolves it "+
+					"to %q — the two implementations disagree on the role itself.",
+					fx.stepID, want.Name, got.Role)
+			}
+			if got.Tier != want.Tier {
+				t.Errorf("step %q: Go resolves tier %q, B/C resolves tier %q", fx.stepID, want.Tier, got.Tier)
+			}
+			if got.ReadOnly != want.Capability.ReadOnly {
+				t.Errorf("step %q: Go resolves read_only=%v, B/C (shelled-out binary) resolves "+
+					"read_only=%v — same role name, different capability. This is exactly the "+
+					"aihub#664 defect shape: a capability difference a name-only comparison cannot "+
+					"see.", fx.stepID, want.Capability.ReadOnly, got.ReadOnly)
+			}
+			if t.Failed() {
+				return // the role/capability disagreement above is the finding; walking a wrong
+				// role through the agent-file chain below would only produce a second, derived
+				// failure about the same root cause.
+			}
+
+			capabilityAgrees(t, got.Role)
+		})
+	}
+
+	// Standalone, not folded into the table above: this is the literal wi-mandated assertion —
+	// "construct a step resolving to explorer and assert the B/C-dispatched executor cannot
+	// write" — spelled out on its own rather than left to be inferred from the fixture table
+	// happening to include prepare_context.
+	t.Run("prepare_context resolves to a write-incapable agent end-to-end via the shelled-out binary", func(t *testing.T) {
+		want, _, _, rerr := engine.ResolveRole(catalog, "prepare_context", "")
+		if rerr != nil {
+			t.Fatalf("engine.ResolveRole(prepare_context): %v", rerr)
+		}
+		if want.Name != "explorer" || !want.Capability.ReadOnly {
+			t.Fatalf("test's own premise is wrong: internal/roles/definitions/ no longer resolves "+
+				"prepare_context to a read-only explorer (got role=%q read_only=%v) — update the "+
+				"fixture, this is not testing what it claims to", want.Name, want.Capability.ReadOnly)
+		}
+
+		line := bcShellQuote(bin) + " engine resolve-role --step-id=" + bcShellQuote("prepare_context")
+		got := bcRunResolveRoleViaShell(t, line)
+		if got.Role != "explorer" {
+			t.Fatalf("B/C (shelled-out binary) resolves prepare_context to role %q, not explorer",
+				got.Role)
+		}
+		if !got.ReadOnly {
+			t.Fatalf("B/C (shelled-out binary) resolves prepare_context's read_only to false. The Go " +
+				"path and the catalog both say a prepare_context dispatch must not be able to write; " +
+				"this is the aihub#664 capability-widening bug reappearing on the real binary.")
+		}
+		agentID, routed := roleAgent["explorer"]
+		if !routed {
+			t.Fatalf("ROLE_AGENT in %s has no \"explorer\" entry — prepare_context resolves to a role "+
+				"the documented dispatch loop cannot look up at all", dispatchEngineDoc)
+		}
+		// The file actually dispatched is whatever ROLE_AGENT["explorer"]'s VALUE names — not
+		// necessarily agents/step-explorer.md. A dict entry corrupted to point "explorer" at
+		// step-executor.md would still leave a hardcoded dispatchAgentFile("explorer") read here
+		// pointing at the (untouched, still read-only) explorer file, so this MUST resolve through
+		// the agent id's own implied role, exactly as capabilityAgrees does — the mutant run below
+		// found this the hard way (see the RESOLVE-THROUGH-THE-ID comment on dispatchCatalogRole).
+		dispatched := dispatchCatalogRole(t, catalog, agentID, "ROLE_AGENT[\"explorer\"]")
+		dispatchedFile := dispatchAgentFile(dispatched.Name)
+		fm, fmOK := agentFrontmatter(readAgentDoc(t, pluginRoot, dispatchedFile))
+		if !fmOK {
+			t.Fatalf("%s: no --- frontmatter fence found", dispatchedFile)
+		}
+		for _, tool := range []string{"Edit", "Write", "NotebookEdit"} {
+			if !regexp.MustCompile(`\b` + tool + `\b`).MatchString(fm["disallowedTools"]) {
+				t.Errorf("prepare_context dispatches (via ROLE_AGENT[%q]=%q) to %s, whose "+
+					"disallowedTools %q does not cover %s — the dispatched agent CAN write, which "+
+					"is precisely the capability widening aihub#664 must close",
+					got.Role, agentID, dispatchedFile, fm["disallowedTools"], tool)
+			}
+		}
+	})
 }
 
 // bcBranchOf names which PlanStepBracket branch an input takes. Derived from the input, not read

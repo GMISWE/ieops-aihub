@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -226,7 +227,20 @@ const notCallersOwnLockHolderSQL = ` AND ra.work_item_id <> `
 // conflict rules" from aihub#416's addition of rule 6 until aihub#550 caught
 // it: a count held in prose is checked by nothing.
 // Implements §23 of the design doc.
-func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest, callerProjectRoles map[string]string) (*PredictConflictsResponse, *AihubError) {
+// callerRole is the caller's GLOBAL role, and it is a separate parameter rather
+// than an entry in callerProjectRoles because of an invariant this function used
+// to be the only visibility gate not to know about (aihub#662): an ADMIN's
+// ProjectRoles map is EMPTY by design (aihub#227, stated at work_items.go's
+// resolveBlockedByRef and enforced everywhere else as `callerRole != "admin" &&
+// callerProjectRoles[p] == ""` — see CreateDependency, GetParentRef,
+// ListChildren, FnForceTakeover). Without it the H7 fold below read every admin
+// as having no access to any project and redacted the holder's identity from the
+// people who own it. Measured against production: pf_whoami returned
+// role=admin, projects[].relation=owner for aihub, and project_roles={}, and a
+// dry_run predict over a held path answered
+// "[conflict in project aihub, no visibility]".
+func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConflictsRequest,
+	callerProjectRoles map[string]string, callerRole string) (*PredictConflictsResponse, *AihubError) {
 	// aihub#238: validate BEFORE any database access. This is the call pf-work
 	// uses as its pre-claim gate, and an unrecognized type used to fall through
 	// resourceToLock into `continue`, so the response was
@@ -297,6 +311,53 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 		}
 	}
 
+	// aihub#662: refuse a file_scope question nothing could have answered.
+	//
+	// 🔴 THIS IS THE aihub#238 FAKE ALL-CLEAR, one field further in, and it was
+	// MEASURED on production rather than reasoned about. The same
+	// declared_resources — a correct {type:path, uri:file:…, repo:…} naming a
+	// file another running attempt held — answered two different things:
+	//
+	//	with project     hard_block, rule 1, naming the holder's actor / wi / attempt
+	//	without project  {"predictions":[],"severity":"info"}
+	//
+	// because file_scope keys are "<project>:<repo>:<path>" (fileScopeLockKey)
+	// and an empty project makes every probe key ":<repo>:<path>", which equals
+	// no key any lock has ever had. Zero rows match, and zero rows is
+	// byte-identical to "nobody holds this" — on the HARD rule, the one whose
+	// job is to block. It cost a real round trip on 2026-09-14, read as "the
+	// locks are released".
+	//
+	// The check is scoped to resources that DERIVE a file_scope lock, not to
+	// every payload: rules 2, 4, 5 and 6 match on declared_resources containment
+	// and never touch the project, so a repo-only or service-only payload is
+	// answered exactly as well without one and must keep working. resourceToLock
+	// rather than derivedLock, because rule 3 runs for intent=read too (it
+	// reports info) and an info that silently became an empty list would be the
+	// same defect in a quieter register.
+	if effectiveProject == "" {
+		var needProject []string
+		for _, res := range resources {
+			if lockType, _ := resourceToLock(res, "p"); lockType == "file_scope" {
+				needProject = append(needProject, res.URI)
+			}
+		}
+		if len(needProject) > 0 {
+			return nil, NewErrDetails(ErrBadRequest,
+				fmt.Sprintf("project could not be resolved, and %d of these resources name a file "+
+					"(path/document/section), "+
+					"whose conflict check is namespaced by project: without it every probe key is built "+
+					"as \":<repo>:<path>\", which matches no lock, so the answer would be an empty "+
+					"prediction list indistinguishable from \"no conflict\"", len(needProject)),
+				map[string]any{
+					"paths_needing_project": needProject,
+					"hint": "send `project`, or a `work_item_id` that resolves to an existing work item " +
+						"(its own project wins). A payload of only repo/service/external_ref entries " +
+						"needs neither: those rules match declarations, not project-namespaced lock keys.",
+				})
+		}
+	}
+
 	// Rule 1: resource_lock conflict (hard_block)
 	// Skip if dry_run=true (advisory only)
 	//
@@ -342,7 +403,28 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 					WIID:         wiID,
 				})
 				result.Severity = SeverityHardBlock
-				return result, nil // hard_block: stop processing further rules
+				// 🔴 THIS RETURN JUMPS OVER THE H7 VISIBILITY FOLD AT THE BOTTOM,
+				// and that is a KNOWN DEFECT filed separately rather than repaired
+				// here (aihub#662 measured it; see that work item for the follow-up
+				// it raised). Measured on production 2026-09-14: one credential,
+				// one payload, two answers — dry_run=true came back
+				// "[conflict in project aihub, no visibility]" while dry_run unset
+				// returned the holder's actor_display, work_item_slug, work_item_id
+				// and attempt_id in full, because rule 3's predictions pass through
+				// the fold and rule 1's do not. `req.Project` is not authorized
+				// against the caller anywhere, so this discloses across a project
+				// boundary.
+				//
+				// It is left standing because removing it costs one of: a ~400-line
+				// re-indent of rules 2-6 under an `if !hardBlocked`, a `goto`, or
+				// lifting the fold into a helper — which moves its QueryRow out of
+				// this function and out of the reach of three AST gates built
+				// around this name (TestPredictConflictsAnswersEveryQueryRowError's
+				// site count, TestPredictConflictsHasNoLogAndContinuePath, and
+				// slugres' siteExemptions entry). That is a change worth reviewing
+				// on its own evidence, and it wants a database to verify, which
+				// aihub#662 did not have.
+				return result, nil
 			}
 		}
 	}
@@ -703,16 +785,13 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, dbErrCause(err, "failed to resolve a prediction's project for visibility folding")
 			}
-			if wiProject != "" {
-				callerRole := callerProjectRoles[wiProject]
-				if callerRole == "" && wiProject != "" {
-					// No access — redact identifying info
-					p.ActorDisplay = ""
-					p.WIID = ""
-					p.WISlug = ""
-					p.AttemptID = ""
-					p.Description = "[conflict in project " + wiProject + ", no visibility]"
-				}
+			if wiProject != "" && !canSeeProject(wiProject, callerProjectRoles, callerRole) {
+				// No access — redact identifying info
+				p.ActorDisplay = ""
+				p.WIID = ""
+				p.WISlug = ""
+				p.AttemptID = ""
+				p.Description = "[conflict in project " + wiProject + ", no visibility]"
 			}
 		}
 		foldedPredictions = append(foldedPredictions, p)
@@ -720,6 +799,31 @@ func PredictConflicts(ctx context.Context, pool *pgxpool.Pool, req *PredictConfl
 	result.Predictions = foldedPredictions
 
 	return result, nil
+}
+
+// canSeeProject reports whether the caller may be told who holds a lock in
+// project.
+//
+// The admin arm is not a courtesy. An admin's ProjectRoles map is EMPTY by
+// design (aihub#227), so a membership-only test reads "administrator of
+// everything" as "member of nothing" and redacts hardest from the one caller
+// entitled to the whole answer — which is exactly what it did until aihub#662.
+// Every other visibility gate in this package already pairs the map with this
+// arm: CreateDependency gates on `callerRole != "admin" && …`, GetParentRef and
+// ListChildren on `callerRole == "admin" || …`. This one was the outlier.
+//
+// ⚠️ TWO NEIGHBOURS SPELL THE MEMBERSHIP HALF DIFFERENTLY, and this keeps the
+// LOOSER spelling on purpose. ListDependencies compares through
+// `RoleLevel[...] >= RoleLevel["viewer"]` because "an unrecognised value is
+// reachable" (aihub#460), whereas `!= ""` admits any non-empty role string.
+// That difference predates aihub#662 and is NOT changed here: this work item
+// added the admin arm, and switching the membership test in the same breath
+// would be a second, unmeasured behaviour change to a visibility control.
+// FnForceTakeover is deliberately not cited as a precedent: its predicate is
+// `projectRole == "maintainer" || callerRole == "admin"`, which is stricter and
+// answers a different question.
+func canSeeProject(project string, callerProjectRoles map[string]string, callerRole string) bool {
+	return callerRole == "admin" || callerProjectRoles[project] != ""
 }
 
 // derivedLock returns the write lock a declared resource takes, or ("", "") if

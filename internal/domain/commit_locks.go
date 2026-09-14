@@ -86,9 +86,30 @@ type ReconcileCommitLocksRequest struct {
 	// silent hole, so the repo is demanded rather than guessed.
 	Repo string `json:"repo"`
 
-	// Paths are the repo-relative paths the pending commit contains, as
-	// produced by coding.GitStagedPaths.
+	// Paths are the repo-relative paths the pending commit WRITES, as produced
+	// by coding.GitPendingCommitPaths.
 	Paths []string `json:"paths"`
+
+	// Merge reports that the pending commit is a merge commit — a merge is in
+	// progress in the caller's worktree (aihub#662).
+	//
+	// 🔴 IT CHANGES THE REMEDY, NOT THE DECISION. Coverage, acquisition and the
+	// 409 are computed identically either way; what it selects is which advice a
+	// refusal ships, because the ordinary one — unstage the blocked paths, retry
+	// with the rest — SILENTLY DESTROYS DATA on a merge. Measured in a scratch
+	// repo: `git restore --staged <a path the other side brought in>` followed
+	// by the narrowed retry produced a merge commit with that file absent from
+	// the tree; `git show --stat` on the merge listed only the other file, so
+	// the deletion is invisible in the merge commit's own diff, while
+	// `git diff --name-status HEAD^2 HEAD` reported `D theirs.txt` — which is
+	// exactly what lands on the base branch when the PR merges.
+	//
+	// It defaults to false, and that default is the SAFE direction for an
+	// ordinary commit and the unsafe one for a merge. It is accepted because the
+	// alternative — deriving merge-ness server-side — is not available: MERGE_HEAD
+	// lives in the caller's worktree and the server has never seen it. A client
+	// too old to send this field gets today's behaviour exactly.
+	Merge bool `json:"merge"`
 }
 
 // ReconcileCommitLocksResponse reports what the gate found and what it took.
@@ -298,7 +319,7 @@ func FnReconcileCommitLocks(ctx context.Context, pool *pgxpool.Pool, wiID string
 		}
 	}
 	if len(conflicts) > 0 {
-		return nil, commitLockConflictErr(conflicts)
+		return nil, commitLockConflictErr(conflicts, req.Merge)
 	}
 	resp.Covered = covered
 
@@ -325,7 +346,7 @@ func FnReconcileCommitLocks(ctx context.Context, pool *pgxpool.Pool, wiID string
 				return nil, commitLockConflictErr([]commitLockConflict{{
 					Path: m.path, ResourceKey: m.key, AttemptID: raceOwnerID,
 					ActorDisplay: raceActor, WorkItemSlug: raceSlug,
-				}})
+				}}, req.Merge)
 			case errors.Is(reScanErr, pgx.ErrNoRows):
 				// An orphan from a crashed attempt the gc sweep has not reached.
 				// Reclaimed on the same terms as FnAcquireLocks: the release is
@@ -420,9 +441,9 @@ func anyMatches(probe lockConflictProbe, held []string) bool {
 // shape FnClaimWorkItem and FnAcquireLocks already use, so a caller that keys on
 // the established field keeps working rather than silently reading nothing.
 //
-// The remedy it ships lives in CommitLockRefusalAdvice, which carries its own
-// argument and its own measurements.
-func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
+// The remedy it ships is chosen by CommitLockAdviceFor, because there are two
+// and one of them destroys data when applied to the other's case.
+func commitLockConflictErr(conflicts []commitLockConflict, merge bool) *AihubError {
 	paths := make([]string, 0, len(conflicts))
 	for _, c := range conflicts {
 		paths = append(paths, c.Path)
@@ -440,8 +461,26 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 				"work_item_slug": first.WorkItemSlug,
 			},
 			"blocked_paths": paths,
-			"advice":        CommitLockRefusalAdvice,
+			"advice":        CommitLockAdviceFor(merge),
 		})
+}
+
+// CommitLockAdviceFor returns the remedy a CONFLICT_LOCK_TAKEN refusal ships,
+// which is NOT one string (aihub#662).
+//
+// 🔴 THE TWO ARE NOT VARIANTS OF ONE SENTENCE, they are remedies for different
+// situations, and applying either to the other's case is a defect rather than a
+// stylistic mismatch: the ordinary one deletes another work item's files on a
+// merge, and the merge one lands no commit at all on an ordinary one. That is
+// why this is a function with a decision in it and not a `+ mergeSuffix`.
+//
+// Exported so the wire tests in internal/mcp run the SHIPPED constants rather
+// than copies of them.
+func CommitLockAdviceFor(merge bool) string {
+	if merge {
+		return CommitLockMergeRefusalAdvice
+	}
+	return CommitLockRefusalAdvice
 }
 
 // CommitLockRefusalAdvice is the remedy a CONFLICT_LOCK_TAKEN refusal ships in
@@ -492,15 +531,66 @@ func commitLockConflictErr(conflicts []commitLockConflict) *AihubError {
 // work item / attempt. So bytes spent here buy back nothing a caller can
 // otherwise see, and the 237-byte
 // discipline bought nothing while being exactly what kept the remedy
-// incomplete. The REAL limit is 489 bytes: past that the cut lands inside this
-// string and ships half a remedy, which is worse than a short one.
-// TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit is that gate.
+// incomplete. What the budget must protect is THIS string, which sorts first
+// and is therefore cut in half rather than pushed off the end; half a remedy
+// reads complete, which is worse than a short one.
+//
+// ⚠️ The limit is computed, not written down here. An earlier version of this
+// paragraph asserted "489 bytes" and aihub#662 falsified it: the gate measures
+// client.DetailsRenderLimit (2048) minus the 11-byte `{"advice":"` prefix, so
+// the budget is 2037, and the merge constant below is already past 489 while
+// passing. TestCommitLockConflictErr_AdviceSurvivesTheRenderLimit computes it
+// from the constant and logs what it measured; read the log, not a number in
+// prose.
 const CommitLockRefusalAdvice = "Those files belong to another live attempt. Do NOT force a takeover: " +
 	"the holder is editing them. Either wait for it to finish, or take them out of this commit, " +
 	"which takes TWO steps: a plain retry re-runs `git add -A` and re-stages exactly what step 1 " +
 	"removed, earning the same refusal. " +
 	"(1) `git restore --staged <blocked paths>` " +
 	"(2) retry with paths=[the files that are left]."
+
+// CommitLockMergeRefusalAdvice is what a refusal ships when the pending commit
+// is a MERGE (aihub#662). It exists because the string above is DESTRUCTIVE
+// here, not merely unhelpful.
+//
+// 🔴 WHAT FOLLOWING THE ORDINARY REMEDY ON A MERGE ACTUALLY DOES, measured in a
+// scratch repo on git 2.43.0 rather than reasoned about. The branch adds
+// mine.txt; the other side adds theirs.txt and edits shared.txt; the merge is
+// refused over theirs.txt because another attempt holds it:
+//
+//	git restore --staged theirs.txt   index vs HEAD -> [shared.txt]
+//	retry paths=[shared.txt]          merge commit created, 2 parents
+//	git show --stat <merge>            shared.txt | 1 +      <- theirs.txt ABSENT
+//	git diff --name-status HEAD^2 HEAD A mine.txt / D theirs.txt
+//
+// `git restore --staged` resets the index entry to HEAD, and on a merge HEAD is
+// only the FIRST parent — so for a path the other side introduced there is
+// nothing to reset TO, and the entry disappears. The merge then records a
+// DELETION of a file the holder had just landed, and the combined diff a
+// reviewer looks at does not show it. When the PR merges, that deletion is what
+// reaches the base branch. aihub#654 was handed this exact instruction twice
+// and declined it; nothing was lost because its executor was careful, which is
+// not a property of the gate.
+//
+// ⚠️ IT DELIBERATELY NUMBERS NO STEPS, and that is a contract statement rather
+// than an omission. CommitLockRefusalAdvice's "(1) … (2) …" grammar exists so
+// TestCommitGateWire_RefusalAdviceIsExecutableAndWorks can EXECUTE it and
+// require the commit to land. There is no such recipe here, because every local
+// sequence that lands THIS commit either keeps the contested file (the refusal
+// stands) or drops it (the deletion above). The remedy is to stop and get the
+// lock released, so a numbered recipe would be a lie in executable form — the
+// worst of the three shapes that file's header catalogues. adviceRecipe returns
+// nothing for this string, by design, and
+// TestCommitGateWire_MergeRefusalIsNotTheDestructiveRemedy is what keeps that
+// from being a silent vacuum: it measures the ordinary recipe's destructiveness
+// against a real refused merge and requires this string not to be it.
+const CommitLockMergeRefusalAdvice = "This is a MERGE commit, and the usual remedy is UNSAFE here: " +
+	"`git restore --staged` on a path the other side brought in has nothing in HEAD to reset to, " +
+	"so it records the merge as DELETING that file. That deletion does not show up in the merge's " +
+	"own diff, and it lands on the base branch when the PR merges. Do NOT do it, and do NOT force " +
+	"a takeover. Get the lock released instead: wait for the holder to finish, or ask it to pause, " +
+	"then re-run this commit with the merge still in progress. `git merge --abort` is the fallback " +
+	"if you cannot wait, but it discards your conflict resolutions along with the merge."
 
 func displayOrUnknown(s string) string {
 	if s == "" {

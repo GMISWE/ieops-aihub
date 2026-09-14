@@ -3,7 +3,7 @@
 ```json
 {
   "tool": "pf_commit",
-  "description_sha256": "67d89eae3718754afb4a65a821c3179c7dc9f25f1c5506612fe8287fe7445fd6",
+  "description_sha256": "babfa24510b2031eeac37d0f4f8c029e0238944e08abf2ef66b9733a8b89ad81",
   "input_schema_sha256": "efb55cef0d5dd923b0e8c7447968212c86a2e60bdcf5342ee087f602af2d8545",
   "params": {
     "message": {
@@ -55,9 +55,21 @@ because "commit" carries a heavier semantic here than the word normally does.
 🔴 **This call can ACQUIRE LOCKS.** Before committing it lists the files the commit
 would contain and compares them against the `file_scope` locks THIS ATTEMPT ACTUALLY
 HOLDS — the live lock set, **not** `declared_resources`, and the description says so
-because the two routinely disagree. Any changed file no held lock covers is locked
+because the two routinely disagree. Any written file no held lock covers is locked
 for this attempt automatically and stays locked until the attempt ends, so
 committing WIDENS the lock set.
+
+🔴 **"Writes" is narrower than "contains" for a merge commit** (aihub#662), and
+`internal/coding/commit_gate_test.go`
+(`TestGitPendingCommitPaths_MergeCountsOnlyWhatDiffersFromBothParents`) measures both
+directions of that criterion on one worktree: a clean merge inherits every path from
+one parent or the other and writes none of them, while a conflicted merge writes
+exactly the hand-resolved path and still leaves the carried file out. The reading it
+replaces was the staged set, which for a merge is everything the other side brought
+in, and which refused `aihub#654` over three files it had never touched
+(`TestCommitGateWire_MergeSendsOnlyWhatItWrites` drives that shape through the tool).
+`TestGitMergeParents_ReadsEveryParentNotJustTheFirst` holds the parent enumeration an
+octopus merge needs, since `git rev-parse MERGE_HEAD` answers one sha and exits 0.
 
 ## hop 2-3 — what leaves this process, and what binds it
 
@@ -91,17 +103,32 @@ before committing).
   promised holder fields off the live description rather than listing them, and with
   the envelope those fields travel in held by
   `internal/domain/commit_locks_test.go` (`TestCommitLockConflictErr_NamesEveryHolder`).
+- 🔴 **The refusal ships a DIFFERENT remedy on a merge**, because following the
+  ordinary one there destroys data: `internal/mcp/commit_gate_wire_test.go`
+  (`TestCommitGateWire_MergeRefusalIsNotTheDestructiveRemedy`) executes the ordinary
+  recipe against a real refused merge and requires `git diff HEAD^2 HEAD` to report a
+  DELETION of the file the other parent contributed, invisible in the merge's own
+  diff, before it requires the shipped merge advice to be a different string. The same
+  arm pins that the `merge` flag travels over the wire, which it must because
+  `MERGE_HEAD` lives in the caller's worktree and the server never sees it, and its
+  third subtest holds an ordinary commit to the executable remedy. The shape of the
+  merge advice — a prohibition with no numbered recipe for anything to execute — is
+  held by `internal/domain/commit_locks_test.go`
+  (`TestCommitLockConflictErr_MergeShipsADifferentRemedy`).
 - **There is no pass-through.** A lock check that cannot reach the server fails the
   commit rather than allowing it. That direction is the decision: a gate that fails
   open is a gate whose absence is invisible.
 - `lock_gate` reports which of three things happened on success: `covered` (every
-  changed file already locked, nothing written), `acquired` (with
-  `locks_acquired_for`), or `not_run` — reachable here only for a **merge commit**,
-  which is made from `MERGE_HEAD` rather than from staged changes, and where `sha` is
-  still the commit that was created — every value this description advertises is
+  written file already locked, nothing written), `acquired` (with
+  `locks_acquired_for`), or `not_run` — this commit writes nothing a lock could
+  protect, reachable here only for a **merge commit**, which is created from
+  `MERGE_HEAD` rather than from a change set, and where `sha` is still the commit that
+  was created — every value this description advertises is
   driven through the tool by `internal/mcp/commit_gate_wire_test.go`
   (`TestCommitGateWire_CommitAdvertisesOnlyReachableLockGateValues`), with the merge
-  path measured by `TestCommitGateWire_CommitCanReportNotRunOnlyViaAMergeCommit`.
+  path measured by `TestCommitGateWire_CommitCanReportNotRunOnlyViaAMergeCommit` and,
+  since aihub#662, also reached by a merge that carries both sides across and
+  contributes no path of its own (`TestCommitGateWire_MergeSendsOnlyWhatItWrites`).
 - A refusal or a failed check comes back as a plain error string with **no
   `lock_gate` field at all**, so its absence is a signal rather than a default —
   `internal/mcp/commit_refusal_shape_test.go`

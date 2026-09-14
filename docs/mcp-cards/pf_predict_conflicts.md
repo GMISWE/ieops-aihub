@@ -112,12 +112,26 @@ it, so a holder in a project the (authorized) caller cannot see comes back as
 `[conflict in project X, no visibility]` on the hard rule exactly as it already
 did on rule 3.
 
-⚠️ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 still shows the
-create-preview call without `project`**, so that line needs updating on the next
-release, since plugin text does not ride an ordinary PR; its own prose describes
-a repo/service-shaped payload, which
-`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty` shows is
-unaffected.
+✅ **`plugins/polyforge/skills/pf-work/SKILL.md` Step 3 now sends `project`**
+(`aihub#666`), and the carve-out this card invoked for deferring it never
+covered that call: Step 3 predicts for `<new wi's resources>` — whatever the
+human just declared — so a `path` entry there was a live 400 rather than the
+repo/service-only payload the carve-out exempts, both sides of which are the
+refusal arm and the repo-only control of
+`internal/domain/conflicts_predict_test.go`
+(`TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty`). Mode B's
+`pf_predict_conflicts(work_item_id=<slug>, …)` needed no change, because a
+resolvable `work_item_id` is the other exemption — and that half is held
+elsewhere, by the `byWI` arm of `internal/domain/conflicts_predict_test.go`
+(`TestPredictConflicts_FileScopeProjectScoped`), which passes `WorkItemID` with
+no `Project` and a path payload and requires no error. It has to be that test
+and not this one: the refusal test runs against a **nil pool**, so it can
+resolve no work item and structurally cannot hold a `work_item_id` arm. The
+second reason given here — that plugin text does not ride an ordinary PR — was
+never a rule in this repo: `aihub#641` measured it false with a negative
+control, `docs/onboarding.md` requires the five version stamps to land *with*
+the change, and this one landed as an ordinary PR that bumped them.
+<!-- prose-only: because=history -->
 
 🔴 **This tool was measured untrustworthy in both directions; the self-report
 direction is now fixed and the read-intent direction still stands.** It used to
@@ -356,5 +370,11 @@ worth recording.
   `internal/domain/predict_lock_self_exclusion_db_test.go`
   (`TestPredictLockRulesLeaveTheCallerOut`).
 - **The read-intent false negative is still unfixed**, and no adjudicated row
-  commits to fixing it. `aihub#416` (landed 2026-09-09), `aihub#510` (2026-09-09)
-  and `aihub#564` (2026-09-10) all left it alone.
+  commits to fixing it. `aihub#416` (landed 2026-09-09), `aihub#510` (2026-09-09),
+  `aihub#564` (2026-09-10), `aihub#662` (2026-09-14) and `aihub#665` (2026-09-14)
+  all left it alone, so it is the whole of what "untrustworthy" still means for
+  this tool — which is why `aihub#666` carried the same correction into
+  `docs/mcp-cards/pf_get_ready_queue.md` and §10.1 of
+  `docs/design/polyforge-v1-design.md`, the two places that still cited the
+  retired two-direction reading as the ground for `aihub#387`'s ruling.
+  <!-- prose-only: because=history -->

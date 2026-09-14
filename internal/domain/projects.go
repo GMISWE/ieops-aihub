@@ -329,6 +329,28 @@ func validateDescriptionBlock(r *repoEntry) *AihubError {
 //  5. identifier bcrypt check → viewer level
 //
 // minRole: "viewer" or "writer" or "owner"
+//
+// ⚠️ THERE IS A SECOND FUNCTION OF THIS NAME, in internal/server, and it is not
+// this one. That one (middleware.go) answers the same question from
+// UserContext.ProjectRoles — a map built once per request — because the handlers
+// that call it have no pool at that point. It is the same decision reached from
+// a cached input, so the two have to agree, and their agreement is a property
+// somebody has to maintain rather than one the type system gives.
+//
+// 🔴 LEVEL 2 IS WHERE THEY LAST DISAGREED (aihub#668). That map was derived from
+// projects.members alone, so an owner absent from his own project's members list
+// was a stranger to every gate in that package and got the membership 404 in a
+// project that is his — reachable in one call, because CreateProject below does
+// not name `members` and the column defaults to '[]'. internal/server's
+// projectRoleForCaller now reads owner_user_id as well and ranks such a caller
+// "maintainer": the top of RoleLevel (see below — "owner" is NOT a rung, and
+// putting it there would score 0), which is strictly less than the "all
+// permissions" level 2 grants here, so the map stays a conservative shadow of
+// this chain rather than a wider one.
+//
+// Levels 4 and 5 have no counterpart in that map at all: it is keyed on the
+// caller, and `visible` and the identifier hash are properties of the project.
+// A handler that needs those has to come through here.
 func checkProjectAccess(ctx context.Context, conn *pgxpool.Pool, name string, caller *UserRecord, identifier string, minRole string) (*Project, *AihubError) {
 	// project_scope on the api key confines the caller; an out-of-scope project
 	// is reported as not-found so its existence is not revealed (applies to admin too).

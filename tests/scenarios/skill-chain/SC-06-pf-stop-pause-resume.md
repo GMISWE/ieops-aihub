@@ -26,7 +26,9 @@ EXPECTED SKILL BEHAVIOR:
                           wi_type="fix_bug",
                           requires_human_session=false,
                           priority="normal")
-  4. pf_predict_conflicts(declared_resources=[...], dry_run=true)
+  4. pf_predict_conflicts(work_item_id=WI_ID, declared_resources=[...], dry_run=true)
+     # aihub#666: step 3 already created the wi, so work_item_id resolves the project
+     # (aihub#662) and also buys the aihub#510/#564 self-exclusion.
   5. pf_claim_work_item(work_item_id=WI_ID, mode="fresh",
                          idempotency_key=<client ULID>,
                          session_info={machine_id: <hostname>},

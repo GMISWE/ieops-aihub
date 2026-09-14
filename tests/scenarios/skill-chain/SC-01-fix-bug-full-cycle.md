@@ -24,7 +24,10 @@ USER_INTENT: "fix: add null check for empty user input in marketplace auth handl
 EXPECTED SKILL BEHAVIOR (from pf-work skill):
   1. Memory-First: pf_recall(project="marketplace", query="null check auth handler", type=["experience.*","rule.*"])
   2. Infer wi_type=fix_bug (small focused bug fix), requires_human_session=false
-  3. pf_predict_conflicts(declared_resources=[...])
+  3. pf_predict_conflicts(project="marketplace", declared_resources=[...])
+     # aihub#666: this runs BEFORE step 4 creates the wi, so no work_item_id exists to
+     # resolve a project from. Since aihub#662 a payload with any file_scope-deriving
+     # entry is 400 without `project`.
   4. pf_create_work_item(project="marketplace", goal="fix: add null check...", wi_type="fix_bug", requires_human_session=false)
   5. pf_claim_work_item(work_item_id=WI_ID, mode="fresh", ...)
 

@@ -3082,6 +3082,26 @@ const k12ContractCards = 45
 // with because=external-state, which is that vocabulary entry's own definition
 // ("a claim about an aihub#NNN's state") rather than a relabel between waiver
 // kinds.
+//
+// pf_predict_conflicts was re-pinned 38/33/prose-only 4 -> 41/34/prose-only 6 and
+// pf_get_ready_queue 29/19/prose-only 8 -> 31/20/prose-only 9 by aihub#666 on
+// 2026-09-14. Both arms reported RECLASSIFIED rather than DEBT_GROWTH, and
+// Unclassified is 0 on both sides of both rows: NOT a relabel between waiver
+// kinds — no waiver kind moved, and the three waiver columns are 0 throughout —
+// but arriving sentences, from aligning the docs with aihub#662's 400 and
+// aihub#665's 404. Of the 3 arriving on pf_predict_conflicts, one cites
+// TestPredictConflicts_UnresolvableProjectIsRefusedNotAnsweredEmpty (the
+// create-preview call in plugins/polyforge/skills/pf-work/SKILL.md now sends
+// `project`, so the stale note deferring it is replaced by the arm that decides
+// which payloads the carve-out covers) and two are prose-only because=history:
+// the repo never had the "plugin text does not ride an ordinary PR" rule that
+// note gave as its second reason (aihub#641 measured that false), and the
+// read-intent `## Open` row now names which work items left it alone. The 2 on
+// pf_get_ready_queue are the same correction at its other end: that card cited
+// "untrustworthy in BOTH directions" as the ground for aihub#387's ruling, and
+// only the read-intent direction survives aihub#510 and aihub#564 — one sentence
+// citing the two self-exclusion arms, one prose-only because=history saying the
+// ruling stands on the narrower ground anyway.
 var k12Ledger = map[string]cardclaims.Census{
 	"pf_acquire_locks":           {Candidates: 16, Cited: 13, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_activate_memory":         {Candidates: 5, Cited: 4, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
@@ -3099,7 +3119,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_emit_event":              {Candidates: 30, Cited: 26, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_force_takeover":          {Candidates: 21, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_get_memory":              {Candidates: 10, Cited: 8, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_get_ready_queue":         {Candidates: 29, Cited: 19, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
+	"pf_get_ready_queue":         {Candidates: 31, Cited: 20, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
 	"pf_get_step":                {Candidates: 21, Cited: 15, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_get_work_item":           {Candidates: 22, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_list_dependencies":       {Candidates: 14, Cited: 9, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
@@ -3108,7 +3128,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_list_work_items":         {Candidates: 41, Cited: 33, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
 	"pf_pause_attempt":           {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_pr":                      {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_predict_conflicts":       {Candidates: 38, Cited: 33, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_predict_conflicts":       {Candidates: 41, Cited: 34, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 6},
 	"pf_push":                    {Candidates: 8, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_read_events":             {Candidates: 17, Cited: 13, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_recall":                  {Candidates: 60, Cited: 49, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 11},

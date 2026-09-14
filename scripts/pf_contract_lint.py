@@ -453,6 +453,12 @@ def audit_stale_entries(baseline: list, used_entry_ids: set,
     or retarget); on a narrower local run it means re-run with the full set
     before judging. Both are errors — a partial run cannot vouch for the
     baseline, and an absent check is not a passing one.
+
+    Since aihub#671 the second case is mostly unreachable from a narrowed
+    --target, because a run that leaves a REQUIRED_ROOTS tree unscanned is
+    refused before it lints anything. It survives for the entry that points
+    OUTSIDE those roots — at one of UNSCANNED_PF_MARKDOWN's files, say — which
+    no run scans, so the branch is kept rather than assumed dead.
     """
     errors = []
     for entry in baseline:
@@ -478,10 +484,11 @@ def audit_stale_entries(baseline: list, used_entry_ids: set,
                 f"{baseline_path} [STALE_BASELINE_ENTRY] {ident}: its file is "
                 f"not among the {len(scanned_files)} scanned file(s), so the "
                 "entry can never match. Either the file was deleted or renamed "
-                "(then DELETE or retarget the entry), or this run's --target "
-                "set is narrower than the CI run's (then re-run with the full "
-                "target set, e.g. --target plugins/, before judging the entry "
-                f"stale).{note}"
+                "(then DELETE or retarget the entry), or it sits outside every "
+                "scanned tree — re-run with no --target at all (the default is "
+                "every REQUIRED_ROOTS tree) before judging the entry stale, and "
+                "if it is still unscanned there, the entry is exempting a file "
+                f"this lint never looks at.{note}"
             )
     return errors
 
@@ -692,6 +699,13 @@ def pf_calling_markdown(roots: list) -> list:
     "Holds a fragment this linter would have something to say about" is spelled
     with _TOOL_CALL_RE itself rather than a second recognizer, so the question
     asked here is exactly the question Rule A answers.
+
+    Hidden directories are skipped here because collect_md_files skips them
+    too: this walk must have the same reach as the scanner it audits, or it
+    would demand coverage of files no --target could ever reach. Measured on
+    the 2026-09-14 tree, the two agree on an empty set — no .md file lives
+    under a dot-directory at all. If one ever does and calls pf_ tools, BOTH
+    walks have to learn about it, not just this one.
     """
     abs_roots = [os.path.join(REPO_ROOT, r) for r in roots]
     found = []

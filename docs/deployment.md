@@ -188,6 +188,7 @@ snippet above keeps them in sync via `$PGPW`.) Full variable reference:
 | `ADMIN_BOOTSTRAP_KEY` | first boot only | Enables `POST /v1/bootstrap` until the first admin exists (see step 6). Unset it afterwards. |
 | `RENDER_MEMORY_TYPES` | no | Comma-separated memory types whose markdown is pre-rendered to HTML on save (for the artifact viewer). |
 | `EMBEDDING_ENABLED` | no | `true`/`1` turns on optional pgvector semantic recall. When enabled also set `EMBEDDING_PROVIDER` (`openai`/`ollama`), `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, and `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` as the provider needs. Default off; recall then uses recency + strength only. **`pgvector` is still required either way** because the schema migration creates the extension. |
+| `EMBEDDING_SERVING_ID` | no, but | free-text declaration of what is **serving** the model — backend, version, pooling, attention direction, e.g. `tei-1.9.3-lasttoken-causal`. Stamped into every row's `emb_pipeline` and compared by `cmd/aihub-embed-backfill`, so bumping it is what makes a serving change re-embed itself. Unset stamps `s=undeclared` and logs a warning at startup: honest, but it protects nothing, and a swap like 2026-09-13's stays invisible. **Must be bumped in the same change as any edit to the `tei` service** — see [Changing the tei service](#-changing-the-tei-service-is-a-two-line-change-not-a-one-line-change). aihub cannot derive this value (aihub#661). |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | for the bundled DB | Consumed by the `postgres` service; must line up with `DATABASE_URL`. |
 
 ### The `/ui` session key
@@ -950,22 +951,64 @@ Measured on 2026-09-13: embedding was down for **124.6 s** across that window
 (old container stopped 02:04:07.634Z, new one answering `/info` at
 02:06:12.186Z); aihub kept serving throughout and fell back to text recall.
 
-**If the embedding pipeline ever actually changes** (pooling, prompt,
-truncation behaviour), a full re-embed is mandatory, not optional: vectors
-written before and after such a change are two incompatible populations under
-the *same* `emb_model` string, and rows that already carry `embedded_len`
-escape the backfill's `embedded_len IS NULL` convergence clause. Converge
-explicitly with `UPDATE memories SET embedded_len = NULL; UPDATE work_items
-SET embedded_len = NULL;` and one backfill run. **Prove the pipeline changed
-rather than assuming it** — embed the same probe string through
-`localhost:8085/embed` before and after: a real pooling change moves the
-vector far (cosine well below 1). On 2026-09-13 this probe returned cosine
-1.000000, which is exactly how the mean-pooling hypothesis above was caught —
-so the NULL-out was deliberately skipped (one population, nothing to
-converge), and the backfill ran as-is: **811 active memories + 2468 work
-items re-embedded, 0 failures, 160 s**, converging recorded provenance and
-the pre-aihub#504 6000-rune truncation (the largest previously-truncated
-memory now embeds all 9,830 of its runes).
+#### 🔴 Changing the tei service is a two-line change, not a one-line change
+
+**Any edit to the `tei` service — the image tag, the model, `--pooling`,
+`--auto-truncate`, `--max-batch-tokens`, the backend itself — must be made in
+the same change as a bump of `EMBEDDING_SERVING_ID` in `/root/aihub.env`.**
+Vectors written before and after such an edit are two incompatible populations,
+and `EMBEDDING_SERVING_ID` is the ONLY place the data records which one a row
+belongs to. aihub cannot derive it: pooling and attention direction appear in
+no aihub config and in no embeddings response.
+
+Why that is a rule and not a suggestion (aihub#661, priced on 2026-09-13/14):
+the tei image went `89-1.7.2` → `89-1.9.3` with **no aihub-side change at
+all**. The attention direction for `Qwen/Qwen3-Embedding-0.6B` went
+bidirectional → causal, the cosine between the two spaces on identical text is
+**0.139–0.348** (aihub#648, 17/17 documents) — and `emb_model` and `emb_dims`
+were byte-identical across the swap, so no SQL could tell the two populations
+apart. Converging the corpus therefore needed a human to run
+`UPDATE memories SET embedded_len = NULL` (1671 rows) and the same over
+`work_items` (2525 rows) **by hand** before the backfill, forging a
+"no provenance" state to name rows the schema could not name (aihub#650).
+
+With the bump, nothing is done by hand. Migration 0041 added
+`memories.emb_pipeline` / `work_items.emb_pipeline`; every vector writer stamps
+it, and `cmd/aihub-embed-backfill`'s selection compares the stamp, so every row
+written under the previous value lands in the re-embed set on the next run.
+The remaining sequence is:
+
+```bash
+# 1. edit /root/docker-compose.yml (tei) AND /root/aihub.env (EMBEDDING_SERVING_ID) together
+docker compose -f /root/docker-compose.yml up -d tei
+docker compose -f /root/docker-compose.yml up -d aihub   # picks up the new EMBEDDING_SERVING_ID
+# 2. converge — no manual UPDATE, the predicate sees the change
+DATABASE_URL=... EMBEDDING_BASE_URL=http://localhost:8085 ... aihub-embed-backfill -include-archived
+```
+
+Check what the running binary is stamping before you trust any of this — an
+unset variable stamps `s=undeclared`, which is honest but protects nothing:
+
+```sql
+SELECT count(*) FROM memories WHERE emb_pipeline LIKE '%;s=undeclared|%';
+SELECT DISTINCT split_part(emb_pipeline, '|', 1) FROM memories WHERE emb_vector IS NOT NULL;
+```
+
+More than one row from that second query means the index currently holds more
+than one vector population. `cmd/aihub-embed-verify` prints the same comparison
+per row, including a warning when `EMBEDDING_SERVING_ID` is unset.
+
+**Still prove the pipeline changed rather than assuming it** — embed the same
+probe string through `localhost:8085/embed` before and after: a real pooling or
+attention change moves the vector far (cosine well below 1). On 2026-09-13 that
+probe returned cosine 1.000000 for a container *rebuild* (same image, same
+flags), which is exactly how the mean-pooling hypothesis above was caught — one
+population, nothing to converge — and the backfill ran as-is: **811 active
+memories + 2468 work items re-embedded, 0 failures, 160 s**, converging
+recorded provenance and the pre-aihub#504 6000-rune truncation (the largest
+previously-truncated memory now embeds all 9,830 of its runes). A rebuild that
+changes nothing does not need an `EMBEDDING_SERVING_ID` bump; bumping it anyway
+costs one backfill run, which is the cheap side of the trade.
 
 **Embedding backfill** — after a release that adds or changes embeddings, and
 after any embedding-pipeline change (pooling, truncation, prompt). Build

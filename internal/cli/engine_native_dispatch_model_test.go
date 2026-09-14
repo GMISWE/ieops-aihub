@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,50 +26,64 @@ import (
 // aihub#555 re-measured after that shipped: 1 of 2 engine-shaped review dispatches STILL
 // carried model=None — an argument that lives in prose is copied unevenly, however loudly it
 // is marked REQUIRED. So aihub#555 moved the model choice into agent definition files
-// (plugins/polyforge/agents/step-executor.md, step-reviewer.md) whose `model:` frontmatter
-// the harness itself applies — measured on live dispatches: a plugin agent declaring a model
-// ran on that model with no model argument passed, read from the dispatch transcript, not
-// from config. The same measurements force the second half of the change: an explicit
-// per-invocation `model` argument silently OVERRIDES the agent file, so the argument must be
-// DELETED in the same change that ships the files — two live channels mean the files are dead
-// text on every dispatch that fills the argument.
+// (plugins/polyforge/agents/step-*.md) whose `model:` frontmatter the harness itself applies —
+// measured on live dispatches: a plugin agent declaring a model ran on that model with no model
+// argument passed, read from the dispatch transcript, not from config. The same measurements
+// force the second half of the change: an explicit per-invocation `model` argument silently
+// OVERRIDES the agent file, so the argument must be DELETED in the same change that ships the
+// files — two live channels mean the files are dead text on every dispatch that fills the
+// argument.
+//
+// WHAT WENT WRONG A THIRD TIME (aihub#664)
+// -----------------------------------------
+// aihub#642 grew the role catalog to five roles (executor, operator, explorer, reviewer,
+// designer) but the documented dispatch loop stayed a TWO-way `is_review(step_id)` predicate:
+// `dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT)`. That
+// predicate has no branch for operator/explorer/designer, so all three fell through to the
+// `else` arm — the default, WRITE-CAPABLE executor. For `prepare_context`, whose catalog role
+// (`explorer`) is read-only BY CONSTRUCTION (Edit/Write/NotebookEdit disallowed in its agent
+// file), that is a silent CAPABILITY WIDENING: `polyforge engine resolve-role` and a session
+// following the documented loop disagreed not just on tier, but on whether the dispatched agent
+// could write at all. aihub#664 closes it by replacing the two-way predicate with a `ROLE_AGENT`
+// dict keyed on the SAME five roles the catalog defines, and by making the loop RESOLVE role via
+// `polyforge engine resolve-role` rather than restating any predicate in prose — there is now
+// exactly one place, the CLI verb, that decides the role for either dispatch path.
 //
 // WHAT IS ASSERTED
-//  1. Both agent files exist, carry `name:` and `model:` frontmatter, and their models are
-//     distinct and are not review-depth values (the aihub#358 vocabulary).
-//  2. engine.native.md declares STEP_AGENT/REVIEW_AGENT as exactly the plugin-namespaced ids
-//     of those files ("polyforge:" + the file's `name:`), and its dispatch line selects
-//     subagent_type by is_review and passes no model.
-//  3. The §0b template carries an explicit `subagent_type:` argument ahead of the prompt,
-//     marked REQUIRED, names BOTH namespaced ids bound to their constants, keys the review
-//     agent on is_review, does not mention `level`, and contains NO model argument anywhere —
-//     re-adding the argument is the one mutation this gate exists to kill.
-//  4. §0f's mapping table names both constants with the same namespaced ids. The model names
-//     are deliberately NOT asserted (or copied) there: the agent files are the single copy.
-//  5. The reviewer is read-only by construction: its `disallowedTools:` frontmatter covers
-//     Edit, Write and NotebookEdit.
+//  1. Every catalog role's agent file exists, carries `name:` and `model:` frontmatter, and its
+//     model is not a review-depth value (the aihub#358 vocabulary).
+//  2. engine.native.md declares ROLE_AGENT as a dict covering every catalog role, each entry
+//     naming the plugin-namespaced id of that role's own agent file, and its dispatch line
+//     resolves `role` from `polyforge engine resolve-role` and selects `subagent_type =
+//     ROLE_AGENT[role]` — never a restated is_review predicate.
+//  3. The §0b template carries an explicit `subagent_type:` argument ahead of the prompt, marked
+//     REQUIRED, selects through `ROLE_AGENT[role]` and names `polyforge engine resolve-role`,
+//     does not mention `level`, and contains NO model argument anywhere — re-adding the argument,
+//     or re-keying the choice back onto a restated predicate, is what this gate exists to kill.
+//  4. §0f's mapping table names every role with the same namespaced id ROLE_AGENT declares. The
+//     model names are deliberately NOT asserted (or copied) there: the agent files are the single
+//     copy.
+//  5. Capability agrees with the catalog for every role, named explicitly for "explorer": a role
+//     the catalog marks read_only=true dispatches to an agent file whose `disallowedTools:`
+//     frontmatter covers Edit, Write and NotebookEdit. This is the aihub#664 closure itself, not
+//     a restatement of role-name equality — a role could resolve to the "right" name and still
+//     dispatch to a file with the wrong tool policy.
 //  6. Anti-vacuity: every extractor is run against fixtures reproducing the mutants, so "no
 //     violation found" cannot mean "nothing was parsed".
 //
-// Deliberately NOT asserted: any particular model enum (a re-tier edits the agent files and
-// this gate follows), and whether a given harness honours the frontmatter — that was
-// aihub#555's live probe (measured, Claude Code 2.1.258), a runtime fact no static gate can
-// pin.
+// Deliberately NOT asserted: any particular model enum (a re-tier edits the agent files and this
+// gate follows), and whether a given harness honours the frontmatter — that was aihub#555's live
+// probe (measured, Claude Code 2.1.258), a runtime fact no static gate can pin.
 //
-// aihub#663: THE FILE NAMES ARE NO LONGER HARDCODED HERE
-// ------------------------------------------------------
-// Until aihub#663 this file opened with two literal constants — "agents/step-executor.md" and
-// "agents/step-reviewer.md" — and every assertion below hung off them. That pinned a TWO-agent
-// world at a moment when internal/roles/definitions/ held FIVE roles (executor, operator,
-// explorer, reviewer, designer), each with a generated agent file. Adding, removing or renaming
-// a role moved nothing here, because nothing here read the catalog.
-//
-// The two names are now DERIVED: the engine document's own constants are parsed first, resolved
-// against roles.LoadRoles(), and the agent file path is computed from the role name by the same
-// rule internal/roles/render_cc.go renders it with. The catalog directory is therefore the
-// contract — a renamed role breaks the resolution, and TestEngineDispatchIsRootedInTheRoleCatalog
-// below closes the other three directions (a role with no agent file, an agent file with no role,
-// and a role the documented dispatch routes nowhere).
+// aihub#663: THE FILE NAMES ARE NOT HARDCODED HERE
+// -------------------------------------------------
+// The role -> agent-file naming is DERIVED, not enumerated: the engine document's own dict
+// entries are parsed first, resolved against roles.LoadRoles(), and the agent file path is
+// computed from the role name by the same rule internal/roles/render_cc.go renders it with. The
+// catalog directory is therefore the contract — a renamed role breaks the resolution, and
+// TestEngineDispatchIsRootedInTheRoleCatalog below closes the other three directions (a role
+// with no agent file, an agent file with no role, and a role the documented dispatch routes
+// nowhere).
 
 const (
 	dispatchEngineDoc = "skills/pf-execute/engine.native.md"
@@ -93,24 +108,20 @@ const (
 // dispatchDeferredRoles names the catalog roles the DOCUMENTED dispatch does not route to, each
 // with the reason it does not.
 //
-// This map is the point of the gate, not an exemption from it. The documented loop dispatches
+// aihub#664 closed the fork this map used to carry: the documented loop dispatched
 // `REVIEW_AGENT if is_review(step_id) else STEP_AGENT` — two agents — while `polyforge engine
-// resolve-role` resolves a step id against all five roles. A `commit_and_pr` step therefore
-// resolves to `operator` in Go and is dispatched to `step-executor` by a session following the
-// markdown. That divergence is real and is NOT fixed here; what is fixed here is that it can no
-// longer happen SILENTLY. A sixth role added to internal/roles/definitions/ is routed by nothing
-// and named by nothing, so this gate goes red and whoever added it must either wire the dispatch
-// or write down, here, why it stays unrouted.
+// resolve-role` resolved a step id against all five catalog roles, so operator/explorer/designer
+// steps were routed by NOTHING documented and fell through to the write-capable default
+// silently. engine.native.md's ROLE_AGENT dict now covers every catalog role, so
+// EveryCatalogRoleIsRoutedOrDeclaredUnrouted below finds nothing left to excuse and this map is
+// empty.
 //
-// Measured 2026-09-14 (aihub#663, origin/main @56803a1): three of five roles are unrouted.
-var dispatchDeferredRoles = map[string]string{
-	"operator": "aihub#642 added the role and its agent file; the documented loop still selects " +
-		"by is_review only, so mechanical delivery steps dispatch to step-executor",
-	"explorer": "same as operator — read-only investigation steps dispatch to the write-capable " +
-		"step-executor, which is a capability WIDENING, not a narrowing",
-	"designer": "same as operator — design-judgment steps lose the raised tier they are defined " +
-		"with and run on the executor's default tier",
-}
+// It STAYS as a live mechanism rather than being deleted, because the property it protects is
+// not "five roles today" but "no role is EVER silently unrouted": a sixth role added to
+// internal/roles/definitions/ without a matching ROLE_AGENT entry goes red in that subtest and
+// must either be wired into the dict or named here with a reason it stays unrouted. An empty map
+// is therefore the PASSING state of the tripwire, not a sign it has nothing left to do.
+var dispatchDeferredRoles = map[string]string{}
 
 // dispatchAgentFile is the ONE place this file states the role -> agent-file mapping, and it
 // states it as a rule rather than as an enumeration.
@@ -147,7 +158,7 @@ func dispatchCatalogRole(t *testing.T, catalog []roles.Role, agentID, constName 
 		t.Fatalf("%s declares %s = %q, i.e. the role %q, which internal/roles/definitions/ does "+
 			"NOT define (it defines %v). The loop would dispatch an agent generated from no role "+
 			"— or, if the file was left behind by a rename, one whose definition no longer exists. "+
-			"Rename the constant with the role.",
+			"Rename the entry with the role.",
 			dispatchEngineDoc, constName, agentID, roleName, dispatchRoleNames(catalog))
 	}
 	return r
@@ -163,22 +174,24 @@ func dispatchRoleNames(catalog []roles.Role) []string {
 }
 
 var (
-	// The agent-name constants as the resident loop declares them, e.g.
-	//   STEP_AGENT, REVIEW_AGENT = "polyforge:step-executor", "polyforge:step-reviewer"
-	agentConstantsRe = regexp.MustCompile(`STEP_AGENT, REVIEW_AGENT = "([a-z][a-z0-9:._-]*)", "([a-z][a-z0-9:._-]*)"`)
+	// roleAgentDictRe captures the ROLE_AGENT dict literal's body (between the opening `{` and
+	// the closing `}`) as the resident loop declares it, e.g.
+	//   ROLE_AGENT = {"executor": "polyforge:step-executor", "operator": "polyforge:step-operator",
+	//       "explorer": "polyforge:step-explorer", "reviewer": "polyforge:step-reviewer",
+	//       "designer": "polyforge:step-designer"}
+	roleAgentDictRe = regexp.MustCompile(`(?s)ROLE_AGENT\s*=\s*\{(.*?)\}`)
 
-	// The agent ids as the §0b template states them, each tied to its constant:
-	//   "polyforge:step-reviewer" (REVIEW_AGENT) when is_review(step_id)
-	reviewIdRe = regexp.MustCompile(`"([a-z][a-z0-9:._-]*)"\s*\(REVIEW_AGENT\)`)
-	stepIdRe   = regexp.MustCompile(`"([a-z][a-z0-9:._-]*)"\s*\(STEP_AGENT\)`)
+	// roleAgentEntryRe extracts one "<role>": "<agent-id>" pair out of that body.
+	roleAgentEntryRe = regexp.MustCompile(`"([a-z][a-z0-9_]*)"\s*:\s*"([a-z][a-z0-9:._-]*)"`)
 
-	// The binding between the review agent and the review predicate. Whitespace-tolerant:
-	// the template wraps the subagent_type argument across lines.
-	reviewKeyedOnReviewRe = regexp.MustCompile(`\(REVIEW_AGENT\)\s+when\s+is_review\(step_id\)`)
+	// The resident loop's role-resolution line: role comes from the CLI verb, never a
+	// restated predicate.
+	engineRoleLineRe = regexp.MustCompile(
+		"role\\s*=\\s*`polyforge engine resolve-role --step-id='<step_id>'`\\.role")
 
 	// The resident loop's dispatch line. Asserted verbatim: it is the single line that makes
-	// the agent choice a dispatch argument rather than narrative.
-	engineDispatchAgentRe = regexp.MustCompile(`dispatch Agent\(subagent_type=REVIEW_AGENT if is_review\(step_id\) else STEP_AGENT`)
+	// the agent choice a dict lookup keyed on the resolved role, rather than narrative.
+	engineDispatchAgentRe = regexp.MustCompile(`dispatch Agent\(subagent_type=ROLE_AGENT\[role\]`)
 
 	// Any way of writing a model argument: "model:" (the Agent-call keyword) or "model="
 	// (the pseudo-code form). Case-insensitive and whitespace-tolerant, because the defect
@@ -189,15 +202,40 @@ var (
 	// hooks/pf-skill-router documents that it reads the SAME source this gate pins.
 	agentModelRe = regexp.MustCompile(`(?m)^model:[ \t]*([a-z][a-z0-9.-]*)[ \t]*$`)
 
-	// §0f's step-kind -> agent table — the reader-facing copy of the mapping. It names the
-	// agent ids only; the models live solely in the agent files.
-	tableReviewAgentRe = regexp.MustCompile("`REVIEW_AGENT` = `([a-z][a-z0-9:._-]*)`")
-	tableStepAgentRe   = regexp.MustCompile("`STEP_AGENT` = `([a-z][a-z0-9:._-]*)`")
+	// §0f's role table — the reader-facing copy of the mapping, one row per role, e.g.
+	//   | `explorer` | low, **read-only** | `prepare_context`, `map_consumers`, ... | `polyforge:step-explorer` |
+	// Captures the role name and the agent id; the tier/step-id columns are free text.
+	tableRoleRowRe = regexp.MustCompile("\\| `([a-z][a-z0-9_]*)` \\| [^|]*\\| [^|]*\\| `([a-z][a-z0-9:._-]*)` \\|")
+
+	// retiredPredicateTokens is any restatement of the two-way predicate aihub#664 retired.
+	// Checked against LIVE pseudocode regions only (the resident loop, the §0b template) —
+	// never against prose that explains the retirement, which legitimately names these tokens
+	// historically.
+	retiredPredicateTokens = []string{"is_review(", "sid.endswith(", "REVIEW_AGENT", "STEP_AGENT"}
 )
+
+// parseRoleAgentDict extracts engine.native.md's ROLE_AGENT dict into role -> agent-id pairs. ok
+// is false when the dict cannot be found, or is found but yields no entries — either is a parse
+// failure the caller must not silently treat as "zero roles declared".
+func parseRoleAgentDict(doc string) (map[string]string, bool) {
+	body := roleAgentDictRe.FindStringSubmatch(doc)
+	if body == nil {
+		return nil, false
+	}
+	entries := roleAgentEntryRe.FindAllStringSubmatch(body[1], -1)
+	if len(entries) == 0 {
+		return nil, false
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		out[e[1]] = e[2]
+	}
+	return out, true
+}
 
 // agentFrontmatter parses the YAML-ish frontmatter block of an agent definition file into a
 // flat key -> value map. ok is false when the file has no leading --- fence pair. Only
-// single-line scalar fields are supported, which is all these two files may use.
+// single-line scalar fields are supported, which is all these files may use.
 func agentFrontmatter(body string) (map[string]string, bool) {
 	if !strings.HasPrefix(body, "---\n") {
 		return nil, false
@@ -252,129 +290,161 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		t.Fatalf("roles.LoadRoles: %v — the role catalog is the source of truth for which agent "+
 			"files exist; without it this gate has nothing to derive the file names from", err)
 	}
-
-	// ── The engine constants bind to the catalog, and the catalog names the files ──────────
-	// This block used to sit BELOW the agent-file assertions, reading two hardcoded paths.
-	// aihub#663 moved it up: the documented constants now decide which roles — and therefore
-	// which files — the rest of this test is about.
-	consts := agentConstantsRe.FindStringSubmatch(engineDoc)
-	if consts == nil {
-		t.Fatalf("%s no longer declares the agent constants (`STEP_AGENT, REVIEW_AGENT = ...`). "+
-			"Every assertion below compares the dispatch template against them, so without the "+
-			"declaration nothing here checks anything. If the mapping moved, move this regex "+
-			"with it.", dispatchEngineDoc)
-	}
-	stepAgent, reviewAgent := consts[1], consts[2]
-
-	stepRole := dispatchCatalogRole(t, catalog, stepAgent, "STEP_AGENT")
-	reviewRole := dispatchCatalogRole(t, catalog, reviewAgent, "REVIEW_AGENT")
-	stepAgentFile := dispatchAgentFile(stepRole.Name)
-	reviewAgentFile := dispatchAgentFile(reviewRole.Name)
-
-	// ── The agent files: the mapping's single copy ─────────────────────────────────────────
-	stepFM, ok1 := agentFrontmatter(readAgentDoc(t, pluginRoot, stepAgentFile))
-	reviewFM, ok2 := agentFrontmatter(readAgentDoc(t, pluginRoot, reviewAgentFile))
-	if !ok1 || !ok2 {
-		t.Fatalf("agent definition files lack a frontmatter block (step ok=%v, review ok=%v). "+
-			"The harness reads name/model from that block; without it nothing below is checked.",
-			ok1, ok2)
+	if len(catalog) < 2 {
+		t.Fatalf("the role catalog holds %d role(s). Every assertion below iterates it, so a "+
+			"catalog this small makes them vacuous rather than satisfied.", len(catalog))
 	}
 
-	t.Run("TheTwoDispatchedRolesCarryTheCapabilitiesTheDispatchAssumes", func(t *testing.T) {
-		// Derived from the catalog, not asserted literally: swapping `read_only` between
-		// executor.yaml and reviewer.yaml would otherwise leave every check below green while
-		// the loop dispatched review steps to a write-capable agent.
-		if reviewRole.Capability.ReadOnly != true {
-			t.Errorf("REVIEW_AGENT resolves to role %q, whose definition declares read_only=%v. "+
-				"The review agent's whole purpose is to be read-only BY CONSTRUCTION; a "+
-				"write-capable one is the aihub#338 state with a new name.",
-				reviewRole.Name, reviewRole.Capability.ReadOnly)
+	roleAgent, ok := parseRoleAgentDict(engineDoc)
+	if !ok {
+		t.Fatalf("%s no longer declares the ROLE_AGENT dict (`ROLE_AGENT = {\"<role>\": "+
+			"\"<agent-id>\", ...}`). Every assertion below compares the dispatch template and the "+
+			"§0f table against it, so without the declaration nothing here checks anything. If "+
+			"the mapping moved, move roleAgentDictRe with it.", dispatchEngineDoc)
+	}
+
+	t.Run("RoleAgentDictCoversExactlyTheCatalog", func(t *testing.T) {
+		want := map[string]bool{}
+		for _, r := range catalog {
+			want[r.Name] = true
 		}
-		if stepRole.Capability.ReadOnly != false {
-			t.Errorf("STEP_AGENT resolves to role %q, whose definition declares read_only=%v — "+
-				"every non-review step would then dispatch to an agent that cannot edit, and "+
-				"fail at its first write", stepRole.Name, stepRole.Capability.ReadOnly)
+		for name := range want {
+			if _, present := roleAgent[name]; !present {
+				t.Errorf("ROLE_AGENT in %s has no entry for catalog role %q — a step `polyforge "+
+					"engine resolve-role` resolves to this role has nothing in the dict to "+
+					"dispatch to", dispatchEngineDoc, name)
+			}
 		}
-		if stepRole.Tier == reviewRole.Tier {
-			t.Errorf("both dispatched roles declare tier %q — the step-kind tier that is the "+
-				"entire reason this dispatch selects an agent raises nothing", stepRole.Tier)
+		for name := range roleAgent {
+			if !want[name] {
+				t.Errorf("ROLE_AGENT in %s names role %q, which internal/roles/definitions/ does "+
+					"not define (it defines %v) — a stale or invented key", dispatchEngineDoc,
+					name, dispatchRoleNames(catalog))
+			}
 		}
 	})
 
-	t.Run("AgentFilesCarryTheModels", func(t *testing.T) {
-		for rel, fm := range map[string]map[string]string{stepAgentFile: stepFM, reviewAgentFile: reviewFM} {
-			if fm["name"] == "" {
-				t.Errorf("%s frontmatter has no `name:` — the harness derives the dispatchable "+
-					"id from it, so the engine's constants would point at nothing", rel)
+	// Resolve every dict entry against the catalog once; every subtest below shares this.
+	type roleFixture struct {
+		role        roles.Role
+		agentID     string
+		agentFile   string
+		frontmatter map[string]string
+	}
+	fixtures := map[string]roleFixture{}
+	for name, agentID := range roleAgent {
+		r := dispatchCatalogRole(t, catalog, agentID, fmt.Sprintf("ROLE_AGENT[%q]", name))
+		agentFile := dispatchAgentFile(r.Name)
+		fm, fmOK := agentFrontmatter(readAgentDoc(t, pluginRoot, agentFile))
+		if !fmOK {
+			t.Fatalf("%s has no frontmatter block, so the harness reads no name, model or tool "+
+				"policy from it, and nothing about ROLE_AGENT[%q] can be checked", agentFile, name)
+		}
+		fixtures[name] = roleFixture{role: r, agentID: agentID, agentFile: agentFile, frontmatter: fm}
+	}
+
+	t.Run("EachDictKeyNamesItsOwnResolvedRole", func(t *testing.T) {
+		// dispatchCatalogRole resolves the AGENT ID; this checks the DICT KEY it was filed under
+		// agrees with it. A swap ("executor" mapped to step-operator's id and vice versa)
+		// resolves fine per-entry but disagrees here.
+		for name, fx := range fixtures {
+			if fx.role.Name != name {
+				t.Errorf("ROLE_AGENT[%q] = %q resolves to role %q — the dict key and the role its "+
+					"agent id names disagree, which is exactly a swap between two entries",
+					name, fx.agentID, fx.role.Name)
 			}
-			if fm["model"] == "" {
-				t.Errorf("%s frontmatter has no `model:` — the whole point of the file. Without "+
-					"it the dispatch silently inherits the parent session's model, the exact "+
-					"aihub#544 state this mechanism replaces.", rel)
+		}
+	})
+
+	t.Run("EachEntryIsTheAgentFilesOwnNamespacedId", func(t *testing.T) {
+		for name, fx := range fixtures {
+			if want := agentIdPrefix + fx.frontmatter["name"]; fx.agentID != want {
+				t.Errorf("ROLE_AGENT[%q] = %q but %s names itself %q, so the dispatchable id is "+
+					"%q — the loop would dispatch an agent that does not exist (or a same-named "+
+					"shadow)", name, fx.agentID, fx.agentFile, fx.frontmatter["name"], want)
 			}
-			if fm["model"] != "" && scenarioReviewLevels[fm["model"]] {
+			if fx.frontmatter["model"] == "" {
+				t.Errorf("%s frontmatter has no `model:` — without it the dispatch silently "+
+					"inherits the parent session's model, the aihub#544 state this mechanism "+
+					"replaces", fx.agentFile)
+			} else if scenarioReviewLevels[fx.frontmatter["model"]] {
 				t.Errorf("%s declares model %q, a review-depth value (%v) — the mapping has been "+
-					"re-keyed onto the vocabulary aihub#358 removed", rel, fm["model"],
-					keysOf(scenarioReviewLevels))
+					"re-keyed onto the vocabulary aihub#358 removed", fx.agentFile,
+					fx.frontmatter["model"], keysOf(scenarioReviewLevels))
 			}
-		}
-		if stepFM["model"] != "" && stepFM["model"] == reviewFM["model"] {
-			t.Errorf("both agent files declare model %q — a mapping with one value raises "+
-				"nothing", stepFM["model"])
 		}
 	})
 
-	t.Run("ReviewerIsReadOnlyByConstruction", func(t *testing.T) {
-		disallowed := reviewFM["disallowedTools"]
+	t.Run("CapabilityAgreesWithTheCatalog", func(t *testing.T) {
+		// This is the aihub#664 closure itself: a role the catalog marks read_only=true must
+		// dispatch to an agent file that CANNOT write, by construction (disallowedTools), not by
+		// the loop happening to route it somewhere harmless today.
+		for name, fx := range fixtures {
+			disallowed := fx.frontmatter["disallowedTools"]
+			covers := true
+			for _, tool := range []string{"Edit", "Write", "NotebookEdit"} {
+				if !regexp.MustCompile(`\b` + tool + `\b`).MatchString(disallowed) {
+					covers = false
+				}
+			}
+			switch {
+			case fx.role.Capability.ReadOnly && !covers:
+				t.Errorf("role %q is read_only=true in the catalog, but ROLE_AGENT dispatches it "+
+					"to %s whose disallowedTools (%q) does not cover Edit/Write/NotebookEdit — "+
+					"dispatching this role would silently WIDEN it to write-capable, the exact "+
+					"aihub#664 defect (the pre-fix predicate had no branch for this role, so it "+
+					"fell through to the write-capable default)", name, fx.agentFile, disallowed)
+			case !fx.role.Capability.ReadOnly && disallowed != "":
+				t.Errorf("role %q is read_only=false in the catalog, but %s carries disallowedTools "+
+					"%q — it would be NARROWED below what its own definition grants", name,
+					fx.agentFile, disallowed)
+			}
+		}
+		// Named explicitly, not just discovered by the loop above: this is the wi's own
+		// canonical example of the defect (prepare_context -> explorer).
+		explorerFX, present := fixtures["explorer"]
+		if !present {
+			t.Fatal("no ROLE_AGENT entry for \"explorer\" — the capability-widening closure this " +
+				"gate exists to prove cannot be checked at all")
+		}
+		if !explorerFX.role.Capability.ReadOnly {
+			t.Fatal("catalog role \"explorer\" itself is not read_only=true — fixture data has " +
+				"drifted from internal/roles/definitions/explorer.yaml")
+		}
 		for _, tool := range []string{"Edit", "Write", "NotebookEdit"} {
-			if !regexp.MustCompile(`\b` + tool + `\b`).MatchString(disallowed) {
-				t.Errorf("%s disallowedTools (%q) does not cover %s. Read-only BY CONSTRUCTION "+
-					"is the reason the review agent exists as a separate definition; without the "+
-					"denylist it is read-only by being told, which is the compliance class "+
-					"aihub#555 measured failing.", reviewAgentFile, disallowed, tool)
-			}
-		}
-		if stepFM["disallowedTools"] != "" {
-			t.Errorf("%s carries disallowedTools %q — the executor must stay write-capable; if "+
-				"a denylist is now intended there, move this assertion with the design",
-				stepAgentFile, stepFM["disallowedTools"])
-		}
-	})
-
-	t.Run("ConstantsAreTheFilesNamespacedIds", func(t *testing.T) {
-		if want := agentIdPrefix + stepFM["name"]; stepAgent != want {
-			t.Errorf("%s declares STEP_AGENT = %q but %s names itself %q, so the dispatchable id "+
-				"is %q — the loop would dispatch an agent that does not exist (or a same-named "+
-				"shadow)", dispatchEngineDoc, stepAgent, stepAgentFile, stepFM["name"], want)
-		}
-		if want := agentIdPrefix + reviewFM["name"]; reviewAgent != want {
-			t.Errorf("%s declares REVIEW_AGENT = %q but %s names itself %q, so the dispatchable "+
-				"id is %q", dispatchEngineDoc, reviewAgent, reviewAgentFile, reviewFM["name"], want)
-		}
-		if stepAgent == reviewAgent {
-			t.Errorf("STEP_AGENT and REVIEW_AGENT are both %q — a selector with one value raises "+
-				"nothing", stepAgent)
-		}
-		for _, id := range []string{stepAgent, reviewAgent} {
-			if !strings.HasPrefix(id, agentIdPrefix) {
-				t.Errorf("constant %q is not plugin-namespaced. The bare name resolves to a "+
-					"same-named user/project agent when one exists (measured, aihub#555); only "+
-					"the %q prefix pins the plugin's own file.", id, agentIdPrefix)
+			if !regexp.MustCompile(`\b` + tool + `\b`).MatchString(explorerFX.frontmatter["disallowedTools"]) {
+				t.Errorf("explorer's agent file (%s) disallowedTools %q does not cover %s — a "+
+					"prepare_context step would dispatch to an agent that CAN write",
+					explorerFX.agentFile, explorerFX.frontmatter["disallowedTools"], tool)
 			}
 		}
 	})
 
-	t.Run("EngineLoopDispatchesByAgentWithNoModel", func(t *testing.T) {
-		if !engineDispatchAgentRe.MatchString(engineDoc) {
-			t.Errorf("%s: the auto loop's dispatch line no longer passes "+
-				"`subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT` explicitly. "+
-				"Without it the agent choice is narrative, which is the aihub#544 state.",
+	t.Run("LoopResolvesRoleFromTheCLIVerbAndNeverRestatesThePredicate", func(t *testing.T) {
+		if !engineRoleLineRe.MatchString(engineDoc) {
+			t.Errorf("%s: the auto loop no longer resolves `role` via `polyforge engine "+
+				"resolve-role --step-id=...`.role — without this line the loop has nowhere to "+
+				"get `role` from, or a hand-written predicate has crept back in and the two "+
+				"dispatch paths (this loop / `polyforge engine resolve-role`) can diverge again",
 				dispatchEngineDoc)
+		}
+		if !engineDispatchAgentRe.MatchString(engineDoc) {
+			t.Errorf("%s: the auto loop's dispatch line no longer reads `dispatch "+
+				"Agent(subagent_type=ROLE_AGENT[role]`. Without it the agent choice is narrative "+
+				"again, which is the aihub#544 state.", dispatchEngineDoc)
 		}
 		if regexp.MustCompile(`dispatch Agent\([^)]*\bmodel\s*=`).MatchString(engineDoc) {
 			t.Errorf("%s: the auto loop's dispatch passes a model argument again. An explicit "+
 				"per-invocation model silently OVERRIDES the agent file (measured, aihub#555), "+
 				"so this single line kills the whole mechanism.", dispatchEngineDoc)
+		}
+		for _, tok := range retiredPredicateTokens {
+			if strings.Contains(engineDoc, tok) {
+				t.Errorf("%s still contains %q — the retired two-way is_review predicate must "+
+					"not be restated in the resident loop; a B/C session reading it would fork "+
+					"from `polyforge engine resolve-role` again, which is the exact aihub#664 "+
+					"defect", dispatchEngineDoc, tok)
+			}
 		}
 	})
 
@@ -387,8 +457,8 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 	}
 
 	t.Run("TemplateSelectsAgentAndCarriesNoModel", func(t *testing.T) {
-		region, ok := dispatchAgentRegion(tmpl)
-		if !ok {
+		region, regionOK := dispatchAgentRegion(tmpl)
+		if !regionOK {
 			t.Fatalf("the §0b template carries no `subagent_type:` argument ahead of `prompt:`. "+
 				"The agent id is the only channel that reaches the model files, so a template "+
 				"without it dispatches the harness default — model inheritance again. Template:\n%s",
@@ -398,10 +468,14 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 			t.Errorf("the template's subagent_type argument is not marked REQUIRED — it reads "+
 				"as narrative a dispatcher may skim: %q", region)
 		}
-		if !strings.Contains(region, "is_review(") {
-			t.Errorf("the template's subagent_type argument does not key the choice on "+
-				"is_review — the step-kind predicate the owner decided on (aihub#338, "+
-				"2026-09-04): %q", region)
+		if !strings.Contains(region, "ROLE_AGENT[role]") {
+			t.Errorf("the template's subagent_type argument does not reference ROLE_AGENT[role] "+
+				"— it must select the agent through the dict the resident loop declares, not "+
+				"restate a predicate: %q", region)
+		}
+		if !strings.Contains(region, "resolve-role") {
+			t.Errorf("the template's subagent_type argument does not mention `polyforge engine "+
+				"resolve-role` — role must come from the CLI verb, not from prose: %q", region)
 		}
 		if strings.Contains(strings.ToLower(region), "level") {
 			t.Errorf("the template's subagent_type argument mentions `level` — the review-DEPTH "+
@@ -413,71 +487,64 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 				"file (measured, aihub#555), and a copier reproduces the template whole. "+
 				"Template:\n%s", m, tmpl)
 		}
-
-		review := reviewIdRe.FindStringSubmatch(region)
-		step := stepIdRe.FindStringSubmatch(region)
-		if review == nil || step == nil {
-			t.Fatalf("the subagent_type argument does not state BOTH agents as literal ids "+
-				"(`\"<id>\" (REVIEW_AGENT)` / `\"<id>\" (STEP_AGENT)`). A template that names "+
-				"only one leaves the other dispatch to the harness default: %q", region)
-		}
-		if review[1] != reviewAgent {
-			t.Errorf("the template reviews with %q but %s declares REVIEW_AGENT = %q — the two "+
-				"documents dispatch different agents for review steps", review[1],
-				dispatchEngineDoc, reviewAgent)
-		}
-		if step[1] != stepAgent {
-			t.Errorf("the template defaults to %q but %s declares STEP_AGENT = %q — the two "+
-				"documents dispatch different agents for non-review steps", step[1],
-				dispatchEngineDoc, stepAgent)
-		}
-		if !reviewKeyedOnReviewRe.MatchString(region) {
-			t.Errorf("the REVIEW agent is not bound to the review predicate (`(REVIEW_AGENT) "+
-				"when is_review(step_id)`). Whatever else the words say, the binding is what "+
-				"stops a swap: %q", region)
+		for _, tok := range retiredPredicateTokens {
+			if strings.Contains(region, tok) {
+				t.Errorf("the template's subagent_type argument still contains %q — the retired "+
+					"two-way predicate must not be restated here: %q", tok, region)
+			}
 		}
 	})
 
-	t.Run("SectionZeroFTableAgreesWithConstants", func(t *testing.T) {
-		review := tableReviewAgentRe.FindStringSubmatch(details)
-		step := tableStepAgentRe.FindStringSubmatch(details)
-		if review == nil || step == nil {
-			t.Fatalf("%s no longer states the §0f mapping table (`REVIEW_AGENT` = `<id>` / "+
-				"`STEP_AGENT` = `<id>`). That table is the copy a reader of the deferred file "+
-				"actually consults; if it moved, move this regex with it.", dispatchDetailDoc)
+	t.Run("SectionZeroFTableAgreesWithTheDict", func(t *testing.T) {
+		rows := tableRoleRowRe.FindAllStringSubmatch(details, -1)
+		if len(rows) == 0 {
+			t.Fatalf("%s no longer states the §0f role table (`| `<role>` | ... | `<agent-id>` "+
+				"|`). That table is the reader-facing copy of the mapping; if its shape moved, "+
+				"move tableRoleRowRe with it.", dispatchDetailDoc)
 		}
-		if review[1] != reviewAgent {
-			t.Errorf("§0f's table reviews with %q but %s declares REVIEW_AGENT = %q — the two "+
-				"copies contradict each other", review[1], dispatchEngineDoc, reviewAgent)
+		tableAgent := map[string]string{}
+		for _, row := range rows {
+			tableAgent[row[1]] = row[2]
 		}
-		if step[1] != stepAgent {
-			t.Errorf("§0f's table defaults to %q but %s declares STEP_AGENT = %q — the two "+
-				"copies contradict each other", step[1], dispatchEngineDoc, stepAgent)
+		for name, agentID := range roleAgent {
+			got, present := tableAgent[name]
+			if !present {
+				t.Errorf("§0f's table has no row for role %q, but %s's ROLE_AGENT declares it as "+
+					"%q — the two copies contradict each other", name, dispatchEngineDoc, agentID)
+				continue
+			}
+			if got != agentID {
+				t.Errorf("§0f's table names %q for role %q but %s's ROLE_AGENT declares %q — the "+
+					"two copies contradict each other", got, name, dispatchEngineDoc, agentID)
+			}
 		}
 	})
 
 	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
 		// Every assertion above is "no defect was found", which a parser that finds nothing
-		// satisfies for free. Each fixture is one of the mutants this gate exists to reject.
+		// satisfies for free. Each fixture below is one of the mutants this gate exists to reject.
+
+		if _, dictOK := parseRoleAgentDict("no dict here at all"); dictOK {
+			t.Error("parseRoleAgentDict found a dict in text that has none")
+		}
+		if _, dictOK := parseRoleAgentDict("ROLE_AGENT = {}"); dictOK {
+			t.Error("parseRoleAgentDict accepted an empty dict body as if it had entries")
+		}
+		got, dictOK := parseRoleAgentDict(`ROLE_AGENT = {"executor": "polyforge:step-executor", "reviewer": "polyforge:step-reviewer"}`)
+		if !dictOK || got["executor"] != "polyforge:step-executor" || got["reviewer"] != "polyforge:step-reviewer" {
+			t.Errorf("parseRoleAgentDict misparsed a reference two-entry dict: %v, %v", got, dictOK)
+		}
+
 		noAgent := "Agent(\n  prompt: \"\"\"\nbody\n\"\"\"\n)"
-		if _, ok := dispatchAgentRegion(noAgent); ok {
+		if _, regionOK := dispatchAgentRegion(noAgent); regionOK {
 			t.Error("dispatchAgentRegion found a subagent_type argument in a template that has none")
 		}
 		agentAfterPrompt := "Agent(\n  prompt: \"\"\"\nbody\n\"\"\",\n  subagent_type: \"x\"\n)"
-		if _, ok := dispatchAgentRegion(agentAfterPrompt); ok {
+		if _, regionOK := dispatchAgentRegion(agentAfterPrompt); regionOK {
 			t.Error("dispatchAgentRegion accepted a subagent_type placed after the prompt — a " +
 				"copier who stops at the prompt never reads it")
 		}
-		swapped := `subagent_type: <REQUIRED — "` + stepAgent + `" (REVIEW_AGENT) when is_review(step_id), else "` +
-			reviewAgent + `" (STEP_AGENT)>, prompt: """`
-		region, ok := dispatchAgentRegion(swapped)
-		if !ok {
-			t.Fatal("dispatchAgentRegion could not parse the swapped-agent fixture")
-		}
-		if m := reviewIdRe.FindStringSubmatch(region); m == nil || m[1] != stepAgent {
-			t.Errorf("reviewIdRe did not extract the swapped review id; the agreement assertion "+
-				"could not have caught a swap (got %v)", m)
-		}
+
 		for _, mutant := range []string{
 			`subagent_type: "polyforge:step-reviewer",
   model: "opus",
@@ -487,48 +554,80 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		} {
 			// The third fixture is deliberately NOT expected to match: a fullwidth colon is not
 			// an Agent-call argument. Only the first two are live reintroductions.
-			got := modelArgRe.MatchString(mutant)
+			mgot := modelArgRe.MatchString(mutant)
 			want := !strings.Contains(mutant, "：")
-			if got != want {
+			if mgot != want {
 				t.Errorf("modelArgRe on %q = %v, want %v — the no-model assertion would misjudge "+
-					"this reintroduction shape", mutant, got, want)
+					"this reintroduction shape", mutant, mgot, want)
 			}
 		}
-		levelKeyed := `subagent_type: <REQUIRED — "polyforge:step-reviewer" (REVIEW_AGENT) when the step's level is deep>, prompt: """`
-		if region, ok := dispatchAgentRegion(levelKeyed); ok {
-			if strings.Contains(region, "is_review(") || !strings.Contains(strings.ToLower(region), "level") {
+
+		levelKeyed := `subagent_type: <REQUIRED - ROLE_AGENT[role] when the step's level is deep>, prompt: """`
+		if region, regionOK := dispatchAgentRegion(levelKeyed); regionOK {
+			if !strings.Contains(strings.ToLower(region), "level") {
 				t.Error("the level-keyed fixture was not recognisable as level-keyed — the " +
 					"re-keying mutant would pass")
 			}
 		} else {
 			t.Error("dispatchAgentRegion could not parse the level-keyed fixture")
 		}
-		swappedTable := "| review | predicate | `REVIEW_AGENT` = `" + stepAgent + "` |\n" +
-			"| everything else | otherwise | `STEP_AGENT` = `" + reviewAgent + "` |\n"
-		if m := tableReviewAgentRe.FindStringSubmatch(swappedTable); m == nil || m[1] != stepAgent {
-			t.Errorf("tableReviewAgentRe did not extract a swapped §0f table value (got %v) — "+
-				"the table-agreement assertion could not have caught a swap", m)
+
+		swappedTable := "| `executor` | default, write | `code_change` | `polyforge:step-operator` |\n" +
+			"| `operator` | lowest, write | `commit_and_pr` | `polyforge:step-executor` |\n"
+		swappedRows := tableRoleRowRe.FindAllStringSubmatch(swappedTable, -1)
+		if len(swappedRows) != 2 || swappedRows[0][2] != "polyforge:step-operator" || swappedRows[1][2] != "polyforge:step-executor" {
+			t.Errorf("tableRoleRowRe did not extract a swapped §0f table row (got %v) — the "+
+				"table-agreement assertion could not have caught a swap", swappedRows)
 		}
+
+		noRoleLine := strings.Replace(engineDoc,
+			"role = `polyforge engine resolve-role --step-id='<step_id>'`.role",
+			"role = ROLE_HEURISTIC(step_id)", 1)
+		if engineRoleLineRe.MatchString(noRoleLine) {
+			t.Error("engineRoleLineRe still matches an engine doc that stopped delegating to " +
+				"`polyforge engine resolve-role`")
+		}
+
 		noDispatchAgent := strings.Replace(engineDoc,
-			"dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT",
-			"dispatch Agent(", 1)
+			"dispatch Agent(subagent_type=ROLE_AGENT[role]", "dispatch Agent(", 1)
 		if engineDispatchAgentRe.MatchString(noDispatchAgent) {
 			t.Error("engineDispatchAgentRe still matches an engine whose dispatch line lost its " +
-				"subagent_type argument")
+				"ROLE_AGENT[role] lookup")
 		}
+
 		remodelled := strings.Replace(engineDoc,
-			"dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT",
-			"dispatch Agent(model=RAISED if is_review(step_id) else DEFAULT", 1)
+			"dispatch Agent(subagent_type=ROLE_AGENT[role]",
+			"dispatch Agent(model=RAISED if role == \"reviewer\" else DEFAULT", 1)
 		if !regexp.MustCompile(`dispatch Agent\([^)]*\bmodel\s*=`).MatchString(remodelled) {
 			t.Error("the engine no-model assertion does not recognise a dispatch line that " +
 				"regrew a model argument")
 		}
-		fmMissing, ok := agentFrontmatter("no frontmatter here")
-		if ok || fmMissing != nil {
+
+		forkedBack := strings.Replace(engineDoc,
+			"dispatch Agent(subagent_type=ROLE_AGENT[role], prompt=§0b)",
+			"dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT, prompt=§0b)", 1)
+		if forkedBack == engineDoc {
+			t.Fatal("the forked-back fixture's anchor text was not found in engine.native.md — " +
+				"the fixture no longer matches the live dispatch line's shape")
+		}
+		foundRetired := false
+		for _, tok := range retiredPredicateTokens {
+			if strings.Contains(forkedBack, tok) {
+				foundRetired = true
+			}
+		}
+		if !foundRetired {
+			t.Error("re-forking the dispatch line back onto the retired is_review predicate was " +
+				"not detected by any retiredPredicateTokens entry — the anti-fork check would " +
+				"miss exactly the aihub#664 regression")
+		}
+
+		fmMissing, fmOK := agentFrontmatter("no frontmatter here")
+		if fmOK || fmMissing != nil {
 			t.Error("agentFrontmatter parsed a file with no frontmatter block")
 		}
-		fm, ok := agentFrontmatter("---\nname: x\nmodel: y\ndisallowedTools: Edit, Write\n---\nbody model: z\n")
-		if !ok || fm["name"] != "x" || fm["model"] != "y" || fm["disallowedTools"] != "Edit, Write" {
+		fm, fmOK := agentFrontmatter("---\nname: x\nmodel: y\ndisallowedTools: Edit, Write\n---\nbody model: z\n")
+		if !fmOK || fm["name"] != "x" || fm["model"] != "y" || fm["disallowedTools"] != "Edit, Write" {
 			t.Errorf("agentFrontmatter misparsed the reference fixture: %v", fm)
 		}
 		if m := agentModelRe.FindStringSubmatch("---\nmodel: tinker\n---\n"); m == nil || m[1] != "tinker" {
@@ -540,17 +639,17 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 
 // TestEngineResolveRoleNeverBottomsOutAtExecutor is aihub#654's CODE-LEVEL companion to
 // TestEngineNativeDispatchSelectsAgentNotModel above: that test pins the DOC contract (the
-// engine-native prose never wires a model argument, and keys agent choice on is_review); this
-// one pins the same "never silently default to executor" invariant one layer down, in the actual
-// Go implementation (internal/engine.ResolveRole) that a future headless orchestrator calls
-// instead of an LLM reading the prose. It is additive - it does not replace or alter any
-// assertion above. internal/engine/role_test.go's own TestResolveRole_NeverBottomsOutAtExecutor
-// already runs against the same real embedded roles.LoadRoles() catalog (via its
-// loadCatalogOrFail helper), not a hand-built fixture, so this test is not adding real-catalog
-// coverage the other one lacks; the value here is narrower - this test lives in package cli,
-// beside the doc-contract test above, so a reader auditing this file sees both the prose
-// contract and its code-level analogue together, without also having to open
-// internal/engine/role_test.go.
+// engine-native prose never wires a model argument, and resolves the agent choice through
+// `polyforge engine resolve-role` rather than a restated predicate); this one pins the same
+// "never silently default to executor" invariant one layer down, in the actual Go implementation
+// (internal/engine.ResolveRole) that a future headless orchestrator calls instead of an LLM
+// reading the prose. It is additive - it does not replace or alter any assertion above.
+// internal/engine/role_test.go's own TestResolveRole_NeverBottomsOutAtExecutor already runs
+// against the same real embedded roles.LoadRoles() catalog (via its loadCatalogOrFail helper),
+// not a hand-built fixture, so this test is not adding real-catalog coverage the other one
+// lacks; the value here is narrower - this test lives in package cli, beside the doc-contract
+// test above, so a reader auditing this file sees both the prose contract and its code-level
+// analogue together, without also having to open internal/engine/role_test.go.
 func TestEngineResolveRoleNeverBottomsOutAtExecutor(t *testing.T) {
 	catalog, err := roles.LoadRoles()
 	if err != nil {
@@ -649,19 +748,21 @@ func TestEngineResolveRoleNeverBottomsOutAtExecutor(t *testing.T) {
 //     without generating its file goes red here.
 //  2. file -> role: every agents/step-*.md corresponds to a catalog role. DELETING or RENAMING a
 //     role goes red here, where a role->file loop alone would simply stop looking at the orphan.
-//  3. constant -> role: the documented STEP_AGENT / REVIEW_AGENT resolve to catalog roles
+//  3. dict -> role: the documented ROLE_AGENT entries resolve to catalog roles
 //     (dispatchCatalogRole, used by the gate above — a rename is fatal there).
 //  4. role -> dispatch: every catalog role is either ROUTED by the documented dispatch or named in
 //     dispatchDeferredRoles with a reason. This is the one that fires on a SIXTH role: a new role
-//     is routed by nothing and excused by nothing.
+//     is routed by nothing and excused by nothing. Since aihub#664 the dict routes all five
+//     current roles, so dispatchDeferredRoles is empty; this subtest is what keeps it that way.
 //  5. catalog -> predicate: the step ids the catalog binds to the review role are exactly the ids
 //     engine.IsReviewStep accepts. A review-shaped step id bound to a write-capable role would
-//     otherwise make `polyforge engine resolve-role` and the documented is_review predicate
+//     otherwise make `polyforge engine resolve-role` and the historical is_review predicate
 //     dispatch the same step to different agents.
 //
-// Deliberately NOT asserted: that the documented dispatch SHOULD be five-way. Whether to route
-// operator/explorer/designer is a design decision this gate has no standing to make; what it
-// removes is the possibility of the question going unasked.
+// Deliberately NOT asserted: that a role must always be ROUTED rather than declared unrouted via
+// dispatchDeferredRoles — whether a future sixth role gets a ROLE_AGENT entry or a documented
+// exemption is a design decision this gate has no standing to make; what it removes is the
+// possibility of the question going unasked.
 func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 	pluginRoot := pluginRootDir(t)
 	catalog, err := roles.LoadRoles()
@@ -687,8 +788,8 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 					r.Name, rel, readErr)
 				continue
 			}
-			fm, ok := agentFrontmatter(string(body))
-			if !ok {
+			fm, fmOK := agentFrontmatter(string(body))
+			if !fmOK {
 				t.Errorf("%s has no frontmatter block, so the harness reads no name, no model and "+
 					"no tool policy from it", rel)
 				continue
@@ -752,20 +853,20 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 
 	t.Run("EveryCatalogRoleIsRoutedOrDeclaredUnrouted", func(t *testing.T) {
 		engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
-		consts := agentConstantsRe.FindStringSubmatch(engineDoc)
-		if consts == nil {
-			t.Fatalf("%s no longer declares the agent constants, so the routed set is empty and "+
+		roleAgent, dictOK := parseRoleAgentDict(engineDoc)
+		if !dictOK {
+			t.Fatalf("%s no longer declares the ROLE_AGENT dict, so the routed set is empty and "+
 				"this check would report every role as unrouted for the wrong reason",
 				dispatchEngineDoc)
 		}
 		routed := map[string]bool{}
-		for _, id := range consts[1:] {
-			if name, ok := dispatchRoleOfAgentID(id); ok {
+		for name, agentID := range roleAgent {
+			if roleName, idOK := dispatchRoleOfAgentID(agentID); idOK && roleName == name {
 				routed[name] = true
 			}
 		}
 		if len(routed) == 0 {
-			t.Fatal("no documented constant resolved to a role name, so `routed` is empty and the " +
+			t.Fatal("no ROLE_AGENT entry resolved to a role name, so `routed` is empty and the " +
 				"loop below reports every role as unrouted — a red that says nothing")
 		}
 
@@ -779,17 +880,17 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 			case !routed[r.Name] && !deferred:
 				t.Errorf("role %q is defined in internal/roles/definitions/, `polyforge engine "+
 					"resolve-role` can resolve a step to it, and the documented dispatch in %s "+
-					"routes to neither it nor anything else on its behalf — it selects only "+
-					"between %v. A step resolving to %q is therefore dispatched to the wrong "+
-					"agent SILENTLY: wrong tier, and possibly wrong tool policy.\n\n"+
-					"Fix it one of two ways, and both are decisions, not chores: wire the "+
-					"dispatch to select this role's agent, or add %q to dispatchDeferredRoles "+
-					"with the reason it stays unrouted.",
+					"routes to neither it nor anything else on its behalf — it routes only "+
+					"%v. A step resolving to %q is therefore dispatched to the wrong agent "+
+					"SILENTLY: wrong tier, and possibly wrong tool policy.\n\n"+
+					"Fix it one of two ways, and both are decisions, not chores: wire ROLE_AGENT "+
+					"to this role's agent, or add %q to dispatchDeferredRoles with the reason it "+
+					"stays unrouted.",
 					r.Name, dispatchEngineDoc, dispatchSortedKeys(routed), r.Name, r.Name)
 			}
 		}
 		for name := range dispatchDeferredRoles {
-			if _, ok := roles.RoleByName(catalog, name); !ok {
+			if _, roleOK := roles.RoleByName(catalog, name); !roleOK {
 				t.Errorf("dispatchDeferredRoles excuses role %q, which the catalog no longer "+
 					"defines (it defines %v). A stale entry silently excuses a role that may be "+
 					"re-added later under the same name.", name, dispatchRoleNames(catalog))
@@ -799,13 +900,17 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 
 	t.Run("TheCatalogAndTheReviewPredicateAgreeOnWhichStepsAreReviews", func(t *testing.T) {
 		engineDoc := readEngineDoc(t, pluginRoot, dispatchEngineDoc)
-		consts := agentConstantsRe.FindStringSubmatch(engineDoc)
-		if consts == nil {
-			t.Fatalf("%s no longer declares the agent constants", dispatchEngineDoc)
+		roleAgent, dictOK := parseRoleAgentDict(engineDoc)
+		if !dictOK {
+			t.Fatalf("%s no longer declares the ROLE_AGENT dict", dispatchEngineDoc)
 		}
-		reviewRoleName, ok := dispatchRoleOfAgentID(consts[2])
-		if !ok {
-			t.Fatalf("REVIEW_AGENT = %q does not name a step agent", consts[2])
+		reviewAgentID, present := roleAgent["reviewer"]
+		if !present {
+			t.Fatalf("ROLE_AGENT in %s has no \"reviewer\" entry", dispatchEngineDoc)
+		}
+		reviewRoleName, idOK := dispatchRoleOfAgentID(reviewAgentID)
+		if !idOK {
+			t.Fatalf("ROLE_AGENT[\"reviewer\"] = %q does not name a step agent", reviewAgentID)
 		}
 
 		// Both counters must move, or the loop below is agreeing with a constant function.
@@ -821,9 +926,9 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 				if got := engine.IsReviewStep(stepID); got != wantReview {
 					t.Errorf("the catalog binds step id %q to role %q, but engine.IsReviewStep(%q) "+
 						"= %v. `polyforge engine resolve-role` answers from the CATALOG (tier 2) "+
-						"while a B/C session follows the documented is_review predicate, so the "+
-						"two paths dispatch this step to DIFFERENT agents for the same wi — the "+
-						"read-only reviewer or a write-capable role.",
+						"while a historical B/C session followed the documented is_review "+
+						"predicate, so the two paths would dispatch this step to DIFFERENT agents "+
+						"for the same wi — the read-only reviewer or a write-capable role.",
 						stepID, r.Name, stepID, got)
 				}
 			}
@@ -836,7 +941,7 @@ func TestEngineDispatchIsRootedInTheRoleCatalog(t *testing.T) {
 	})
 
 	t.Run("ExtractorsAreNotBlind", func(t *testing.T) {
-		// dispatchRoleOfAgentID is what turns a documented constant into a catalog lookup; every
+		// dispatchRoleOfAgentID is what turns a documented entry into a catalog lookup; every
 		// assertion above about a rename depends on it REJECTING the ids it should.
 		for _, bad := range []string{
 			"step-executor",              // not plugin-namespaced: resolves to a user/project shadow

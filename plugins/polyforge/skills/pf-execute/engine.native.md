@@ -18,23 +18,25 @@ Prior-step context = `pf_get_step` -> `completed_steps`; nothing writes a worktr
 ## Execute (rhs=false, auto mode)
 
 ```python
-# The tier is a STEP KIND -> AGENT choice (aihub#338/#555); the models live ONLY in the agent
-# files (agents/*.md), so the loop picks WHICH agent and never passes a model - an explicit one
-# silently OVERRIDES the file. `polyforge engine resolve-role --step-id='<sid>'` IS the predicate:
-# is_review(sid) = sid.endswith("_review") or sid in ("review","code_review","release_review").
-STEP_AGENT, REVIEW_AGENT = "polyforge:step-executor", "polyforge:step-reviewer"
+# STEP KIND -> ROLE (aihub#338/#555/#642/#664); `polyforge engine resolve-role --step-id='<sid>'`
+# is the ONE place that decides it - never restate the predicate here.
+# Models live ONLY in the agent files (agents/*.md); this loop just maps role -> agent id.
+ROLE_AGENT = {"executor": "polyforge:step-executor", "operator": "polyforge:step-operator",
+    "explorer": "polyforge:step-explorer", "reviewer": "polyforge:step-reviewer",
+    "designer": "polyforge:step-designer"}
 
 sa_id = new_ulid()
 pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
 
 for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
-    dispatch Agent(subagent_type=REVIEW_AGENT if is_review(step_id) else STEP_AGENT, prompt=§0b)
+    role = `polyforge engine resolve-role --step-id='<step_id>'`.role
+    dispatch Agent(subagent_type=ROLE_AGENT[role], prompt=§0b)
     # ^ copy §0b's template VERBATIM; subagent_type is the only channel that reaches a model.
 
     if a step called pf_pause_attempt (or a pf_* call is rejected "attempt is paused"):
         break   # stop the loop; no retry, and do NOT call pf_complete_attempt (§0e)
 
-    if is_review(step_id):
+    if role == "reviewer":
         # parse_review_result = `polyforge engine parse-review`, subagent output on STDIN
         result = that verb's {"result": "PASS"|"WARN"|"FAIL"}
         if result == "FAIL":  do §0c, then break   # then output the review issues

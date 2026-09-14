@@ -99,11 +99,11 @@ var listWIWireProbes = map[string][]struct {
 	"owner_display":    {{shape: "xiaokang", want: "xiaokang"}},
 	"reporter_display": {{shape: "xiaokang", want: "xiaokang"}},
 	"source":           {{shape: "human", want: "human"}},
-	"since":      {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"cursor":     {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
-	"sort":       {{shape: "closed_at", want: "closed_at"}},
-	"order":      {{shape: "asc", want: "asc"}},
-	"query":      {{shape: "latency", want: "latency"}},
+	"since":            {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"cursor":           {{shape: "2026-08-01T00:00:00Z", want: "2026-08-01T00:00:00Z"}},
+	"sort":             {{shape: "closed_at", want: "closed_at"}},
+	"order":            {{shape: "asc", want: "asc"}},
+	"query":            {{shape: "latency", want: "latency"}},
 	// aihub#277. A slug carries a '#', which url.Values.Encode percent-escapes
 	// on the wire; the probe compares the DECODED value, so "aihub#276" is what
 	// must come back out.

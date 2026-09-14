@@ -196,25 +196,80 @@ func TestUnionCandidates_DedupesTheTwoHalvesOfOwnership(t *testing.T) {
 	}
 }
 
-// TestDependencyIDs_ReadsEveryShapeTheEndpointUses guards ObserveQueue's external-block
-// detection. If this returns nothing, every blocked work item looks blocked-by-mine, and
-// BLOCKED_EXTERNAL — the state that notifies a human — never fires.
-func TestDependencyIDs_ReadsEveryShapeTheEndpointUses(t *testing.T) {
+// TestBlockingEdges_ReadsOnlyTheEdgesThatActuallyBlock guards ObserveQueue's external-block
+// detection in BOTH directions, which is what its predecessor did not.
+//
+// ─── what this replaced, and why that test was part of the defect ─────────────
+// It was TestDependencyIDs_ReadsEveryShapeTheEndpointUses, and it fed the parser one key
+// (`blocked_by`) holding three live in-scope ids. That payload cannot distinguish a correct
+// parser from the one that shipped: nothing in it had a `kind`, nothing sat under `blocking`, and
+// nothing was inaccessible — so the three false positives aihub#678 ③(a) names were all outside
+// what the fixture could express, and the gate certified its own blind spot. The fixture below is
+// the one the endpoint actually produces (internal/domain/dependencies.go's
+// DependenciesResponse), and every entry in it is one of those false positives.
+//
+// Mutants watched RED, each applied alone:
+//  1. re-add "blocking" to the keys read        → wi_downstream appears
+//  2. drop the `kind != "blocks"` filter        → wi_related and wi_superseded appear
+//  3. drop the accessible/sentinel check        → the hidden edge comes back notifiable
+func TestBlockingEdges_ReadsOnlyTheEdgesThatActuallyBlock(t *testing.T) {
 	res := map[string]any{
+		// The far side of the graph: work items MY work item is holding up. Reading these as
+		// blockers made owning a downstream dependent report BLOCKED_EXTERNAL and put a note on
+		// the dependent saying the opposite of the truth.
+		"blocking": []any{
+			map[string]any{"id": "wi_downstream", "slug": "p#50", "kind": "blocks", "accessible": true},
+		},
 		"blocked_by": []any{
-			map[string]any{"blocking_wi_id": "wi_a"},
-			map[string]any{"id": "wi_b"},
-			"wi_c",
+			map[string]any{"id": "wi_a", "slug": "p#1", "kind": "blocks", "accessible": true},
+			// Non-blocking edge kinds. The server's own readiness predicate requires
+			// kind='blocks'; these two hold nothing up.
+			map[string]any{"id": "wi_related", "slug": "p#2", "kind": "related", "accessible": true},
+			map[string]any{"id": "wi_superseded", "slug": "p#3", "kind": "supersedes", "accessible": true},
+			// Cross-project, invisible to this caller: slug present, id replaced by the sentinel.
+			map[string]any{"id": "hidden", "slug": "other#7", "kind": "blocks", "accessible": false},
 		},
 	}
-	got := dependencyIDs(res)
-	for _, want := range []string{"wi_a", "wi_b", "wi_c"} {
-		if !containsStr(got, want) {
-			t.Errorf("dependencyIDs = %v, missing %s", got, want)
+
+	got := blockingEdges(res)
+	if len(got) != 2 {
+		t.Fatalf("blockingEdges = %+v, want exactly 2 (the live `blocks` edge and the hidden one)", got)
+	}
+
+	var sawA, sawHidden bool
+	for _, ref := range got {
+		switch ref.Slug {
+		case "p#1":
+			sawA = true
+			if ref.ID != "wi_a" || !ref.Notifiable() {
+				t.Errorf("the accessible blocker came back %+v; layer 2 needs its id to write a note", ref)
+			}
+		case "other#7":
+			sawHidden = true
+			if ref.ID != "" || ref.Notifiable() {
+				t.Errorf("an inaccessible blocker came back notifiable as %+v. Its id is the "+
+					"sentinel \"hidden\", and emitting a note against it 404s on every round", ref)
+			}
+			if ref.Display() != "other#7" {
+				t.Errorf("Display() = %q; the slug is sent precisely so an unopenable blocker can "+
+					"still be named", ref.Display())
+			}
+		default:
+			t.Errorf("blockingEdges returned %+v, which is not an edge that blocks anything", ref)
 		}
 	}
-	if n := len(dependencyIDs(map[string]any{"unrelated": 1})); n != 0 {
-		t.Errorf("dependencyIDs on an unrelated payload returned %d ids", n)
+	if !sawA || !sawHidden {
+		t.Errorf("blockingEdges = %+v, want the live blocks edge and the hidden one", got)
+	}
+
+	// Negative controls: an unrelated payload, and one whose only edges are the wrong direction.
+	if n := len(blockingEdges(map[string]any{"unrelated": 1})); n != 0 {
+		t.Errorf("blockingEdges on an unrelated payload returned %d refs", n)
+	}
+	onlyDownstream := map[string]any{"blocking": []any{
+		map[string]any{"id": "wi_x", "kind": "blocks", "accessible": true}}}
+	if n := len(blockingEdges(onlyDownstream)); n != 0 {
+		t.Errorf("a work item that only BLOCKS others reported %d blockers of its own", n)
 	}
 }
 
@@ -898,6 +953,22 @@ func TestLockBlockerFrom_ReadsTheHolderTheServerNamed(t *testing.T) {
 	if b.Actor != "someone" || b.WorkItem != "aihub#665" {
 		t.Errorf("blocker = %+v, want actor=someone work_item=aihub#665", b)
 	}
+	// 🔴 attempt_id, and this assertion is why the fixture above has always carried it.
+	//
+	// It is the field aihub#678 ③(b)'s whole decision rests on — "is the holder one of MY OWN
+	// concurrent claims, which will release this lock inside the round?" — and for one commit it
+	// was tested nowhere, because every ③(b) test lives in internal/drain where the fake hands
+	// the runner a Blocker with AttemptID already populated. This file is the only place the wire
+	// is crossed, and this test asserted Actor, WorkItem and Resource: every field EXCEPT the one
+	// the new mechanism needed. The details struct simply did not declare `attempt_id`, so the
+	// value arrived and was dropped, silently — a missing field in an Unmarshal target never
+	// fails — and the entire retry path was inert in production while every unit test was green.
+	// Found by a clean-context reviewer who added exactly this line.
+	if b.AttemptID != "ra_other" {
+		t.Errorf("blocker.AttemptID = %q, want ra_other. Without it heldByThisRun can never say "+
+			"yes, so a lock held by this run's own concurrent claim is written off for the whole "+
+			"run and the fix does nothing at all", b.AttemptID)
+	}
 	if b.Resource != "file_scope:aihub:aihub:internal/cli/drain.go" {
 		t.Errorf("blocker.Resource = %q — the key is the half an operator can act on", b.Resource)
 	}
@@ -922,6 +993,17 @@ func TestLockBlockerFrom_ReadsTheHolderTheServerNamed(t *testing.T) {
 	}
 	if got := lockBlockerFrom(partial); got == nil || got.Resource != "file_scope:aihub:x.go" {
 		t.Errorf("a conflict with no holder details lost its resource key: %+v", got)
+	}
+
+	// ...and a refusal that named ONLY the attempt must not be discarded as "unnamed". It is the
+	// single field the retry decision reads, so a nil here would throw away the whole signal.
+	attemptOnly := &client.APIError{
+		StatusCode: 409, Code: "CONFLICT_LOCK_TAKEN", Message: "locked",
+		Details: json.RawMessage(`{"conflict_with":{"attempt_id":"ra_mine"}}`),
+	}
+	if got := lockBlockerFrom(attemptOnly); got == nil || got.AttemptID != "ra_mine" {
+		t.Errorf("a conflict naming only the holding attempt returned %+v; that field alone is "+
+			"enough to decide whether this run will release the lock itself", got)
 	}
 }
 
@@ -1579,4 +1661,258 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	_ = r.Close()
 	return buf.String()
+}
+
+// ─── aihub#678 ───────────────────────────────────────────────────────────────────────────────
+
+// TestCompleteAttemptFailed_ForcesTerminationOfTheOpenStep is finding ②.
+//
+// Every failure path in the runner — a dispatch error, a resolve-role error, engine startup, a
+// step bracket that could not be filed, a silent refusal, the 2h step timeout — calls failAttempt
+// while the step is still `in_progress`, because the thing that failed is what would have closed
+// it. FnCompleteAttempt reads exactly that state and answers 409 CONFLICT_STEP_IN_PROGRESS: "a
+// step is still in_progress; set force_terminate_step=true or update step first". The body drain
+// sent carried {status, note, credentials} and never that flag, so the one call whose job is to
+// release the work item was REFUSED on every one of those paths — leaving the work item `running`,
+// holding its locks, behind a process that had exited. Recovery meant pf_force_takeover, by hand.
+//
+// Both arms are here because the flag must be sent on exactly one status. On `wrapped` a step
+// still in progress means the loop wrapped a work item whose last step never completed, and the
+// 409 is the only thing that would ever say so.
+//
+// Mutants watched RED: deleting the `body["force_terminate_step"]` line (failed arm); moving it
+// out of the `status == "failed"` guard so it rides on every status (wrapped arm).
+func TestCompleteAttemptFailed_ForcesTerminationOfTheOpenStep(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = map[string]any{}
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	q := &drainQueries{c: client.New(srv.URL, "k"), project: "p"}
+
+	if err := q.CompleteAttempt(context.Background(), "wi_1", "failed", "the step agent died"); err != nil {
+		t.Fatalf("CompleteAttempt(failed): %v", err)
+	}
+	if got["force_terminate_step"] != true {
+		t.Errorf("the failed body carried force_terminate_step=%#v, want true. Without it the "+
+			"server answers 409 CONFLICT_STEP_IN_PROGRESS and the work item is left `running`, "+
+			"holding its locks, with nobody executing it. body=%v", got["force_terminate_step"], got)
+	}
+
+	if err := q.CompleteAttempt(context.Background(), "wi_1", "wrapped", "drained"); err != nil {
+		t.Fatalf("CompleteAttempt(wrapped): %v", err)
+	}
+	if v, present := got["force_terminate_step"]; present && v == true {
+		t.Errorf("the WRAPPED body carried force_terminate_step. A step still in_progress at wrap " +
+			"time means the loop wrapped a work item whose last step never completed, and the 409 " +
+			"is the only thing that would say so; forcing it files a `failed` step row under a " +
+			"`wrapped` attempt and calls that success")
+	}
+}
+
+// TestObserveQueue_ATerminalBlockerBlocksNothing is finding ③(a)'s second false positive, which is
+// the one that fires on an ordinary healthy project.
+//
+// unblockDependentWI requeues a dependent WITHOUT deleting its wi_dependencies row — its own
+// source comment says so — so a finished blocker stays on the edge list forever. AllInScope holds
+// only NON-terminal work items, so my own wrapped blocker is absent from the in-scope set and was
+// classified as somebody else's: a work item waiting on one live blocker OF MINE reported
+// BLOCKED_EXTERNAL (exit 11, "a human must act") instead of IDLE, and left a note on a wrapped
+// work item on every round.
+//
+// The predicate this restores is the server's own: `dep.kind = 'blocks' AND blocker.status NOT IN
+// ('wrapped','cancelled','failed')` (noLiveBlockerPredicate).
+//
+// Mutant watched RED: making blockerIsLive return true unconditionally.
+func TestObserveQueue_ATerminalBlockerBlocksNothing(t *testing.T) {
+	var wiReads []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/dependencies"):
+			// Two live-looking edges. wi_done is MINE and already wrapped; wi_live is mine and
+			// still running. Neither is in AllInScope's answer below — the first because it is
+			// terminal, which is exactly the case that used to be misread.
+			_, _ = w.Write([]byte(`{"blocked_by":[
+				{"id":"wi_done","slug":"p#1","kind":"blocks","accessible":true},
+				{"id":"wi_live","slug":"p#2","kind":"blocks","accessible":true}]}`))
+		case strings.Contains(r.URL.Path, "/work_items/wi_done"):
+			wiReads = append(wiReads, "wi_done")
+			_, _ = w.Write([]byte(`{"id":"wi_done","slug":"p#1","status":"wrapped"}`))
+		case strings.Contains(r.URL.Path, "/work_items/wi_live"):
+			wiReads = append(wiReads, "wi_live")
+			_, _ = w.Write([]byte(`{"id":"wi_live","slug":"p#2","status":"running"}`))
+		default:
+			switch r.URL.Query().Get("status") {
+			case "blocked":
+				_, _ = w.Write([]byte(`{"items":[{"id":"wi_blocked","slug":"p#9"}]}`))
+			case "queued,running,blocked,paused":
+				_, _ = w.Write([]byte(`{"items":[{"id":"wi_blocked","slug":"p#9"}]}`))
+			default:
+				_, _ = w.Write([]byte(`{"items":[]}`))
+			}
+		}
+	}))
+	defer srv.Close()
+
+	q := &drainQueries{c: client.New(srv.URL, "k"), project: "p", scope: drain.Scope{UserID: "u_me"}}
+	st, err := q.ObserveQueue(context.Background())
+	if err != nil {
+		t.Fatalf("ObserveQueue: %v", err)
+	}
+
+	if st.BlockedByOthers() != 1 {
+		t.Fatalf("BlockedByOthers = %d, want 1 (the live blocker only). state=%+v",
+			st.BlockedByOthers(), st)
+	}
+	names := st.ExternallyBlocked[0].BlockerNames()
+	if len(names) != 1 || names[0] != "p#2" {
+		t.Errorf("blockers = %v, want just the LIVE one. A wrapped blocker still carries a "+
+			"wi_dependencies row, and counting it means reporting BLOCKED_EXTERNAL forever and "+
+			"annotating a wrapped work item on every run", names)
+	}
+	if !containsStr(wiReads, "wi_done") {
+		t.Error("the wrapped blocker's status was never read; the dependency endpoint does not " +
+			"return it, so nothing else can answer the predicate")
+	}
+}
+
+// TestObserveQueue_AQueuedHumanSessionWorkItemIsNotCompleted is finding ③(d) end to end, over the
+// real query shapes rather than a constructed QueueState.
+//
+// Mutant watched RED: dropping the NeedsHumanSession append from ObserveQueue.
+func TestObserveQueue_AQueuedHumanSessionWorkItemIsNotCompleted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		qv := r.URL.Query()
+		switch {
+		case qv.Get("ready_only") == "true":
+			// The server's ready predicate requires requires_human_session = false, so neither
+			// of the two below comes back here.
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		case qv.Get("status") == "queued":
+			_, _ = w.Write([]byte(`{"items":[
+				{"id":"wi_rhs","slug":"p#1","requires_human_session":true},
+				{"id":"wi_null","slug":"p#2","requires_human_session":null}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	q := &drainQueries{c: client.New(srv.URL, "k"), project: "p", scope: drain.Scope{UserID: "u_me"}}
+	st, err := q.ObserveQueue(context.Background())
+	if err != nil {
+		t.Fatalf("ObserveQueue: %v", err)
+	}
+
+	if len(st.NeedsHumanSession) != 2 {
+		t.Fatalf("NeedsHumanSession = %+v, want both work items. The NULL one matters as much as "+
+			"the true one: the column has three states and `requires_human_session = false` is "+
+			"satisfied by neither, so drain cannot execute either", st.NeedsHumanSession)
+	}
+	if st.Empty() {
+		t.Fatal("the queue reported Empty() with two work items still queued")
+	}
+	if got := drain.Classify(false, st); got != drain.TerminalBlockedExternal {
+		t.Errorf("the run would end %s (exit %d); COMPLETED would exit 0 and tell an operator "+
+			"there is nothing left to come back for", got, drain.ExitCode(got))
+	}
+}
+
+// TestParseDrainArgs_MaxDuration is finding ④'s flag half.
+//
+// Refusing zero matters as much as parsing the value: zero is the field's documented "unbounded",
+// so `--max-duration=0` would read as a bound that had been applied. Same reasoning as
+// positiveInt, which the numeric budgets already use.
+func TestParseDrainArgs_MaxDuration(t *testing.T) {
+	o, err := parseDrainArgs([]string{"--project=p", "--max-duration=90m"})
+	if err != nil {
+		t.Fatalf("parseDrainArgs: %v", err)
+	}
+	if o.Budget.MaxDuration != 90*time.Minute {
+		t.Errorf("MaxDuration = %s, want 90m", o.Budget.MaxDuration)
+	}
+	// Default is unbounded, which is what every other budget defaults to.
+	if d, _ := parseDrainArgs([]string{"--project=p"}); d.Budget.MaxDuration != 0 {
+		t.Errorf("default MaxDuration = %s, want 0 (unbounded)", d.Budget.MaxDuration)
+	}
+	for _, bad := range []string{"--max-duration=0", "--max-duration=-5m", "--max-duration=soon", "--max-duration="} {
+		if _, err := parseDrainArgs([]string{"--project=p", bad}); err == nil {
+			t.Errorf("%s was accepted; a budget flag that silently means \"unlimited\" is worse "+
+				"than one that does not exist", bad)
+		}
+	}
+}
+
+// TestRunHarness_CancellationKillsTheWholeProcessTree is finding ⑥ C2, and it runs the real thing:
+// a child that spawns a grandchild, cancelled, with the grandchild's survival measured.
+//
+// exec.CommandContext's default cancellation is os.Process.Kill — SIGKILL, to the harness process
+// ONLY. A harness spawns subagents, MCP servers and git; SIGKILL gives it no chance to reap them,
+// so on the 2h step timeout or any cancellation they are orphaned onto init, still holding the
+// worktree open and still carrying a valid session_secret. The scenario that makes this more than
+// untidy: a step hangs, drain moves on, wraps the work item and REMOVES ITS WORKTREE, while the
+// orphans are still writing into it.
+//
+// Mutant watched RED: removing the Cancel/SysProcAttr assignment (the grandchild survives).
+func TestRunHarness_CancellationKillsTheWholeProcessTree(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "grandchild.alive")
+
+	// The grandchild outlives its parent by design: the parent exec's `sleep`, and the
+	// grandchild touches a file every 100ms for 30s. If the group signal does not reach it, the
+	// file keeps getting newer after the parent is gone.
+	script := fmt.Sprintf(
+		`( for i in $(seq 1 300); do touch %q; sleep 0.1; done ) & sleep 300`, marker)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runHarness(ctx, drain.Invocation{Path: "/bin/sh", Args: []string{"-c", script}},
+			dir, filepath.Join(dir, "out.log"))
+	}()
+
+	// Wait for the grandchild to exist before cancelling, or the test proves nothing.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the grandchild never started; the fixture, not the code, is what this would " +
+				"have been testing")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("runHarness did not return after cancellation")
+	}
+
+	// Give anything that survived a clear chance to touch the file again.
+	fi, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("stat marker: %v", err)
+	}
+	before := fi.ModTime()
+	time.Sleep(1500 * time.Millisecond)
+	fi, err = os.Stat(marker)
+	if err != nil {
+		t.Fatalf("stat marker: %v", err)
+	}
+	if !fi.ModTime().Equal(before) {
+		t.Errorf("the grandchild is still running %s after the harness was cancelled. It holds the "+
+			"work item's worktree open and a valid session_secret, and drain will remove that "+
+			"worktree at wrap while it is still writing into it", fi.ModTime().Sub(before))
+	}
 }

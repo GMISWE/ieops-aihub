@@ -107,6 +107,29 @@ agent believing it had compare-and-set protection it did not have.
 `pf_get_step` itself.** Call it whenever you actually need its answer - most often after a
 **resume**, to discover which step is current. Nothing else reports that.
 
+## 1a. `step_attempt_id` on the OPENING call, not only the completing one (aihub#675)
+
+`lifecycle.md`'s bracket passes it on both calls. The opening one is the easy one to drop, because
+the tool description calls the parameter "Optional on `in_progress`" and the server accepts the
+call without it - and then stores `current_step_attempt = NULL`.
+
+What that costs, MEASURED on a real Postgres (pgvector pg18, migrations 0001-0041) rather than
+reasoned about: if the attempt is **paused while that step is open**, the server force-terminates
+the step and files its `wi_step_completions` row under a SYNTHESISED id. Until aihub#675 that id
+was one shared literal, `idx_wsc_attempt` (migration 0005) is a **global** UNIQUE index, and the
+insert is `ON CONFLICT DO NOTHING` - so the first such row in the entire database landed and every
+later one, in any project, was discarded in silence. Two work items paused on such a step: 1
+history row, 2 `step_failed` events. The timeline looks right and `pf_get_step`'s `completed_steps`
+- the record a resuming agent is told to trust - has simply lost the step.
+
+The server no longer shares that sentinel, so a today's binary files each row. Pass the id anyway:
+it is what makes the record name the step attempt you actually opened, and it is the only version
+of this that does not depend on which binary the session is talking to.
+
+Same field, same reason, one call later: §1's two-call fallback above.
+
+---
+
 ## 2. Older server binaries: `note` on the terminal call
 
 If `pf_complete_attempt` / `pf_wrap` do not publish a `note` parameter, the binary predates

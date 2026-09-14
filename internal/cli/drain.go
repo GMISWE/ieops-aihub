@@ -70,6 +70,15 @@ Options:
   --max-parallel=<n>      Work items in flight at once (default 8).
   --max-rounds=<n>        Stop after n scheduling rounds (default unlimited).
   --max-work-items=<n>    Stop after executing n work items (default unlimited).
+  --max-duration=<dur>    Stop after this much wall clock, e.g. 90m or 4h
+                          (default unlimited). This is a real ceiling, not a
+                          round-boundary check: an in-flight step is cancelled
+                          the same way --stop cancels it, so the work item it
+                          was running is left CLAIMED and the run ends FAILED
+                          (exit 12) rather than IDLE. Without this flag the only
+                          wall-clock bound on a --detach'ed run is
+                          rounds x work-items x the 2h per-step timeout, all of
+                          which default to unlimited.
   --channel=<h[/model],...>
                           Preference-ordered harness candidates, e.g.
                           "claude,codex/gpt-5.6,pi/anthropic/claude-opus-4-5".
@@ -257,9 +266,9 @@ func printDrainReport(report drain.RunReport, runID, runDir string) {
 	fmt.Printf("  wrapped=%d failed=%d lock-blocked=%d paused=%d claim-failed=%d created=%d rounds=%d\n",
 		report.Totals.Wrapped, report.Totals.Failed, report.Totals.LockBlocked,
 		report.Totals.Paused, report.Totals.ClaimFailed, report.Totals.Created, report.Totals.Rounds)
-	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d\n",
+	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d needs-human-session=%d\n",
 		report.Queue.Executable, report.Queue.BlockedByMine, report.Queue.BlockedByOthers(),
-		report.Queue.Running, report.Queue.Paused)
+		report.Queue.Running, report.Queue.Paused, len(report.Queue.NeedsHumanSession))
 	if runDir != "" {
 		fmt.Printf("  step output: %s\n", runDir)
 	}
@@ -302,8 +311,9 @@ func runDrainPlan(ctx context.Context, q *drainQueries, opts drainOptions) error
 			fmt.Printf("    %2d. %-14s %-7s %s\n", i+1, c.Slug, c.Priority, truncate(c.Goal, 88))
 		}
 	}
-	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d\n",
-		queue.Executable, queue.BlockedByMine, queue.BlockedByOthers(), queue.Running, queue.Paused)
+	fmt.Printf("  queue: executable=%d blocked-by-mine=%d blocked-by-others=%d running=%d paused=%d needs-human-session=%d\n",
+		queue.Executable, queue.BlockedByMine, queue.BlockedByOthers(), queue.Running, queue.Paused,
+		len(queue.NeedsHumanSession))
 	fmt.Printf("  if nothing ran, this run would end: %s (exit %d)\n", terminal, drain.ExitCode(terminal))
 	return nil
 }
@@ -383,6 +393,19 @@ func parseDrainArgs(args []string) (drainOptions, error) {
 				return o, err
 			}
 			o.Budget.MaxWorkItems = n
+		case strings.HasPrefix(a, "--max-duration="):
+			v := strings.TrimPrefix(a, "--max-duration=")
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return o, fmt.Errorf("--max-duration: %q is not a duration (e.g. 90m, 4h, 2h30m)", v)
+			}
+			if d <= 0 {
+				// Same reasoning as positiveInt: zero already means "unbounded" (the field's
+				// documented zero value), so accepting `--max-duration=0` would let a flag whose
+				// whole purpose is to bound a run read as though it had bounded one.
+				return o, fmt.Errorf("--max-duration must be positive, got %s", d)
+			}
+			o.Budget.MaxDuration = d
 		case strings.HasPrefix(a, "--channel="):
 			chs, err := parseChannels(strings.TrimPrefix(a, "--channel="))
 			if err != nil {
@@ -871,27 +894,30 @@ func runDrainStop(home string, opts drainOptions) {
 //
 // SIGTERM to a single pid is NOT what Ctrl-C does, and the difference reaches the
 // machine. Ctrl-C is delivered by the tty to the entire foreground process GROUP,
-// so a step agent and everything it spawned all get it. runHarness uses
-// exec.CommandContext with no Cancel, so Go's cancellation sends SIGKILL to the
-// harness process ONLY — uncatchable, giving it no chance to reap its own
-// children, which are then orphaned onto init.
+// so a step agent and everything it spawned all get it.
 //
 // That is not a theoretical cost on this box. A subagent once left load
 // generators running after its session ended and they burned 7.5 of 12 cores for
 // eleven days, with nothing but the load average to show for it.
 //
 // A --detach'ed run is always its own group leader (startDetached sets Setsid, so
-// pgid == pid) and its step agents inherit that group, so the group signal
-// reaches the whole tree. A FOREGROUND drain is normally not a leader — the shell
-// owns the pipeline's group — and signalling -pid there would either fail or hit
-// an unrelated group, so that case falls back to the single pid and runDrainStop
+// pgid == pid). A FOREGROUND drain is normally not a leader — the shell owns the
+// pipeline's group — and signalling -pid there would either fail or hit an
+// unrelated group, so that case falls back to the single pid and runDrainStop
 // says so.
 //
-// The remaining gap is a foreground run stopped with --stop rather than Ctrl-C:
-// its step agents' grandchildren can still be orphaned. Closing that needs
-// Setpgid plus a Cancel on runHarness itself, which changes how every run
-// (foreground, detached and preflight) signals its children; it is recorded as a
-// follow-up rather than smuggled in here.
+// ⚠️ WHAT THIS SIGNAL NO LONGER HAS TO REACH, and why that is an improvement.
+// This comment used to end by recording an open gap: a foreground run stopped
+// with --stop could orphan its step agents' grandchildren, and closing it needed
+// "Setpgid plus a Cancel on runHarness itself". aihub#678 ⑥ did exactly that, so
+// step agents are now in their OWN process groups and this group signal does not
+// reach them directly. They are taken down by the run's own cancellation path
+// instead: SIGTERM cancels the run context, and runHarness's Cancel sends SIGTERM
+// to each harness's whole group with a WaitDelay backstop. That path is reached
+// identically from --stop, from Ctrl-C, from the step timeout and from
+// --max-duration — one mechanism instead of "whatever the signal happened to hit"
+// — and it sends a CATCHABLE signal where Go's default cancellation sent SIGKILL
+// to the leader alone.
 func signalTarget(pid int) (target int, whole bool) {
 	pgid, err := syscall.Getpgid(pid)
 	if err == nil && pgid == pid {
@@ -1252,6 +1278,9 @@ func preflightChannels(ctx context.Context, candidates []drain.Channel, runDir s
 const (
 	preflightTimeout = 3 * time.Minute
 	stepTimeout      = 2 * time.Hour
+	// harnessWaitDelay is how long a cancelled harness process group gets to exit on the SIGTERM
+	// runHarness's Cancel sends before Go escalates to SIGKILL and closes the output pipes.
+	harnessWaitDelay = 10 * time.Second
 )
 
 // runHarness executes one invocation and returns its combined output, also appending that output
@@ -1265,8 +1294,65 @@ const (
 // Stdin is /dev/null for every harness. The survey records `pi -p` blocking forever with an open
 // stdin and producing NOTHING on either stream — no error to match on, nothing to time out except
 // a wall clock — and closing stdin turns any harness's "waiting for input" into a fast EOF.
+// # Why the child gets its own process group, and a Cancel
+//
+// 🔴 It had neither (aihub#678 ⑥ C2). exec.CommandContext's default cancellation is
+// `os.Process.Kill()` — SIGKILL, to the harness process ONLY. A harness spawns subagents, MCP
+// servers and git; none of them are in the signal's target set, and SIGKILL gives the harness no
+// chance to reap them, so on the 2h stepTimeout, the 3m preflightTimeout or any cancellation they
+// are ORPHANED ONTO INIT — still holding the worktree open, still carrying a valid
+// session_secret. The scenario that makes this more than untidy: a step hangs for two hours,
+// drain moves on, wraps the work item and REMOVES ITS WORKTREE (drainCleanup), while the orphans
+// are still writing into it.
+//
+// That is not a hypothetical cost on this box. A subagent once left load generators running after
+// its session ended; they burned 7.5 of 12 cores for eleven days with nothing but the load
+// average to show for it.
+//
+// Setpgid puts the harness and everything it spawns in one group, and Cancel signals the GROUP
+// with SIGTERM — catchable, so a harness can shut its children down itself — with WaitDelay as
+// the backstop that SIGKILLs the group if it does not. WaitDelay also bounds the other half of
+// the old hazard: CombinedOutput waits for the pipes to close, and an orphan holding the write
+// end kept the parent blocked after the child was dead.
+//
+// ⚠️ This CHANGES what `polyforge drain --stop` reaches, and in the right direction. Before, a
+// detached run's step agents shared the run's group and were killed by the group SIGTERM
+// `signalTarget` sends; now they are in their own groups, so that signal no longer reaches them
+// directly — instead it cancels the run's context, and this Cancel takes the tree down with a
+// SIGTERM rather than the old SIGKILL. It also closes the gap signalTarget documents and could
+// not fix ("a foreground run stopped with --stop … its step agents' grandchildren can still be
+// orphaned"): that path now goes through the same Cancel as every other cancellation.
 func runHarness(ctx context.Context, inv drain.Invocation, workDir, logPath string) (string, error) {
 	cmd := exec.CommandContext(ctx, inv.Path, inv.Args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		// Negative pid = the whole group. ESRCH — the group exited and was reaped between
+		// ctx.Done() and this call — is the ordinary race, and it has to be TRANSLATED rather
+		// than returned: os/exec treats only os.ErrProcessDone as "nothing to cancel", and
+		// syscall.Errno.Is maps EACCES/EEXIST/ENOENT/ENOSYS and NOT ESRCH, so returning it raw
+		// makes Wait report `exec: canceling Cmd: no such process`. ClassifyStepDispatch then
+		// reads that as an ordinary step failure and the work item is blamed for a cancellation
+		// that worked perfectly.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return os.ErrProcessDone
+	}
+	// Long enough for a harness to flush and reap, short enough that a hung run's cleanup is not
+	// itself unbounded.
+	//
+	// ⚠️ What it does after that is NARROWER than "kills the tree", and the difference is worth
+	// stating because the obvious reading is wrong: os/exec's watchCtx calls
+	// `c.Process.Kill()` — SIGKILL to the LEADER only — and then closes the parent's I/O pipes.
+	// A grandchild that ignores the SIGTERM above and outlives its parent is not signalled again;
+	// it dies on SIGPIPE at its next write, or not at all. So this bounds how long runHarness can
+	// block, and the SIGTERM to the group above is what actually reaps the tree. The residual is
+	// a process that catches SIGTERM and declines to exit, which is a much smaller set than the
+	// "every descendant, always" that Go's default SIGKILL-the-leader left orphaned.
+	cmd.WaitDelay = harnessWaitDelay
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -1294,10 +1380,18 @@ func runHarness(ctx context.Context, inv drain.Invocation, workDir, logPath stri
 // the child is that harness's own level 1. It is what lets A sidestep codex's max_depth and
 // opencode's subagent_depth=1, which gate in-harness dispatch and have nothing to say about a
 // process someone else spawned.
+// It builds the command through drain.BuildStepInvocation rather than BuildInvocation, which is
+// the whole of aihub#678 ①'s fix at this seam: the request's Role and ReadOnly — resolved
+// correctly by drainResolveRole, against the real catalog, since the day this shipped — finally
+// reach the command line. req.Binding() is used rather than re-reading the fields so this seam
+// cannot pick a different subset than the loop meant to send.
 func dispatchStepAgent(ctx context.Context, req drain.DispatchRequest) (drain.DispatchResult, error) {
-	inv, err := drain.BuildInvocation(req.Channel, req.Prompt)
+	inv, err := drain.BuildStepInvocation(req.Channel, req.Binding(), req.Prompt)
 	if err != nil {
-		return drain.DispatchResult{}, err
+		// Returned in ExitErr as well as in err: ClassifyStepDispatch consults both slots, and a
+		// build refusal that arrived in only one of them classified as an ordinary step failure
+		// once already (the ErrAuth case its own comment records).
+		return drain.DispatchResult{ExitErr: err}, err
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, stepTimeout)
 	defer cancel()
@@ -1515,6 +1609,14 @@ func lockBlockerFrom(err error) *drain.Blocker {
 	}
 	var details struct {
 		ConflictWith struct {
+			// 🔴 attempt_id is what makes the "is the holder one of MY OWN concurrent claims?"
+			// question answerable (drain.Blocker.AttemptID, aihub#678 ③(b)). The server has
+			// always sent it — all five ErrConflictLockTaken construction sites in
+			// internal/domain carry it — and this struct simply did not declare it, so the
+			// value arrived on the wire and was dropped here. A struct field missing from a
+			// json.Unmarshal target is silent by construction, which is why the gap survived:
+			// nothing failed, the Blocker just came back with one field permanently empty.
+			AttemptID    string `json:"attempt_id"`
 			ActorDisplay string `json:"actor_display"`
 			WorkItemSlug string `json:"work_item_slug"`
 		} `json:"conflict_with"`
@@ -1523,14 +1625,18 @@ func lockBlockerFrom(err error) *drain.Blocker {
 		_ = json.Unmarshal(apiErr.Details, &details)
 	}
 	b := &drain.Blocker{
-		Actor:    details.ConflictWith.ActorDisplay,
-		WorkItem: details.ConflictWith.WorkItemSlug,
+		AttemptID: details.ConflictWith.AttemptID,
+		Actor:     details.ConflictWith.ActorDisplay,
+		WorkItem:  details.ConflictWith.WorkItemSlug,
 		// The message is "resource <type>:<key> is already locked"; the key is the half an
 		// operator can act on. Read off the message because the details object carries the
 		// holder and not the resource.
 		Resource: lockResourceFromMessage(apiErr.Message),
 	}
-	if b.Actor == "" && b.WorkItem == "" && b.Resource == "" {
+	// AttemptID counts toward "the server named something". Leaving it out of this test would
+	// discard a refusal that named ONLY the attempt — which is the one field the retry decision
+	// is made on.
+	if b.AttemptID == "" && b.Actor == "" && b.WorkItem == "" && b.Resource == "" {
 		return nil
 	}
 	return b
@@ -1642,14 +1748,22 @@ func (q *drainQueries) listCandidates(ctx context.Context, p url.Values) ([]drai
 		if !ok {
 			continue
 		}
-		out = append(out, drain.Candidate{
+		c := drain.Candidate{
 			ID:        str(m["id"]),
 			Slug:      str(m["slug"]),
 			Goal:      str(m["goal"]),
 			Priority:  str(m["priority"]),
 			WIType:    str(m["wi_type"]),
 			CreatedAt: str(m["created_at"]),
-		})
+		}
+		// Read as a THREE-state field. A JSON null (or an absent key, on an older server) binds
+		// to nil, which means "unclassified" and is NOT the same as false — see
+		// Candidate.RequiresHumanSession. A bool assertion into a plain bool would turn both of
+		// the states drain must not execute into the one state it may.
+		if rhs, ok := m["requires_human_session"].(bool); ok {
+			c.RequiresHumanSession = &rhs
+		}
+		out = append(out, c)
 	}
 	return out, nil
 }
@@ -1664,11 +1778,11 @@ func (q *drainQueries) listCandidates(ctx context.Context, p url.Values) ([]drai
 func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, error) {
 	var st drain.QueueState
 
-	ready, err := q.Executable(ctx)
+	readySet, err := q.Executable(ctx)
 	if err != nil {
 		return st, err
 	}
-	st.Executable = len(ready)
+	st.Executable = len(readySet)
 
 	running, err := q.listByStatus(ctx, "running")
 	if err != nil {
@@ -1686,6 +1800,35 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 	if err != nil {
 		return st, err
 	}
+
+	// The bucket that did not exist: queued work items drain may not execute (aihub#678 ③(d)).
+	// Asked for separately rather than filtered out of AllInScope, so the "not false" test below
+	// reads the field on a row this call fetched.
+	queued, err := q.listByStatus(ctx, "queued")
+	if err != nil {
+		return st, err
+	}
+	for _, c := range queued {
+		if c.RequiresHumanSession != nil && !*c.RequiresHumanSession {
+			// Explicitly false: drain MAY execute this one. Either it is already in the ready
+			// set, or something else holds it — a live blocking dependency whose status
+			// transition has not landed — which is the blocked walk's business, not this
+			// bucket's. Left uncounted rather than guessed at, which is what it was before.
+			continue
+		}
+		// requires_human_session is true, or NULL. Neither satisfies the server's
+		// `requires_human_session = false`, so neither can appear in Executable and neither is
+		// drain's to run.
+		//
+		// ⚠️ Deliberately NOT also filtered against the ready set, and the reason is worth
+		// stating because the guard LOOKS prudent: `ready_only` already requires
+		// `requires_human_session = false`, so no work item reaching this line can be in it, and
+		// a membership test against a separately-paginated 200-row page would be inert at best
+		// and — if the two pages ever disagreed — a silent way for this bucket to under-report.
+		// The classification IS the predicate; a second, weaker one adds nothing to agree with.
+		st.NeedsHumanSession = append(st.NeedsHumanSession, c)
+	}
+
 	if len(blocked) == 0 {
 		return st, nil
 	}
@@ -1695,21 +1838,43 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 		return st, err
 	}
 	inScope := drain.IDSet(mine)
+	// Memoised across this one observation: a fan-in graph asks about the same blocker once per
+	// dependent, and this runs every round.
+	liveCache := map[string]bool{}
 
 	for _, b := range blocked {
-		var outsiders []string
+		var outsiders []drain.BlockerRef
 		deps, derr := q.c.ListDependencies(ctx, b.ID)
 		if derr != nil {
 			// An unresolvable dependency list must not be read as "blocked by me". Guessing
 			// the reassuring answer here converts a lookup failure into a silent IDLE, and
 			// IDLE is the state that tells nobody. Assume external: the cost of being wrong
 			// is one unnecessary notification, versus a person never hearing about a block.
-			outsiders = append(outsiders, "(dependency lookup failed: "+derr.Error()+")")
+			//
+			// The ref carries the reason in Slug and no ID, so it prints and is not notified —
+			// it never had an address to begin with, and the old code put this sentence itself
+			// on the wire as a work_item_id.
+			outsiders = append(outsiders, drain.BlockerRef{
+				Slug: "(dependency lookup failed: " + derr.Error() + ")",
+			})
 		} else {
-			for _, d := range dependencyIDs(deps) {
-				if !inScope[d] {
-					outsiders = append(outsiders, d)
+			for _, ref := range blockingEdges(deps) {
+				if ref.ID != "" && inScope[ref.ID] {
+					// Mine and non-terminal: finishing my own work clears it.
+					continue
 				}
+				if !q.blockerIsLive(ctx, ref, liveCache) {
+					// 🔴 Not a blocker at all. unblockDependentWI (internal/domain/run_attempts.go)
+					// requeues a dependent WITHOUT deleting the wi_dependencies row —
+					// DeleteDependency's own comment in internal/domain/dependencies.go spells
+					// that out — so a finished blocker stays on the edge list forever. Since
+					// AllInScope holds only NON-terminal work items, my own wrapped blocker is
+					// absent from inScope and used to be classified as somebody else's — so a
+					// work item waiting on one live blocker of mine reported BLOCKED_EXTERNAL
+					// instead of IDLE, and left a note on a wrapped work item every round.
+					continue
+				}
+				outsiders = append(outsiders, ref)
 			}
 		}
 		if len(outsiders) > 0 {
@@ -1723,27 +1888,104 @@ func (q *drainQueries) ObserveQueue(ctx context.Context) (drain.QueueState, erro
 	return st, nil
 }
 
-// dependencyIDs pulls the blocking work item ids out of a pf_list_dependencies response,
-// tolerating both the "blocked_by" and "blocking" spellings the endpoint has used.
-func dependencyIDs(res map[string]any) []string {
-	var out []string
-	for _, key := range []string{"blocked_by", "blocking", "dependencies"} {
-		arr, ok := res[key].([]any)
-		if !ok {
-			continue
-		}
-		for _, it := range arr {
-			switch v := it.(type) {
-			case string:
-				out = append(out, v)
-			case map[string]any:
-				for _, f := range []string{"blocking_wi_id", "work_item_id", "id", "blocking_id"} {
-					if s := str(v[f]); s != "" {
-						out = append(out, s)
-						break
-					}
+// blockerIsLive reports whether a dependency edge's far end is still holding anything up.
+//
+// It costs one work-item read per distinct out-of-scope blocker per observation, and that is the
+// cheapest honest answer available: pf_list_dependencies returns the far end's id, slug, project,
+// kind and accessibility, and NOT its status, so the predicate cannot be completed from the
+// dependency response alone. The alternative — listing every terminal work item in the project to
+// build a set — is a 600-row page on this project to answer a question about two ids.
+//
+// An unreadable or inaccessible blocker answers LIVE, matching the asymmetry the dependency-lookup
+// failure branch above already uses: guessing "finished" turns a real block into a silent IDLE,
+// which is the state that notifies nobody, while guessing "live" costs at most one unnecessary
+// notification.
+func (q *drainQueries) blockerIsLive(ctx context.Context, ref drain.BlockerRef, cache map[string]bool) bool {
+	if ref.ID == "" {
+		// A blocker in a project the caller cannot open. Its status is unknowable here, and it
+		// is by construction outside the scope, so it stays a blocker.
+		return true
+	}
+	if live, ok := cache[ref.ID]; ok {
+		return live
+	}
+	live := true
+	if wi, err := q.c.GetWorkItem(ctx, ref.ID); err == nil {
+		// isTerminalWIStatus (doctor.go) is this package's single copy of the status partition,
+		// and its set is exactly noLiveBlockerPredicate's: {wrapped, failed, cancelled}. A second
+		// literal here would be a second place for the DB's CHECK constraint to drift away from.
+		live = !isTerminalWIStatus(str(wi["status"]))
+	}
+	cache[ref.ID] = live
+	return live
+}
+
+// hiddenWorkItemID is the sentinel aihub substitutes for the id of a dependency's far end when
+// the caller is not a member of its project (internal/domain/dependencies.go: "Slug
+// unconditionally; only ID is withheld"). It is a display value, never an address.
+const hiddenWorkItemID = "hidden"
+
+// blockingEdges pulls the work items that BLOCK wiID out of a pf_list_dependencies response.
+//
+// 🔴 It replaces a function that read the wrong edges, and all three of its false positives were
+// reachable (aihub#678 ③(a)). The old one iterated `"blocked_by", "blocking", "dependencies"` and
+// never looked at `kind`:
+//
+//   - `blocking` is the OPPOSITE DIRECTION. domain.ListDependencies fills it from
+//     `WHERE d.blocking_wi_id = $1` — the work items MY work item is holding up. Reading it as a
+//     blocker meant that owning a downstream dependent made drain report itself externally
+//     blocked and exit 11, and left a note on the dependent whose text said the reverse of the
+//     truth ("drain is blocked on X, which is waiting for this work item" — it was the other way
+//     round).
+//   - `dependencies` is not a key this endpoint has ever sent. DependenciesResponse has exactly
+//     two fields, `blocking` and `blocked_by`, and those are two DIRECTIONS rather than two
+//     spellings of one thing — which is what the old comment ("tolerating both … spellings")
+//     had wrong, and what made reading both look harmless.
+//   - `kind` was ignored, so a `related` or `supersedes` edge to anything outside the scope
+//     counted as a live block. Only `blocks` blocks: the server's own readiness predicate is
+//     `dep.kind = 'blocks' AND blocker.status NOT IN ('wrapped','cancelled','failed')`
+//     (noLiveBlockerPredicate), and that is the definition this now follows.
+//
+// The status half of that predicate cannot be answered here — ListDependencies returns the far
+// end's id, slug, project, kind and accessibility, and deliberately not its status — so it is
+// resolved by the caller, which has a client. See ObserveQueue.
+func blockingEdges(res map[string]any) []drain.BlockerRef {
+	arr, ok := res["blocked_by"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []drain.BlockerRef
+	for _, it := range arr {
+		switch v := it.(type) {
+		case string:
+			// A bare id, which this endpoint does not currently produce. Accepted because it
+			// carries no `kind` to filter on and therefore cannot be silently misread as one of
+			// the edge types above.
+			if v != "" {
+				out = append(out, drain.BlockerRef{ID: v})
+			}
+		case map[string]any:
+			if kind := str(v["kind"]); kind != "" && kind != "blocks" {
+				continue
+			}
+			ref := drain.BlockerRef{Slug: str(v["slug"])}
+			for _, f := range []string{"blocking_wi_id", "work_item_id", "id", "blocking_id"} {
+				if s := str(v[f]); s != "" {
+					ref.ID = s
+					break
 				}
 			}
+			// An inaccessible far end keeps its slug and loses its address. Checked on the
+			// sentinel AND on the explicit flag: `accessible` is the API (aihub#377 says the
+			// sentinel "is a fact about this struct's history, not an API"), but a response that
+			// omits the flag must not turn the sentinel into a notification target.
+			if acc, present := v["accessible"].(bool); (present && !acc) || ref.ID == hiddenWorkItemID {
+				ref.ID = ""
+			}
+			if ref.ID == "" && ref.Slug == "" {
+				continue
+			}
+			out = append(out, ref)
 		}
 	}
 	return out
@@ -1807,6 +2049,35 @@ func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note s
 	body := map[string]any{"status": status, "note": note}
 	for k, v := range attemptCredentials(wiID) {
 		body[k] = v
+	}
+	if status == "failed" {
+		// 🔴 Without this the failure path was REFUSED by the server and the work item was left
+		// `running`, holding its locks, with a dead process behind it (aihub#678 ②).
+		//
+		// Every one of drain's failure exits — a dispatch error, a resolve-role error, a step
+		// bracket that could not be filed, engine startup, a silent refusal, the 2h step timeout —
+		// calls Runner.failAttempt with the step still `in_progress`, because the thing that
+		// failed is what would have closed it. FnCompleteAttempt reads exactly that state and
+		// answers 409 CONFLICT_STEP_IN_PROGRESS: "a step is still in_progress; set
+		// force_terminate_step=true or update step first". So the bookkeeping call whose entire
+		// job is to release the work item could not succeed on any of those paths, and
+		// failAttempt's own log line ("it is left running and still holds its locks") was the
+		// only trace. Recovery needed pf_force_takeover, by hand, per work item.
+		//
+		// WHAT THE FLAG DOES TO THE STEP, read off fnForceTerminateStep rather than assumed: it
+		// files one wi_step_completions row for the CURRENTLY OPEN step with status=`failed` and
+		// error_type=`force_terminate`, emits a step_failed event, and resets wi_step_state to
+		// idle. That is the right disposition and not merely an unblocking trick — pf_get_step's
+		// contract is that a `failed` history entry did NOT finish and must be redone, which is
+		// exactly true of a step whose agent died. It also no-ops safely when no step is open
+		// (`current_step` NULL, or no step state at all), which is why it can be sent on every
+		// failure rather than only the ones known to have an open step.
+		//
+		// Deliberately NOT sent on `wrapped`. A step still in_progress at wrap time means the
+		// loop wrapped a work item whose last step never completed, and the 409 is the only thing
+		// that would ever say so; force-terminating it would file a `failed` step row under a
+		// `wrapped` attempt and call that success.
+		body["force_terminate_step"] = true
 	}
 	if status == "wrapped" {
 		// 🔴 `derived` is REQUIRED on a wrap since aihub#350 (migration 0040) and the server

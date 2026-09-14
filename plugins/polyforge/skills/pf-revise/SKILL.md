@@ -53,10 +53,12 @@ no `fields` on purpose - those DO consume `content` + `commits`.
 wi_info = pf_get_step(work_item_id=<current>)
 current_step_id = wi_info.current_step or "revise"
 
+sa_id = new_ulid()
 pf_update_step(
   work_item_id=<current>,
   step_id=current_step_id,
-  status="in_progress"
+  status="in_progress",
+  step_attempt_id=sa_id
 )
 ```
 
@@ -270,7 +272,7 @@ pf_update_step(
   work_item_id=<current>,
   step_id=current_step_id,
   status="completed",
-  step_attempt_id=<from step 2>,
+  step_attempt_id=sa_id,
   artifact_summary="revised <spec|plan|spec+plan>: <N> annotations resolved"
 )
 ```

@@ -1,16 +1,24 @@
 package domain
 
 // The work-item half of the aihub#360 lexical section — see lexical.go for the
-// measurement (aihub#367: pf_list_work_items(query=) scored 0/6 at EVERY N,
-// the worst of the three measured families) and the design rulings.
+// measurement history and the design rulings, and wi_vector.go for why the
+// wi-side number that used to be cited here is gone.
+//
+// In short (aihub#677): this header used to say "aihub#367: pf_list_work_items
+// (query=) scored 0/6 at EVERY N, the worst of the three measured families".
+// That reading was taken through the serving defect aihub#648 found, and after
+// aihub#650 repaired it the same six frozen queries read 3/6 at @1 and 6/6 at
+// @5 (aihub#660). The claim this section rests on is the index SHAPE, not that
+// number. ⚠️ lexical.go's own numbers moved in the same change, so do not read
+// the pointer above as pointing at "0/6" — it points at what replaced it.
 //
 // Unlike the memory side, a text fallback DOES exist here (the ILIKE clause in
 // buildListWorkItemsWhere), but it answers only when the vector path cannot —
-// no provider, or an empty vector page. The measured failure is the OTHER
-// case: the vector path answers, misses, and its full page reads as the whole
-// answer. This section runs on every query= request regardless of which path
-// served items[], so a caller never has to know the server's provider state to
-// get the substring answer.
+// no provider, or an empty vector page. The failure this section addresses is
+// the OTHER case: the vector path answers, misses, and its full page reads as
+// the whole answer. This section runs on every query= request regardless of
+// which path served items[], so a caller never has to know the server's
+// provider state to get the substring answer.
 
 import (
 	"context"

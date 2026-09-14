@@ -29,6 +29,20 @@ package domain
 // on replayAgeDays.
 //
 // No database and no network: the fixture is the measurement.
+//
+// ⚠️ WHICH SPACE THIS WAS CAPTURED IN (aihub#677). 2026-09-08 is before
+// aihub#650, so every `similarity` below came out of the embedding pipeline
+// aihub#648 later found defective — production TEI forwarding a causal
+// checkpoint under bidirectional attention. The absolute cosines here (0.257 to
+// 0.313) and the page's spread are therefore readings of that space, and the
+// repaired space is roughly 3× wider on the median page band (aihub#650:
+// 0.0428 -> 0.1281; about 2.8× on the means, 0.0503 -> 0.1382, which is the
+// figure the rest of the repo quotes for the compression). What this file proves is unaffected, because every
+// assertion is a comparison INSIDE this one captured page — the positive control
+// reproduces the order the server returned, and the design-doc formula is
+// replayed over the same rows. Nothing here is quoted as a property of the model
+// or of the current index; see replayCosineBand for the one number that used to
+// be, and was not even from this page.
 
 import (
 	"math"
@@ -49,12 +63,65 @@ type replayRow struct {
 // fixture does not drift as the test ages.
 const replayAsOf = "2026-09-08"
 
-// replayCosineBand is the measured width of the cosine band this embedding model
-// produces within a single result set, from aihub#311 (commit 7ad96be): "the 0.6B
-// embedding model packs every cosine in a result set into a band roughly 0.04
-// wide (0.68-0.72 in the reported case)". It is the denominator the design doc's
-// "6.8×" is expressed against, so it is stated once here rather than inlined.
-const replayCosineBand = 0.04
+// replayCosineBand is the cosine band of THIS fixture's page: the spread between
+// its highest and lowest similarity. It is the denominator the design doc's "N×"
+// ratio is expressed against, so it is derived once here rather than inlined —
+// and DERIVED, not declared, which is the whole of aihub#677's change to this
+// file.
+//
+// It used to read `const replayCosineBand = 0.04`, quoted verbatim from
+// aihub#311 (commit 7ad96be): "the 0.6B embedding model packs every cosine in a
+// result set into a band roughly 0.04 wide (0.68-0.72 in the reported case)".
+// That was wrong twice over:
+//
+//   - It was the band of a DIFFERENT result set — aihub#311's, not this
+//     fixture's. The page captured below spans 0.2570 to 0.3125, a band of
+//     0.0555, so the design doc's ratio was being divided by a number its own
+//     data never produced. A ratio is only meaningful against the spread of the
+//     result set it is applied to.
+//   - The quoted sentence has since been corrected (aihub#646, aihub#647): the
+//     narrow band is a property of the returned PAGE, not of the candidate set,
+//     and ~0.04 in particular is the fingerprint of the serving defect aihub#648
+//     found, not of this model. In the repaired space the production page band
+//     reads median 0.1281 (aihub#650, aihub#660).
+//
+// 🔴 That 0.1281 is recorded as provenance and is deliberately NOT substituted
+// for the value below. This fixture is a 20-row page captured 2026-09-08, in the
+// broken space; pairing its rows with a band measured elsewhere, later, on a
+// different corpus is the exact error being removed. Re-measuring would mean
+// re-capturing the whole fixture against production, which aihub#677 was not
+// permitted to do — so it took the other route the wi offered and made the
+// constant come from the data instead. A re-captured fixture now carries its own
+// band with it and cannot leave a stale constant behind.
+//
+// 🔴 §7.5's argument does not turn on which of the three bands you pick, and
+// that is the part worth keeping. The overturn threshold at w=0.3 is 0.2709, so
+// the ratio is 6.8× against 0.04, 4.88× against this fixture's 0.0555 and 2.11×
+// against the repaired-space 0.1281; the largest w that keeps a full band
+// decisive against a 30-day age gap is 0.060, 0.081 and 0.169 respectively. The
+// design doc's default was 0.3, which loses under every one of them.
+var replayCosineBand = fixtureCosineBand(replayRows)
+
+// fixtureCosineBand returns the spread between the highest and lowest similarity
+// in a captured page. It takes the rows as an argument rather than reading the
+// package-level fixture so TestReplayCosineBandIsDerivedFromTheFixture can feed
+// it a widened set and prove the value tracks the data — an assertion that a
+// function reading the global could not make.
+func fixtureCosineBand(rows []replayRow) float64 {
+	if len(rows) == 0 {
+		return 0
+	}
+	lo, hi := rows[0].sim, rows[0].sim
+	for _, r := range rows[1:] {
+		if r.sim < lo {
+			lo = r.sim
+		}
+		if r.sim > hi {
+			hi = r.sim
+		}
+	}
+	return hi - lo
+}
 
 // replayRows is the captured result set, in server order.
 var replayRows = []replayRow{
@@ -176,6 +243,87 @@ func TestReplayPositiveControl(t *testing.T) {
 	}
 }
 
+// TestReplayCosineBandIsDerivedFromTheFixture is the arm that keeps aihub#677's
+// defect from coming back: a band quoted from somewhere else, pinned as a
+// constant, and silently outliving the sentence it was quoted from.
+//
+// A value that merely HAPPENS to equal the fixture's spread today would pass a
+// simple equality check, so the decisive arm is the second one — widen the
+// fixture and the band must widen with it. A re-hardcoded constant cannot.
+func TestReplayCosineBandIsDerivedFromTheFixture(t *testing.T) {
+	got := fixtureCosineBand(replayRows)
+	if math.Abs(got-replayCosineBand) > 1e-12 {
+		t.Fatalf("replayCosineBand = %v but the fixture's own spread is %v — the band is no "+
+			"longer derived from the rows it is the band OF", replayCosineBand, got)
+	}
+
+	widened := append(append([]replayRow(nil), replayRows...),
+		replayRow{"mem_synthetic", replayRows[0].sim + 0.1, 1.0, replayAsOf})
+	if w := fixtureCosineBand(widened); math.Abs(w-(got+0.1)) > 1e-12 {
+		t.Errorf("adding a row 0.1 above the fixture's maximum moved the band to %v, want %v "+
+			"— the derivation does not track the data", w, got+0.1)
+	}
+
+	// The retired value, asserted as an inequality so nobody can restore it by
+	// re-capturing a fixture and leaving the old number in place.
+	if math.Abs(got-0.04) < 1e-3 {
+		t.Errorf("this fixture's band is %v, indistinguishable from the retired hardcoded "+
+			"0.04 — aihub#311's band, from a different result set, quoting a sentence "+
+			"aihub#647 has since corrected", got)
+	}
+}
+
+// TestSection75ConclusionHoldsAgainstEveryBandOnRecord makes §7.5's robustness
+// claim executable instead of prose, which is this section's own standard: the
+// defect aihub#469 fixed was a design document asserting numbers nobody could
+// check, so adding three new unchecked ratios to it in the act of correcting one
+// would repeat that defect exactly.
+//
+// §7.5 now says the ruling does not turn on which band you divide by, and prints
+// three: the retired 0.04, this fixture's own spread, and the repaired-space
+// production page band of 0.1281.
+//
+// 🔴 Two of those three are QUOTED READINGS from elsewhere, and they are quoted
+// for exactly one purpose — to check the arithmetic §7.5 prints beside them.
+// Neither is used as THIS fixture's band. replayCosineBand stays derived from
+// replayRows, because mixing a band measured on another corpus into this page's
+// ratio is the error aihub#677 removed rather than a second opinion on it.
+//
+// The load-bearing arm is the last one: w=0.3 loses under all three. If a future
+// serving change ever widens a band enough that it does not, this fails and
+// §7.5 has to be re-argued rather than re-quoted.
+func TestSection75ConclusionHoldsAgainstEveryBandOnRecord(t *testing.T) {
+	const w = 0.3
+	drec30 := 1 - math.Exp(-30.0/30.0)
+	overturned := (w / (1 - w)) * drec30 // 0.2709 — a property of the formula, not of any space
+
+	for _, tc := range []struct {
+		name      string
+		band      float64
+		wantRatio float64
+		wantMaxW  float64
+	}{
+		{"retired 0.04 (aihub#311's other result set, broken serving)", 0.04, 6.8, 0.060},
+		{"this fixture's own page", replayCosineBand, 4.88, 0.081},
+		{"repaired production page band (aihub#650, aihub#660)", 0.1281, 2.11, 0.169},
+	} {
+		if ratio := overturned / tc.band; math.Abs(ratio-tc.wantRatio) > 0.05 {
+			t.Errorf("%s: a 30-day age gap overturns %.2f× the band, §7.5 prints %.2f×",
+				tc.name, ratio, tc.wantRatio)
+		}
+		maxW := tc.band / (tc.band + drec30)
+		if math.Abs(maxW-tc.wantMaxW) > 1e-3 {
+			t.Errorf("%s: cosine stays dominant only for w < %.4f, §7.5 prints %.3f",
+				tc.name, maxW, tc.wantMaxW)
+		}
+		if maxW >= w {
+			t.Fatalf("%s: the design doc's default w=%.1f is SAFE by this criterion (bound "+
+				"%.4f) — §7.5's central argument does not hold on this band and must be "+
+				"rewritten, not re-quoted", tc.name, w, maxW)
+		}
+	}
+}
+
 // TestDesignDocFormulaWouldScrambleRealResults pins the table in §7.5.
 //
 // Each expectation is a number that document states. If this test has to change,
@@ -249,15 +397,15 @@ func TestRecencyDominatesCosineInClosedForm(t *testing.T) {
 	if math.Abs(overturned-0.2709) > 5e-5 {
 		t.Errorf("a 30-day age gap overturns a cosine gap of %.4f, §7.5 says 0.2709", overturned)
 	}
-	if ratio := overturned / replayCosineBand; math.Abs(ratio-6.8) > 0.05 {
-		t.Errorf("that is %.1f× the measured cosine band, §7.5 says 6.8×", ratio)
+	if ratio := overturned / replayCosineBand; math.Abs(ratio-4.88) > 0.01 {
+		t.Errorf("that is %.2f× this fixture's own cosine band, §7.5 says 4.88×", ratio)
 	}
 
 	// The largest w that keeps a full cosine band decisive against a 30-day gap:
 	// (w/(1-w))*drec < band  =>  w < band/(band+drec).
 	maxW := replayCosineBand / (replayCosineBand + drec30)
-	if maxW >= 0.06 || maxW <= 0.05 {
-		t.Errorf("cosine stays dominant only for w < %.4f; §7.5 says the bound is below 0.06 "+
+	if maxW >= 0.085 || maxW <= 0.076 {
+		t.Errorf("cosine stays dominant only for w < %.4f; §7.5 says the bound is 0.081 "+
 			"while the design doc's default was 0.3", maxW)
 	}
 	if maxW >= 0.3 {

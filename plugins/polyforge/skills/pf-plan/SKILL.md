@@ -87,7 +87,8 @@ consume the spec's text.
 
 ```
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id="plan", status="in_progress")
+pf_update_step(work_item_id=<current>, step_id="plan", status="in_progress",
+               step_attempt_id=sa_id)
 ```
 
 No `pf_get_step` first: the bracket needs no version number, and the `expected_version` it

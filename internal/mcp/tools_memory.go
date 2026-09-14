@@ -42,7 +42,7 @@ func (s *Server) registerMemoryTools() {
 	// pf_recall
 	s.addTool(&sdkmcp.Tool{
 		Name:        "pf_recall",
-		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"], one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest. Separately, an item carrying embedded_len was vector-embedded from only its first embedded_len runes (the embedding input budget): semantic ranking saw that prefix alone, and content past it is findable only by text search. A query returns TWO sections (aihub#360): items[] is the semantic ranking, and `lexical` is a parallel verbatim-substring match (every whitespace token of the query, case-insensitive, must appear in a row's content; its hits carry NO similarity, as none is computed). The index is ONE unchunked vector per row, so an EXCERPT of a stored memory routinely fails to retrieve it semantically (measured 2026-09-06, aihub#367: recall@1 0/42; production-shape recall@10 33.3% vs 14.1% random); a semantic miss is NOT evidence of absence. Judge existence by the lexical section: its total is explicit, and `lexical.total: 0` is the strongest available not-in-corpus signal.",
+		Description: "Recall memories from aihub with optional semantic search. type is an ARRAY of type names, e.g. [\"experience.*\",\"rule.work\"], one filter per entry; a '|' inside an entry is NOT a separator and is rejected. An entry ending in .* is a prefix wildcard. Any entry matching no memory comes back in unmatched_types, which distinguishes a wrong type name from a project that genuinely holds no such memory. An item with content_truncated=true holds only a prefix of its content (content_full_len = full length); call pf_get_memory(memory_id) for the rest. Separately, an item carrying embedded_len was vector-embedded from only its first embedded_len runes (the embedding input budget): semantic ranking saw that prefix alone, and content past it is findable only by text search. A query returns TWO sections (aihub#360): items[] is the semantic ranking, and `lexical` is a parallel verbatim-substring match (every whitespace token of the query, case-insensitive, must appear in a row's content; its hits carry NO similarity, as none is computed). The index is ONE unchunked vector per row, so an EXCERPT of a stored memory routinely fails to retrieve it semantically (measured 2026-09-14 in the repaired embedding space, aihub#660: 12 of 42 frozen queries still miss at @10, 5 of them out of reach of any ranking); a semantic miss is NOT evidence of absence. Judge existence by the lexical section: its total is explicit, and `lexical.total: 0` is the strongest available not-in-corpus signal.",
 		InputSchema: recallSchema(),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -393,11 +393,21 @@ var recallStringParams = []string{"project", "query", "work_item_id", "top_k", "
 // §7.5 specified `sim*(1-w) + normalized_recency*w + normalized_strength*0.1` at
 // w=0.3, which is the same shape as the fused score aihub#311 removed from the
 // vector path as a defect (commit 7ad96be), with MORE non-similarity weight. The
-// 0.6B embedding model packs a result set's cosines into a band ~0.04 wide, so a
-// 0.3-weighted recency term spans several times the entire spread of the signal
-// it is being blended into: replayed on a real live top_k=20 result set, the
-// highest-cosine row fell from rank 1 to rank 10 and similarity inversions went
-// from 16/190 to 98/190.
+// cosines on the RETURNED PAGE sit close enough together that a 0.3-weighted
+// recency term spans several times the entire spread of the signal it is being
+// blended into: replayed on a real live top_k=20 result set, the highest-cosine
+// row fell from rank 1 to rank 10 and similarity inversions went from 16/190 to
+// 98/190.
+//
+// That sentence used to read "the 0.6B embedding model packs a result set's
+// cosines into a band ~0.04 wide", and both halves of it were wrong: the narrow
+// band is a property of the PAGE, not of the candidate set (aihub#646,
+// aihub#647), and ~0.04 in particular was the fingerprint of the serving defect
+// aihub#648 found, not of this model — the repaired page band reads median
+// 0.1281 (aihub#650). The conclusion is untouched, and deliberately no longer
+// rests on a single band: the replay's own page spans 0.0555 and the w=0.3
+// overturn threshold of 0.2709 is 4.88× that, 6.8× the retired 0.04 and 2.11×
+// the repaired 0.1281. See internal/domain/recall_recency_replay_test.go.
 //
 // And there was nothing to gain, because recency was never missing. All three
 // orderings already carry it: the text default is `GREATEST(last_activated_at,

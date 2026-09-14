@@ -28,7 +28,8 @@ ROLE_AGENT = {"executor": "polyforge:step-executor", "operator": "polyforge:step
     "designer": "polyforge:step-designer"}
 
 sa_id = new_ulid()
-pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress")
+pf_update_step(work_item_id=<current>, step_id=steps[0].id, status="in_progress",
+               step_attempt_id=sa_id)
 
 for i, (step_id, expanded) in enumerate(steps):   # steps[] as `engine startup` printed them
     role = `polyforge engine resolve-role --step-id='<step_id>'`.role

@@ -109,6 +109,12 @@ const (
 	StopMaxRounds StopReason = "max_rounds"
 	// StopMaxWorkItems: the --max-work-items budget was spent.
 	StopMaxWorkItems StopReason = "max_work_items"
+	// StopMaxDuration: the --max-duration budget was spent (aihub#640
+	// `convergence_divergence_detector`: "加上原有预算类（跑满 N 个 / T 时间）"). Distinct from
+	// StopCancelled even though both arrive as a cancelled context: one is this run's own budget
+	// doing its job, the other is somebody stopping it, and an operator reading a report needs to
+	// know which. See Runner.Run.
+	StopMaxDuration StopReason = "max_duration"
 	// StopCancelled: the context was cancelled (SIGINT/SIGTERM, or `polyforge drain --stop`).
 	StopCancelled StopReason = "cancelled"
 )
@@ -158,9 +164,28 @@ func (r Result) Executed() bool {
 }
 
 // NeedsHuman reports whether a Result requires a person before that work item can progress.
-// Only a genuine execution failure does. A lock race resolves itself the next time drain runs,
-// and a pause was a deliberate hand-off that already told somebody.
-func (r Result) NeedsHuman() bool { return r == ResultFailed }
+//
+// A lock race resolves itself the next time drain runs, and a pause was a deliberate hand-off
+// that already told somebody. The other two both need a person, for different reasons:
+//
+//   - ResultFailed is a genuine execution failure.
+//   - ResultCancelled leaves the attempt CLAIMED, status `running`, holding its locks — its own
+//     Err says so verbatim — and drain never picks a running work item back up: Executable asks
+//     the server for `ready_only`, which is `queued`. So "run it again later" accomplishes
+//     nothing, and IDLE, whose entire contract is "come back later and it will work", is the one
+//     answer that is certainly wrong. Before aihub#678 ③(c) a `--stop` or Ctrl-C ended exit 10
+//     IDLE: the loop broke with StopCancelled, the final ObserveQueue failed on the cancelled
+//     context, the fallback QueueState{Executable:1} classified with anyFailed=false, and the
+//     machine-readable half of the notification design said "no human needed" while the prose
+//     disclosure two screens away said the opposite. Same reasoning ErrNotSupported already
+//     carries: a state that does not improve by waiting must not be reported as the one terminal
+//     state that deliberately notifies nobody.
+//
+// ⚠️ This is about a work item ABANDONED MID-STEP. A cancellation that lands between rounds
+// produces no ResultCancelled outcome at all — executeRound files "cancelled before claim" as
+// ResultClaimFailed for candidates it never claimed — so an idle interrupt still ends IDLE, which
+// is honest: nothing was stranded.
+func (r Result) NeedsHuman() bool { return r == ResultFailed || r == ResultCancelled }
 
 // Candidate is one work item drain could execute, projected down to the fields scheduling
 // actually uses. It deliberately does NOT carry the work item's content: the scheduler never
@@ -172,6 +197,15 @@ type Candidate struct {
 	Priority  string `json:"priority"`
 	WIType    string `json:"wi_type"`
 	CreatedAt string `json:"created_at,omitempty"`
+	// RequiresHumanSession mirrors the work item's own nullable column, POINTER and all.
+	//
+	// The three states are real and only one of them lets drain execute the work item: the
+	// server's ready predicate is `requires_human_session = false`, which NULL does not satisfy
+	// any more than true does. Flattening the pointer to a bool would make "unclassified" and
+	// "an agent may take it unattended" the same value, and the bucket that reads this field
+	// (QueueState.NeedsHumanSession) exists precisely to stop a work item drain cannot run from
+	// being counted as absent.
+	RequiresHumanSession *bool `json:"requires_human_session,omitempty"`
 }
 
 // Blocker names who stood between drain and a work item it wanted. It is filled for a
@@ -184,6 +218,21 @@ type Blocker struct {
 	Actor string `json:"actor,omitempty"`
 	// Resource is the contended lock key, when the block is a lock race.
 	Resource string `json:"resource,omitempty"`
+	// AttemptID is the RUN ATTEMPT holding the lock, when the block is a lock race.
+	//
+	// 🔴 It is what makes "skip, never retry" correct instead of merely safe. The rule's stated
+	// reason (runner.go's `skipped` set) is that "the holder is another live attempt, and nothing
+	// this run does will end it" — which is FALSE when the holder is one of this run's OWN
+	// concurrent claims. At --max-parallel>=2 worker A claims wi1 and worker B loses the race on
+	// wi2; wi1 then wraps and releases the lock, but wi2 has already been skipped for the whole
+	// run, so the next round filters it away, finds nothing, and stops StopQueueDrained while its
+	// own final observation reports executable=1 (aihub#678 ③(b)).
+	//
+	// The server has always named the holder: every CONFLICT_LOCK_TAKEN in
+	// internal/domain/run_attempts.go carries `conflict_with.attempt_id` — the probe path, the
+	// upsert-refusal path and both acquire_locks races. internal/cli's lockBlockerFrom simply
+	// did not read it.
+	AttemptID string `json:"attempt_id,omitempty"`
 }
 
 // Outcome is the record of one work item drain attempted in one round.
@@ -199,4 +248,9 @@ type Outcome struct {
 	// observability answer: step output enters no LLM context by design, so the ONLY way a
 	// failure is examinable afterwards is that this path exists and has the bytes in it.
 	LogDir string `json:"log_dir,omitempty"`
+	// RetryNextRound marks a ResultLockBlocked outcome whose holder was one of THIS RUN's own
+	// concurrent claims, so the lock will be free once that sibling finishes. Such a work item is
+	// re-offered next round instead of being skipped for the rest of the run. See
+	// Blocker.AttemptID for what went wrong without it.
+	RetryNextRound bool `json:"retry_next_round,omitempty"`
 }

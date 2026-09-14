@@ -304,11 +304,20 @@ func checkNextStepHonoured(nextStep, nextStepAttemptID string, result map[string
 	if _, honoured := result["next_step"]; honoured {
 		return nil
 	}
-	retry := fmt.Sprintf("pf_update_step(step_id=%q, status=\"in_progress\"", nextStep)
+	// aihub#675: step_attempt_id is named UNCONDITIONALLY. It used to be appended only when the
+	// caller had supplied one, and validateNextStepArgs permits next_step without
+	// next_step_attempt_id — so the other branch handed the agent a recovery call with no attempt
+	// id at all, which is the shape this work item exists to remove. The server then stores
+	// current_step_attempt=NULL, and a pause during that step files its history row under a
+	// synthesised sentinel rather than under an id the caller knows. Where there is no id to
+	// reuse, the message says to mint one instead of quietly leaving the field out; minting is
+	// what every loop document already tells the caller to do before opening a step.
+	attemptArg := "<a NEW ulid you mint>"
 	if nextStepAttemptID != "" {
-		retry += fmt.Sprintf(", step_attempt_id=%q", nextStepAttemptID)
+		attemptArg = fmt.Sprintf("%q", nextStepAttemptID)
 	}
-	retry += ")"
+	retry := fmt.Sprintf("pf_update_step(step_id=%q, status=\"in_progress\", step_attempt_id=%s)",
+		nextStep, attemptArg)
 	return fmt.Errorf(
 		"SERVER_TOO_OLD_FOR_NEXT_STEP: the step WAS completed, but the aihub server ignored next_step=%q, "+
 			"so %q was NOT started; this server predates aihub#290 and silently discards the parameter. "+

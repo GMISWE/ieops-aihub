@@ -1386,6 +1386,18 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	return nil
 }
 
+// unknownStepAttemptIDPrefix marks a step_attempt_id this server synthesised because the step was
+// open without one. It is a PREFIX and not a whole value on purpose (aihub#675): the column it
+// lands in carries a global UNIQUE index, so a shared constant is a collision, not a sentinel.
+const unknownStepAttemptIDPrefix = "unknown-"
+
+// unknownStepAttemptID builds the step_attempt_id a force-terminated step is filed under when the
+// step carried none. completionID is that row's own primary key, so the result is unique for the
+// same reason the primary key is.
+func unknownStepAttemptID(completionID string) string {
+	return unknownStepAttemptIDPrefix + completionID
+}
+
 // fnForceTerminateStep inserts a wi_step_completions row with status=failed,
 // error_type=force_terminate, emits a step_failed agent_event, and resets wi_step_state.
 // Per §4.3 force_terminate_step flow.
@@ -1414,12 +1426,35 @@ func fnForceTerminateStep(ctx context.Context, tx pgx.Tx, wiID, attemptID string
 		return nil // No step to terminate
 	}
 
-	saID := "unknown"
-	if stepAttemptID != nil {
+	scID := NewID("sc")
+
+	// aihub#675: when the step was opened WITHOUT a step_attempt_id, the id this row is filed
+	// under is synthesised from the row's own primary key, so it is unique.
+	//
+	// It used to be the bare literal "unknown". idx_wsc_attempt (migration 0005) is a GLOBAL
+	// UNIQUE index on step_attempt_id and this INSERT is ON CONFLICT DO NOTHING, so the first
+	// such row in the entire database landed and EVERY LATER ONE WAS DISCARDED IN SILENCE — on
+	// a request that still emitted step_failed, still reset wi_step_state and still answered
+	// 200. The loss is invisible from the timeline and shows up only as a step missing from
+	// pf_get_step's completed_steps, which aihub#265 made the record a resuming agent is told
+	// to trust. Measured against the pre-change build (pgvector pg18, migrations 0001-0041):
+	// two work items each paused during a step whose current_step_attempt was NULL produced
+	// 1 history row and 2 step_failed events; a control arm carrying distinct ids produced 2
+	// of 2. aihub#675 also closed the producers it could reach: six plugin documents now pass
+	// the id when they open a step, including _common/lifecycle.md, the resident fragment every
+	// skill is injected with. But the parameter is still "Optional on in_progress"
+	// (internal/mcp/tools_step.go), so any other client still reaches this path and the
+	// synthesis below is what has to be correct for them.
+	//
+	// The "unknown-" prefix is kept so the value still reads as synthesised rather than as an
+	// id a caller could have sent; nothing in the repo matches on the old literal. The
+	// ON CONFLICT clause is kept unchanged: it is what makes force-terminating a step that DOES
+	// carry an attempt id idempotent, which is a real guarantee this must not trade away.
+	saID := unknownStepAttemptID(scID)
+	if stepAttemptID != nil && *stepAttemptID != "" {
 		saID = *stepAttemptID
 	}
 
-	scID := NewID("sc")
 	_, err := tx.Exec(ctx, `
 		INSERT INTO wi_step_completions (id, work_item_id, step_id, step_attempt_id, run_attempt_id,
 		                                  status, error_type, escalated, completed_at)

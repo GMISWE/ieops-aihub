@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/internal/roles"
 )
 
 func argsOf(t *testing.T, ch Channel) []string {
@@ -107,9 +109,21 @@ func TestBuildInvocation_CodexAndOpenCodeCarryTheirMeasuredFlags(t *testing.T) {
 	if len(codex) == 0 || codex[0] != "exec" {
 		t.Fatalf("codex args %v must start with the non-interactive `exec` subcommand", codex)
 	}
-	if !hasPair(codex, "-s", "workspace-write") {
-		t.Errorf("codex args %v lack `-s workspace-write`: without a sandbox policy it asks for "+
-			"approval, and read-only cannot complete a write step", codex)
+	// ⚠️ This assertion USED TO READ `-s workspace-write`, unconditionally, for every role. Its
+	// stated reason was "without a sandbox policy it asks for approval, and read-only cannot
+	// complete a write step" — and BOTH halves of that are still honoured, they are just honoured
+	// per role now (see TestBuildStepInvocation_TheRolesCapabilityReachesEveryHarness: a write-capable
+	// role still gets workspace-write, for exactly that reason). What the old form additionally
+	// asserted, without meaning to, was that a READ-ONLY role must also run write-capable — the
+	// defect aihub#678 ① is about, pinned as a requirement by the test suite.
+	//
+	// What is left here is the probe, which has no role at all. It gets read-only because
+	// PreflightPrompt forbids tool use, so a sandbox that enforces that makes "the probe cannot
+	// have a side effect on the repository it runs in" (ClassifyPreflight's own promise)
+	// structural rather than merely requested.
+	if !hasPair(codex, "-s", "read-only") {
+		t.Errorf("the codex PROBE's args %v lack `-s read-only`: without a sandbox policy codex "+
+			"asks for approval, and the probe is specified to use no tools at all", codex)
 	}
 	if !has(codex, "--skip-git-repo-check") {
 		t.Errorf("codex args %v lack --skip-git-repo-check: measured, `codex exec` exits 1 "+
@@ -327,5 +341,321 @@ func TestClassifyPreflight_ReasonSurvivesTheHarnessesOwnColourCodes(t *testing.T
 	if v.Reason != "exit status 1" && !strings.Contains(v.Reason, "no output") {
 		t.Errorf("all-escape output produced the reason %q; it should fall back to the error "+
 			"or say there was no output", v.Reason)
+	}
+}
+
+// stepArgsOf builds a STEP invocation (as opposed to the roleless probe) and fails on error.
+func stepArgsOf(t *testing.T, ch Channel, b Binding) []string {
+	t.Helper()
+	inv, err := BuildStepInvocation(ch, b, "PROMPT")
+	if err != nil {
+		t.Fatalf("BuildStepInvocation(%s, %+v): %v", ch, b, err)
+	}
+	return inv.Args
+}
+
+// TestBuildStepInvocation_TheRolesCapabilityReachesEveryHarness is aihub#678 ①.
+//
+// # What was broken
+//
+// executeWorkItem resolved a role and its read_only capability and put both on DispatchRequest;
+// BuildInvocation took neither argument. `git grep ReadOnly` over the non-test sources found three
+// hits, all WRITES (the field, its assignment, drainResolveRole's return) and zero reads. So every
+// role on all four harnesses got one bare command line, and a `code_review` step — which
+// drainResolveRole correctly resolves to the read-only reviewer, its own comment promising "never
+// silently to the write-capable executor" — was spawned as
+// `claude -p --permission-mode acceptEdits`: write-capable, edits AUTO-APPROVED. The identical
+// step under B/C dispatches polyforge:step-reviewer, whose agent file disallows Edit/Write/
+// NotebookEdit. Two reviewers found this independently.
+//
+// # What this pins, per harness, and which half is the safety property
+//
+// Each row has a capability mechanism that cannot silently fall back, and an agent selector that
+// restores the role's prompt and model tier but is best-effort. Only the first is safety.
+//
+// Mutants watched RED, each applied alone and each `go build`-checked before running:
+//
+//	M1  drop the `--disallowedTools` append          → claude reviewer arm
+//	M2  drop the `--agent` append                    → agent-id arms on three harnesses
+//	M3  make CodexSandboxMode default to             → codex reviewer arm
+//	    workspace-write for read-only too
+//	M4  return the zero Shape for opencode           → opencode reviewer arm (no refusal)
+//	    instead of refusing a read-only role
+//	M5  emit shape values verbatim (no cliList)      → the no-spaces arms
+func TestBuildStepInvocation_TheRolesCapabilityReachesEveryHarness(t *testing.T) {
+	const (
+		readOnlyRole = "reviewer" // roles/definitions/reviewer.yaml: read_only: true
+		writeRole    = "executor" // roles/definitions/executor.yaml: read_only: false
+	)
+	ro := Binding{Role: readOnlyRole, ReadOnly: true}
+	rw := Binding{Role: writeRole, ReadOnly: false}
+
+	t.Run("claude", func(t *testing.T) {
+		// Measured 2026-09-14, Claude Code 2.1.258: `--agent polyforge:step-reviewer` resolves and
+		// then REFUSES a direct instruction to use Write (no file created, exit 0), while an
+		// unknown name exits 1 naming the available agents. `--disallowedTools` is carried
+		// alongside because the selector depends on the INSTALLED plugin, which on this machine
+		// is two of the five role agents.
+		args := stepArgsOf(t, Channel{Harness: HarnessClaude}, ro)
+		if !hasPair(args, "--agent", "polyforge:step-reviewer") {
+			t.Errorf("claude read-only args %v do not select the reviewer agent. Without it the "+
+				"step runs on the default agent at the default model tier — the very widening "+
+				"this fix exists to close", args)
+		}
+		if !hasPair(args, "--disallowedTools", "Edit,Write,NotebookEdit") {
+			t.Errorf("claude read-only args %v carry no --disallowedTools. This is the half that "+
+				"does not depend on the installed plugin, so it is the half that must never be "+
+				"missing", args)
+		}
+
+		w := stepArgsOf(t, Channel{Harness: HarnessClaude}, rw)
+		if !hasPair(w, "--agent", "polyforge:step-executor") {
+			t.Errorf("claude write args %v do not select the executor agent", w)
+		}
+		if has(w, "--disallowedTools") {
+			t.Errorf("claude WRITE args %v deny Edit/Write/NotebookEdit. A write-capable role that "+
+				"cannot write completes no step: roles.CompileCapability returns an EMPTY shape "+
+				"for it precisely so nothing is emitted", w)
+		}
+	})
+
+	t.Run("codex", func(t *testing.T) {
+		// `-s` is the load-bearing half and `-p` is not: measured, `codex exec -p step-nosuchrole`
+		// is SILENTLY ACCEPTED — no error, no warning, the run proceeds — so the profile flag
+		// cannot be relied on for anything and the sandbox mode carries the capability alone.
+		args := stepArgsOf(t, Channel{Harness: HarnessCodex}, ro)
+		if !hasPair(args, "-s", "read-only") {
+			t.Errorf("codex read-only args %v run in a WRITE sandbox. `-s` is the only enforcement "+
+				"codex has here, because `-p <missing profile>` is silently ignored", args)
+		}
+		if !hasPair(args, "-p", "step-reviewer") {
+			t.Errorf("codex read-only args %v name no profile; the $CODEX_HOME/step-<role>.config.toml "+
+				"files aihub#655 generates have no other consumer", args)
+		}
+
+		w := stepArgsOf(t, Channel{Harness: HarnessCodex}, rw)
+		if !hasPair(w, "-s", "workspace-write") {
+			t.Errorf("codex write args %v lack `-s workspace-write`: without a sandbox policy it "+
+				"asks for approval, and read-only cannot complete a write step — the original "+
+				"reason this assertion was written, now applied per role", w)
+		}
+		if !hasPair(w, "-p", "step-executor") {
+			t.Errorf("codex write args %v name no profile", w)
+		}
+	})
+
+	t.Run("pi", func(t *testing.T) {
+		// pi has no process-level agent selector at all (roles.DispatchFor("pi").Call is the
+		// in-session `subagent(agent=…)` tool, and `pi --help` lists none), so its capability
+		// flag is the whole of what drain can do — and it maps exactly: `--tools, -t <tools>` is
+		// documented as "Comma-separated allowlist of tool names to enable", which is the shape
+		// roles' PiTools already holds.
+		args := stepArgsOf(t, Channel{Harness: HarnessPi}, ro)
+		var tools string
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--tools" {
+				tools = args[i+1]
+			}
+		}
+		if tools == "" {
+			t.Fatalf("pi read-only args %v carry no --tools allowlist, so the step runs with pi's "+
+				"whole tool set including edit and write", args)
+		}
+		if strings.Contains(tools, " ") {
+			t.Errorf("pi --tools value %q contains a space. The flag takes a COMMA-separated list "+
+				"and documents no trimming, so \" write\" would match no tool and the allowlist "+
+				"would silently admit or exclude the wrong set", tools)
+		}
+		for _, want := range []string{"read", "grep", "polyforge_pf_get_step"} {
+			if !strings.Contains(tools, want) {
+				t.Errorf("pi --tools value %q is missing %q; a step agent that cannot read its own "+
+					"step cannot run", tools, want)
+			}
+		}
+		if has(stepArgsOf(t, Channel{Harness: HarnessPi}, rw), "--tools") {
+			t.Error("pi WRITE args carry a --tools allowlist; an allowlist on a write-capable role " +
+				"removes the tools the role exists to use")
+		}
+		for _, flag := range []string{"--agent", "-a"} {
+			if has(stepArgsOf(t, Channel{Harness: HarnessPi}, rw), flag) {
+				t.Errorf("pi args carry %s, which pi has no such flag for: its agents are reachable "+
+					"only through the in-session subagent tool", flag)
+			}
+		}
+	})
+
+	t.Run("opencode carries read_only in the agent file, and refuses only when it cannot", func(t *testing.T) {
+		// ⚠️ THIS SUBTEST ASSERTED THE OPPOSITE in the first draft of this change, and a
+		// clean-context reviewer was right to reject it. The premise was "roles.CompileCapability
+		// refuses opencode, therefore opencode cannot express read_only". False: it is excluded
+		// from SupportedHarnesses because its expression is a different SHAPE that lives in the
+		// same package — render_opencode.go's opencodePermissionBlock writes
+		// `permission:\n  edit: deny` into the generated agent file, and roles/dispatch.go says
+		// so in as many words. Refusing outright would have FAILED every work item with a review
+		// step on a correctly configured `--channel=opencode` run.
+		oc := stepArgsOf(t, Channel{Harness: HarnessOpenCode}, ro)
+		if !hasPair(oc, "--agent", "step-reviewer") {
+			t.Fatalf("opencode read-only args %v select no agent. The agent file is the ONLY "+
+				"carrier of read_only here, so not selecting it IS the widening", oc)
+		}
+
+		// What IS true is that the carrier fails open — measured, `--agent step-nosuchrole`
+		// prints `! agent "…" not found. Falling back to default agent` and runs the
+		// write-capable default. Two defences, and this is the second: when the selector is
+		// SUPPRESSED (the stale-plugin retry path), opencode has nothing left, so the build is
+		// refused rather than producing an unrestricted command line that looks restricted.
+		// The first defence is after the fact, in dispatchWithFallback.
+		suppressed := Binding{Role: readOnlyRole, ReadOnly: true, NoAgentSelector: true}
+		if _, err := BuildStepInvocation(Channel{Harness: HarnessOpenCode}, suppressed, "P"); !errors.Is(err, ErrNoReadOnlyCapability) {
+			t.Errorf("opencode built a read-only invocation with the agent selector suppressed "+
+				"(err=%v). Nothing on that command line carries the capability", err)
+		}
+		// The same suppression on claude is FINE, because --disallowedTools survives it. That is
+		// the whole point of carrying both there, and the negative control for the guard above.
+		cc := stepArgsOf(t, Channel{Harness: HarnessClaude},
+			Binding{Role: readOnlyRole, ReadOnly: true, NoAgentSelector: true})
+		if has(cc, "--agent") {
+			t.Errorf("claude args %v still carry --agent under NoAgentSelector", cc)
+		}
+		if !hasPair(cc, "--disallowedTools", "Edit,Write,NotebookEdit") {
+			t.Errorf("claude args %v lost the capability along with the selector; the retry is "+
+				"supposed to drop only the selector", cc)
+		}
+
+		// A write-capable role is fine there, and still gets the selector.
+		w := stepArgsOf(t, Channel{Harness: HarnessOpenCode}, rw)
+		if !hasPair(w, "--agent", "step-executor") {
+			t.Errorf("opencode write args %v select no agent", w)
+		}
+		// ...and the PROBE must not be refused: it has no role, runs no tools, and deleting a
+		// whole channel over it would be a worse answer than the one being prevented.
+		if _, err := BuildInvocation(Channel{Harness: HarnessOpenCode}, "P"); err != nil {
+			t.Errorf("the opencode credential probe was refused: %v", err)
+		}
+	})
+}
+
+// TestBuildStepInvocation_AgentIDsComeFromTheRolesTable is the anti-duplication assertion, and it
+// is the reason this fix routes through internal/roles rather than spelling the names locally.
+//
+// Each harness's agent identity is already decided in that package — render_cc.go writes
+// "step-<role>", render_pi.go writes "pf-<role>", and Claude Code needs the plugin-namespaced form
+// while the others need the bare one. A table written here would be a SECOND copy free to drift:
+// change render_pi.go's prefix and a local copy stays green while every dispatch names an agent
+// that does not exist. This compares what the command line carries against what roles.AgentIDFor
+// answers, so the two cannot disagree.
+//
+// Mutant watched: hardcoding "step-%s" for claude turns the cc arm red (it needs "polyforge:").
+func TestBuildStepInvocation_AgentIDsComeFromTheRolesTable(t *testing.T) {
+	// pi is absent on purpose: it has no process-level agent selector, so there is no command
+	// line for its id to appear on. opencode's flag is checked here; its capability is not.
+	for _, tc := range []struct {
+		harness Harness
+		flag    string
+		key     string
+	}{
+		{HarnessClaude, "--agent", "cc"},
+		{HarnessCodex, "-p", "codex"},
+		{HarnessOpenCode, "--agent", "opencode"},
+	} {
+		for _, role := range []string{"executor", "operator", "designer"} {
+			want, err := roles.AgentIDFor(tc.key, role)
+			if err != nil {
+				t.Fatalf("roles.AgentIDFor(%q, %q): %v", tc.key, role, err)
+			}
+			args := stepArgsOf(t, Channel{Harness: tc.harness}, Binding{Role: role})
+			if !hasPair(args, tc.flag, want) {
+				t.Errorf("%s args %v do not carry %s %s — the id must come from roles.AgentIDFor, "+
+					"never from a table written here", tc.harness, args, tc.flag, want)
+			}
+		}
+	}
+}
+
+// TestBuildStepInvocation_ClaudeSeparatesTheVariadicFlagFromThePrompt pins a measured trap that
+// would have shipped silently: `--disallowedTools` is declared `<tools...>`, so it swallows every
+// following positional argument.
+//
+// Measured, verbatim: `claude -p --permission-mode acceptEdits --disallowedTools
+// Edit,Write,NotebookEdit "Use the Write tool … Then reply DONE."` produced three warnings —
+// `Permission deny rule "Then" matches no known tool`, likewise "reply" and "DONE." — and then
+// `Error: Input must be provided either through stdin or as a prompt argument when using --print`,
+// exit 1. The prompt had become deny rules. With `--` in front of it the same command ran.
+//
+// `--` also makes a prompt that begins with a dash safe, which nothing else here does.
+//
+// Mutant watched: dropping the `sep` append turns this red.
+func TestBuildStepInvocation_ClaudeSeparatesTheVariadicFlagFromThePrompt(t *testing.T) {
+	for _, b := range []Binding{{Role: "reviewer", ReadOnly: true}, {Role: "executor"}, PreflightBinding} {
+		for _, h := range []Harness{HarnessClaude, HarnessPi} {
+			args := stepArgsOf(t, Channel{Harness: h}, b)
+			if len(args) < 2 {
+				t.Fatalf("%s args %v are too short to carry a prompt", h, args)
+			}
+			if args[len(args)-1] != "PROMPT" {
+				t.Errorf("%s args %v do not end with the prompt", h, args)
+			}
+			if args[len(args)-2] != "--" {
+				t.Errorf("%s args %v do not put `--` immediately before the prompt. This harness "+
+					"has a variadic tool-list flag that eats following positionals, measured to "+
+					"turn the prompt into deny rules and exit 1", h, args)
+			}
+		}
+	}
+}
+
+// TestIsAgentNotFound_AndTheSilentFallback pins the two measured ways an agent selector can fail,
+// which are opposites and must not be confused.
+//
+// claude FAILS CLOSED: exit 1, naming the agents it does have. That is recoverable — the retry
+// drops the selector and keeps the capability flags — but only if it is told apart from an
+// ordinary step failure, which has the same exit status.
+//
+// opencode FAILS OPEN: it warns and runs the default agent. For a read-only role
+// BuildStepInvocation refuses opencode outright so this cannot arise; for a write-capable role it
+// silently discards the role's model tier and prompt, which is worth a log line.
+//
+// Mutants watched: deleting either matcher's clause turns its arm red; the negative controls
+// catch a matcher widened to any "not found".
+func TestIsAgentNotFound_AndTheSilentFallback(t *testing.T) {
+	// Verbatim, measured 2026-09-14 on this machine.
+	const claudeRefusal = "\x1b[0m\x1b[31m\x1b[31m--agent 'nosuchagent-xyz' not found. " +
+		"Available agents: claude, Explore, general-purpose, Plan, polyforge:step-executor, " +
+		"polyforge:step-reviewer, statusline-setup\x1b[39m\x1b[0m"
+	if !IsAgentNotFound(claudeRefusal) {
+		t.Error("claude's measured agent refusal was not recognised. The step would be reported " +
+			"as a work-item failure, when the real cause is a stale plugin install")
+	}
+	const opencodeFallback = "\x1b[93m\x1b[1m! \x1b[0m agent \"step-reviewer\" not found. " +
+		"Falling back to default agent"
+	if !AgentFellBackToDefault(opencodeFallback) {
+		t.Error("opencode's measured silent fallback was not recognised; a selector that quietly " +
+			"does nothing is how this defect class arrived")
+	}
+
+	// Negative controls. An ordinary step failure must not be read as either: doing so would
+	// retry every failed step once with a different command line, and log a fallback that never
+	// happened.
+	for _, ordinary := range []string{
+		"--- FAIL: TestThing\nFAIL\tgithub.com/x/y\t0.4s\n",
+		"error: file not found: internal/x.go",
+		"REVIEW_RESULT: FAIL",
+		"",
+		// 🔴 The one that made the matcher line-scoped. drain's first customer is aihub's own
+		// work items, and THIS FILE contains the string "--agent": a healthy code_change step
+		// that greps or diffs it and separately reports a missing file would, under a
+		// whole-output scan, be re-run with its agent selector suppressed — at the wrong model
+		// tier, for no reason. The same unanchored-substring shape DetectPause documents as
+		// dangerous, caught before it shipped rather than after.
+		"reading internal/drain/channel.go: args = append(args, \"--agent\", agentID)\n" +
+			"go: internal/nope.go: file not found\n",
+		"$ rg -- --agent\ninternal/drain/channel.go:250\n\nerror: config not found\n",
+	} {
+		if IsAgentNotFound(ordinary) {
+			t.Errorf("an ordinary failure was read as an agent refusal: %q", ordinary)
+		}
+		if AgentFellBackToDefault(ordinary) {
+			t.Errorf("an ordinary failure was read as an agent fallback: %q", ordinary)
+		}
 	}
 }

@@ -308,10 +308,30 @@ if not rotted:
 # cheapest to satisfy by weakening the claim.) The residue is that shrink-then-regrow is free
 # up to the recorded cap, which is bounded by the size on the day the cap was set.
 BASELINE = {
-    "fragments/post-claim-routing.md": (4771,
+    "fragments/post-claim-routing.md": (7727,
         "moved on-demand by aihub#285 to stop the payload being truncated. It cannot "
         "come back until the resident tier is slimmed (aihub#296): making it resident "
-        "measures 14,549 chars, against a 10,000-char harness limit."),
+        "measures 14,549 chars, against a 10,000-char harness limit. "
+        "RAISED 4771 -> 7476 by aihub#685, naming the rule text as this cap requires: TWO "
+        "new sections, 'Claiming always walks the step graph - `rhs` decides who drives, "
+        "not whether' and 'Dispatching a wi is not claiming it - say WHAT you want, never "
+        "HOW to get there'. Both are `kind: rule, gate: none` and both stay off the "
+        "resident tier on purpose: the SHORT, actionable form of each already lives "
+        "resident in fragments/post-claim-dispatch.md (see that file's own two new "
+        "sentences and using-polyforge-payload.test.sh's 2b section, which asserts them "
+        "by marker). What is here instead is the ARGUMENT — the measured 16/25-wi split "
+        "and the two-phrasing dispatcher example — which is unenforceable prose, not a "
+        "second copy of the rule, so keeping it on-demand does not reopen the aihub#295 "
+        "gap this baseline exists to bound. "
+        "RAISED 7476 -> 7727 by aihub#691, fixing a false universal aihub#685 left behind "
+        "in the first section above: 'no `wi_type` is exempt' is false — the built-in "
+        "`default` wi_type (pf-work/SKILL.md's fallback when nothing matches a project "
+        "scenario) has `steps=[]`, nothing to walk. The replacement sentence names that "
+        "one exception explicitly rather than asserting a universal a grep of SKILL.md "
+        "itself would have disproved; aihub#691 also deleted the same false line from the "
+        "resident copy in fragments/post-claim-dispatch.md outright rather than "
+        "restating it there, since the resident form does not need the caveat to stay "
+        "correct."),
     "fragments/memory-conventions.md": (6457,
         "moved on-demand by aihub#285 on the grounds that memory-first.md states the "
         "memory-lives-in-aihub half more strictly. True for that half — but the "

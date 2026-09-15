@@ -69,6 +69,49 @@ set -uo pipefail
 #
 # The harness's hard limit is 10000; we sit below it on purpose, so the band between the
 # gate and 10000 is a "test red but users still fine" warning zone.
+#
+# aihub#685 grew fragments/post-claim-dispatch.md by two sentences (+518 chars measured)
+# and RAISED this 8497 -> 9083 to fit them. aihub#691 reverted that: the two sentences ARE
+# `kind: rule, gate: none`, so the TIER RULE (see references/manifest-notes.md) forbids
+# moving them off the resident tier, but growing the gate to fit new resident text is the
+# same defect this fragment exists to prevent one level up — a specific exception written
+# into the gate itself. aihub#338 already had this exact conflict once and answered it by
+# freeing resident characters instead (references/manifest-notes.md's "RESIDENT TIER" note);
+# aihub#691 did the same, across two passes (code_change, then review_fix after a WARN):
+#
+#   fragments/post-claim-dispatch.md   1,069 -> 743 chars                         -326
+#     Deleted the false universal aihub#685 left in the resident fragment ("No
+#     `wi_type` is exempt" — untrue, see pf-work/SKILL.md's built-in `default`
+#     wi_type with steps=[]) and de-scoped a heading that contradicted its own two
+#     paragraphs. THIS ALSO DELETED THE REST OF THE ORIGINAL aihub#338 RULE
+#     PARAGRAPH, including its closing sentence — "Claiming and then stopping to
+#     report is the failure here, not the safe default." (79 chars; this ledger
+#     entry is now its only surviving copy, quoted as a record, not restored to
+#     any fragment) — folded into the same trim and undisclosed until code_review
+#     caught it. Judged safe to leave dropped rather than restored: it restates
+#     the SUPPRESSION marker below ("do **not** emit three-segment output") in
+#     different words, it was never itself one of the four aihub#338 markers, and
+#     it is not named among the load-bearing content in manifest-notes.md's "WHAT
+#     aihub#338 ADDED" account of this fragment. review_fix then tightened the
+#     rhs/dispatch paragraphs a little further (net -4 more) without touching any
+#     of the six markers below.
+#   fragments/on-demand-index.md         995 -> 978 chars                          -17
+#     code_change trimmed the false "(Unused on the `rhs=false` auto-dispatch
+#     path.)" parenthetical (-48). review_fix found the entry still read as
+#     rhs=true-only despite the two new sections applying either way, and added
+#     back a short corrective clause (+31) — net -17.
+#   fragments/nl-routing.md            2,226 -> 2,071 chars                       -155
+#     code_change tightened the intro + Disambiguation prose (-190) but, in doing
+#     so, silently dropped two OR-branches: "if nothing fits OR ... ambiguous"
+#     lost the "nothing fits" case, and "a skill flow OR step in progress" lost
+#     the step case. review_fix restored both (using "mid-flow or mid-step",
+#     tighter than the original phrasing) — net -155.
+#
+# 498 chars freed (this pass) against a net +192 the two aihub#685 rules still
+# cost over their pre-aihub#685 post-claim-dispatch.md baseline (743 vs 551).
+# Full breakdown: references/manifest-notes.md's "RESIDENT TIER — WHAT aihub#691
+# ADDED" section. Assembled payload 8,485, inside [8,397, 8,497]. The gate was
+# not raised.
 PF_PAYLOAD_MAX_CHARS=8497
 PF_PAYLOAD_SLACK=100
 HARNESS_HARD_LIMIT=10000
@@ -201,20 +244,21 @@ for ir in "IR1 -" "IR2 -" "IR3 -"; do
 done
 
 echo
-echo "2b. the rhs=false dispatch rule reaches the model (aihub#338)"
+echo "2b. the post-claim dispatch rule reaches the model (aihub#338, extended aihub#685)"
 # Check 1's two-sided ratchet notices if this fragment DISAPPEARS — the payload drops through
 # the floor — but a reword that keeps the character count would sail straight through it, and
 # so would one that keeps the prose and drops the operative clause. That is the whole failure
 # this fragment exists to fix: the rule was PRESENT in the tree and absent from the payload,
 # and nothing was red for a month. Size is not a proxy for meaning, so assert the meaning.
 #
-# FOUR markers, one per part of the rule that carries behaviour. Three is not enough, and
-# that is measured, not cautious: with only TRIGGER/ACTION/PERMISSION asserted, a reviewer
-# rewrote the fragment to "emit three-segment output, THEN dispatch /pf-execute", padded it
-# to the identical 543 characters so the two-sided size band could not see it, and the whole
-# suite stayed green -- restoring the exact defect this fragment exists to remove. The
-# SUPPRESSION clause is the half that was unguarded, and output-format.md's unconditional
-# "MUST follow this format exactly" actively pushes an editor toward that inversion.
+# SIX markers now, in two groups of four-plus-two. The original FOUR (aihub#338) cover one
+# part of the rule that carries behaviour each. Three is not enough, and that is measured,
+# not cautious: with only TRIGGER/ACTION/PERMISSION asserted, a reviewer rewrote the fragment
+# to "emit three-segment output, THEN dispatch /pf-execute", padded it to the identical 543
+# characters so the two-sided size band could not see it, and the whole suite stayed green --
+# restoring the exact defect this fragment exists to remove. The SUPPRESSION clause is the
+# half that was unguarded, and output-format.md's unconditional "MUST follow this format
+# exactly" actively pushes an editor toward that inversion.
 #   the TRIGGER     — which claims this applies to
 #   the SUPPRESSION — the report must NOT be emitted. Without this marker an inverted
 #                     fragment is indistinguishable from a correct one at every gate.
@@ -223,6 +267,16 @@ echo "2b. the rhs=false dispatch rule reaches the model (aihub#338)"
 #                     CLAUDE.md file, or a skill asks for it". A fragment that describes the
 #                     dispatch without asking for it does not clear that precondition, so
 #                     this sentence is load-bearing, not commentary.
+# aihub#685 added two more, one per NEW rule the same fragment now also carries — same failure
+# mode, a same-length reword invisible to check 1, so each needs its own load-bearing marker:
+#   the RHS-GENERALITY   — "never whether the graph runs". Without it a reword back to
+#                          "claim with rhs=false -> dispatch" (dropping the rhs=true half)
+#                          restores exactly the gap aihub#685 exists to close, and a fragment
+#                          that only ever mentioned rhs=false already reads as complete.
+#   the DISPATCH-PROHIBITION — "never the execution path". This is the half that has NO other
+#                          copy anywhere in the plugin (unlike the claimant-side rule, which
+#                          existed for rhs=false already) — losing this marker is losing the
+#                          only resident statement of it, full stop.
 dispatch_frag="$plugin_root/skills/using-polyforge/fragments/post-claim-dispatch.md"
 if [ ! -f "$dispatch_frag" ]; then
   # Distinguished from "present but reworded" on purpose: run against a pre-aihub#338 tree
@@ -230,11 +284,11 @@ if [ ! -f "$dispatch_frag" ]; then
   # which reads like a wording drift when the truth is that the whole fragment is gone.
   bad "fragments/post-claim-dispatch.md does not exist. The rhs=false dispatch rule then lives only in skills/pf-work/SKILL.md (a skill BODY, charged only when the skill is invoked) and the on-demand tier — which IS the aihub#338 defect: present in the tree, absent from every session's context, and nothing red."
 else
-for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking'; do
+for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking' 'never whether the graph runs' 'never the execution path'; do
   # Bind each marker to that fragment first. Without this the check would pass on text some
   # OTHER fragment happens to emit, i.e. it would stop being a check about this fragment.
   if grep -qF -- "$mk" "$dispatch_frag" 2>/dev/null; then :; else
-    bad "post-claim-dispatch.md no longer contains '$mk'. Either (a) the rule was REWORDED AWAY — an inverted or weakened fragment is the aihub#338 defect restored, and a same-length reword is invisible to the two-sided size band above, so this marker is the only thing standing between it and a green build; or (b) the wording drifted and the marker needs updating with it. Establish which before touching either. Deleting the marker is not option (b)."; continue
+    bad "post-claim-dispatch.md no longer contains '$mk'. Either (a) the rule was REWORDED AWAY — an inverted or weakened fragment is the aihub#338/aihub#685 defect restored, and a same-length reword is invisible to the two-sided size band above, so this marker is the only thing standing between it and a green build; or (b) the wording drifted and the marker needs updating with it. Establish which before touching either. Deleting the marker is not option (b)."; continue
   fi
   case "$ctx" in
     *"$mk"*) ok "dispatch rule: '$mk' reaches the payload";;
@@ -252,13 +306,13 @@ if [ -z "$dctl_ctx" ]; then
   bad "control build produced no payload at all, so it cannot show the markers are gone for the right reason"
 else
   leaked=""
-  for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking'; do
+  for mk in 'requires_human_session=false' 'do **not** emit three-segment' 'dispatch `/pf-execute`' 'This skill is asking' 'never whether the graph runs' 'never the execution path'; do
     case "$dctl_ctx" in *"$mk"*) leaked="$leaked '$mk'";; esac
   done
   if [ -n "$leaked" ]; then
     bad "with post-claim-dispatch.md emptied the payload STILL carries$leaked — those markers come from somewhere else, so the checks above do not test this fragment"
   else
-    ok "emptying post-claim-dispatch.md removes all four markers (the check discriminates)"
+    ok "emptying post-claim-dispatch.md removes all six markers (the check discriminates)"
   fi
   # ...and the control must still be a working payload, or "markers gone" is explained by
   # the hook having failed rather than by the fragment being empty.
@@ -365,6 +419,19 @@ check_deferred() { # fragment_basename, marker distinctive to that fragment
   else bad "$1 is neither injected nor listed in on-demand-index.md — it is orphaned"; fi
 }
 check_deferred "post-claim-routing.md"  "Mandatory output rules"
+# aihub#685 added two new sections to this same fragment. Reusing check_deferred rather than
+# hand-rolling a parallel check (per aihub#685 acceptance B): each call independently proves
+# (a) the marker really lives in the fragment - not a vacuous check, (b) the on-demand tier
+# still is not leaking into the resident payload, (c) the fragment is still named by the index.
+# Two calls, one per new section, because either one could be deleted or reworded without
+# touching the other - the "Mandatory output rules" call above cannot see either loss.
+#
+# aihub#691: pointed at the OPERATIVE sentence inside each section rather than its heading.
+# A heading-text marker is satisfiable by keeping the heading and gutting the body under it
+# - the exact failure 2b's own comment describes for post-claim-dispatch.md's markers, just
+# one level up. These two are body prose that states the rule, not a label for it.
+check_deferred "post-claim-routing.md"  "only who advances it differs"
+check_deferred "post-claim-routing.md"  "Do not write the execution path"
 check_deferred "memory-conventions.md"  "Cross-memory links"
 check_deferred "diagram-convention.md"  "degrades gracefully back to a code block"
 check_deferred "platform-adaptation.md" "Copilot CLI**: installs as a native plugin"

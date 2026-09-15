@@ -341,10 +341,33 @@ never reached any model. Two rules keep it fixed:
 
 ON-DEMAND TIER (declared with the on-demand verb, never injected - see also
 fragments/on-demand-index.md). Rationale per fragment:
-  fragments/post-claim-routing.md    4,771 chars - only applies to a three-segment
-                                     "Next steps" for requires_human_session=true;
-                                     the rhs=false auto-dispatch path is explicitly
-                                     unaffected by it.
+  fragments/post-claim-routing.md    7,727 chars - the ROUTING TABLE section only
+                                     applies to a three-segment "Next steps" for
+                                     requires_human_session=true. Grew from 4,755 by
+                                     aihub#685, which appended two sections that are
+                                     NOT scoped to rhs=true: the full argument for
+                                     "claiming always walks the step graph, rhs picks
+                                     the driver, never whether" and its dispatcher-side
+                                     mirror "say WHAT you want, never HOW to get there"
+                                     - both apply on either side of rhs (see
+                                     fragments/on-demand-index.md's entry for this
+                                     file, which used to claim the opposite and was
+                                     corrected by aihub#691). Both new sections are
+                                     `kind: rule, gate: none`; both stay on-demand
+                                     because the SHORT, actionable form of each is
+                                     already resident in
+                                     fragments/post-claim-dispatch.md (asserted there
+                                     by marker in using-polyforge-payload.test.sh's 2b
+                                     section) - what lives here is the unenforceable
+                                     argument (the measured 16/25-wi split, the
+                                     two-phrasing dispatcher example), not a second copy
+                                     of the rule. Grew again 7,476 -> 7,727 by aihub#691,
+                                     which fixed a false universal aihub#685 left in the
+                                     first new section ("no `wi_type` is exempt" -
+                                     false; the built-in `default` wi_type has
+                                     `steps=[]`) and deleted the same line outright from
+                                     the resident copy in post-claim-dispatch.md rather
+                                     than restate the caveat there.
   fragments/memory-conventions.md    4,841 chars - its load-bearing rule ("all memory
                                      lives in aihub, local .md memory is deprecated
                                      here") is already stated - in fact stated more
@@ -451,6 +474,72 @@ UNCHANGED [8,397, 8,497] band. The gate was not raised.
 Do not read the three figures above as a budget to spend. They are the specific price
 of one fragment; the band is full again, and the next @include needs its own four-line
 argument of the same shape.
+
+## RESIDENT TIER - WHAT aihub#691 ADDED, AND WHAT PAID FOR IT
+
+aihub#685 added two new `kind: rule, gate: none` sentences to fragments/post-claim-dispatch.md
+(551 -> 1,069 chars, +518) and, to make the assembled payload fit, RAISED
+PF_PAYLOAD_MAX_CHARS 8,497 -> 9,083 in using-polyforge-payload.test.sh - the same "grow the
+gate instead of the tier" shortcut THE TIER RULE, and this file's own comment above the
+constant, both forbid. aihub#691 restored PF_PAYLOAD_MAX_CHARS to 8,497 and paid for the two
+rules the way aihub#338 did: by freeing resident characters elsewhere, never by weakening or
+relocating the two rules themselves (THE TIER RULE forbids the latter; they are ungated).
+
+Three sources of savings, across two passes (code_change, then review_fix after a WARN):
+
+  fragments/post-claim-dispatch.md   1,069 -> 743 chars                          -326
+                       aihub#685's own prose carried a false universal ("No `wi_type`
+                       is exempt" - untrue; pf-work/SKILL.md's built-in `default`
+                       wi_type has `steps=[]`) and put the two new sentences under a
+                       heading ("Post-claim Dispatch (`requires_human_session=false`)")
+                       that contradicted two of the three paragraphs under it, which are
+                       NOT scoped to rhs=false. Deleting the false sentence outright -
+                       not replacing it with a narrower universal, the same trap it was
+                       an instance of - and de-scoping the heading also removed the
+                       words that would otherwise be needed to restate the caveat.
+                       DISCLOSURE (added in review_fix, after code_review flagged this
+                       as undisclosed): the same edit also deleted the rest of the
+                       ORIGINAL aihub#338 rule paragraph, including its closing
+                       sentence - "Claiming and then stopping to report is the failure
+                       here, not the safe default." (79 chars; this ledger entry is now
+                       its only surviving copy, quoted as a record, not restored to any
+                       fragment). That deletion was real and was folded into the
+                       heading/false-universal trim above rather than named on its own.
+                       Judged safe to leave dropped rather than restored: it restates
+                       the SUPPRESSION marker tested in using-polyforge-payload.test.sh's
+                       2b section ("do **not** emit three-segment output") in different
+                       words, it was never itself one of the four aihub#338 markers, and
+                       it is not named among the load-bearing content this section itself
+                       records above ("WHAT aihub#338 ADDED"). review_fix also tightened
+                       the rhs/dispatch paragraphs a little further (net -4 more) without
+                       touching any of the six markers.
+  fragments/on-demand-index.md         995 -> 978 chars                           -17
+                       code_change removed the same false claim one level up:
+                       "(Unused on the `rhs=false` auto-dispatch path.)" (-48) - false
+                       once aihub#685's two new sections landed in post-claim-routing.md,
+                       since neither is scoped to rhs=true. review_fix found the entry
+                       still read as rhs=true-only by omission (it only ever describes
+                       the three-segment/rhs=true reason to read the file) and added a
+                       short corrective clause noting the other two sections apply
+                       either way (+31) - net -17.
+  fragments/nl-routing.md            2,226 -> 2,071 chars                        -155
+                       code_change tightened the table's intro paragraph and the
+                       Disambiguation section's bullets (-190), but in doing so silently
+                       dropped two OR-branches it claimed (falsely) to have left intact:
+                       "if nothing fits OR intent is ambiguous" lost the "nothing fits"
+                       case, and "a skill flow OR step is in progress" lost the step
+                       case. review_fix restored both conditions - the second one via
+                       "mid-flow or mid-step", which is tighter than the original
+                       phrasing - net -155.
+
+Total freed: 498 characters. The two new rules in post-claim-dispatch.md still cost a net
++192 over the pre-aihub#685 baseline (743 vs 551 chars) - not zero. The 498 pays for that net
+growth and for review_fix's corrections above. Assembled payload: 8,485 chars, inside the
+restored [8,397, 8,497] band. The gate was not raised.
+
+fragments/post-claim-routing.md (on-demand, not resident-budget-constrained) also grew
+7,476 -> 7,727 chars fixing its own copy of the same false universal; see THE TIER RULE
+BASELINE entry above, which records the new cap.
 
 ## NL-ROUTING TABLE - WHAT NOT TO ADD BACK (moved off the resident tier by aihub#338)
 A row that merely restates a skill's own name (`plan` -> `/pf-plan`) is omitted on

@@ -4,7 +4,7 @@
 {
   "tool": "pf_complete_attempt",
   "description_sha256": "4ec095b52008327a117469cabd90cc52a66dbc1c51cd2fe75b089849e084a580",
-  "input_schema_sha256": "ded51dfef13981256d43f3cdc2717a824be84b048a0d8b5d4048d07e1d822c2c",
+  "input_schema_sha256": "725d2050a5d6ce449f3bce9ec2848feeb803bcdf6ff9025db59460d5f646d956",
   "params": {
     "derived": {
       "type": "array",
@@ -12,6 +12,10 @@
     },
     "force_terminate_step": {
       "type": "boolean",
+      "required": false
+    },
+    "no_steps_reason": {
+      "type": "string",
       "required": false
     },
     "note": {
@@ -42,7 +46,7 @@
 
 ## hop 0-1 — what the caller is told
 
-Six parameters. The description's ordering sentence is a constraint rather than a
+Seven parameters. The description's ordering sentence is a constraint rather than a
 convenience note: this call deletes the credentials `pf_emit_event` needs, so
 a note emitted afterwards cannot authenticate — the published statement and the
 order the tool really uses are compared in one arm by
@@ -59,6 +63,7 @@ order the tool really uses are compared in one arm by
 | `note` | string | no | closing note recorded BEFORE the attempt is completed (`TestPublishedNoteOrderingIsTheOrderTheToolUses`) |
 | `pause_reason` | string | no | read only when `status="paused"`, and refused with any other status |
 | `derived` | array | on wrap | required when `status="wrapped"` and refused if omitted — dispositions for findings the attempt did not fix; `[]` legal, absence refused (`TestCompleteAttemptDerivedIsRequiredBeforeTheNote`) |
+| `no_steps_reason` | string | on gated wrap | read only when `status="wrapped"`, refused with any other status; required-non-empty only when the no-steps-recorded gate fires — this work item has a commit/push/pr_opened event but `wi_step_state.version==0` — held by `TestNoStepsRecordedGateRefusesWrapWithCodeAndNoStep` (`aihub#684` AC1). A whitespace-only value is treated exactly like an absent one, even on a wrap the gate never touched (`TestNoStepsRecordedGateReasonCannotHalfLand`, AC7). |
 
 `note` exists because the closing note and the terminal call were always two
 round-trips in a fixed order — 201 measured adjacent pairs, 0.325% of billed input —
@@ -103,6 +108,28 @@ bound by `internal/server/router.go` (`handleCompleteAttempt`).
   both ways in the same file (`TestCompleteAttemptDoesNotRequirePauseReasonOnPause`
   for the empty and absent cases, `TestCompleteAttemptStillPausesWithAReason` for
   the value the column exists for).
+- **`no_steps_reason` is refused on any status but `wrapped`, and forwarded only
+  when non-empty** (`aihub#684`) — the identical posture as `pause_reason` one
+  status along: `internal/domain/run_attempts.go` (`FnCompleteAttempt`) refuses a
+  non-empty value on any other status next to the `pause_reason` guard, before it
+  opens a transaction, held by
+  `internal/domain/complete_attempt_no_steps_reason_guard_test.go`
+  (`TestCompleteAttemptRefusesNoStepsReasonOnNonWrappedStatus`). It is the escape
+  hatch for the no-steps-recorded gate: a `wrapped` completion is refused
+  with `409 CONFLICT_NO_STEPS_RECORDED` when this work item has a
+  commit/push/pr_opened event but `wi_step_state.version==0`, and a non-empty
+  `no_steps_reason` un-refuses it, recorded on both the `run_attempts` row and the
+  `attempt_completed` event, the same shape `derived` uses (`aihub#684` AC1,
+  `internal/domain/complete_attempt_no_steps_recorded_db_test.go`,
+  `TestNoStepsRecordedGateRefusesWrapWithCodeAndNoStep`,
+  subtest `a_real_reason_succeeds_and_is_readable_in_both_the_row_and_the_event`).
+  A whitespace-only value is refused the same way an absent one is, and that
+  holds even on a work item the gate never touched at all — driven on a
+  fixture with no code event, so the refusal is isolated from the gate, by
+  `internal/domain/complete_attempt_no_steps_recorded_db_test.go`
+  (`TestNoStepsRecordedGateReasonCannotHalfLand`, AC7), which also pins that
+  the column and the `attempt_completed` event agree on the normalised
+  (absent) value rather than half-landing it.
 - **`note` never reaches this endpoint.** It becomes its own `note` event on the
   other call, which is the difference from `pause_reason`: one is a timeline event
   whatever the status, the other is a column read on one status — the absent body key

@@ -434,6 +434,16 @@ func runLiveGitKeyWalk(t *testing.T, w *liveKeyWalk) {
 		"note":     "wrapped: the aihub#501 live git walk finished with this work item",
 		// aihub#350: a wrap that omits derived is refused before the push half.
 		"derived": []any{},
+		// aihub#684: this walk drives pf_commit/pf_push/pf_pr, so the work item
+		// carries code-produced events, and it never opens a step — exactly the
+		// shape the no-steps-recorded gate refuses. That refusal is CORRECT: the
+		// walk really is a work item that produced code with no step record. It
+		// is also the one shape the escape hatch exists for, so the walk states
+		// its reason rather than being exempted, and driving the parameter here
+		// measures it on the live path as a side effect.
+		"no_steps_reason": "tool-coverage walk: this work item exists to observe " +
+			"pf_* response keys against a running server, not to carry work, so it " +
+			"drives the git tools directly and opens no step graph",
 	}))
 	if ok, _ := wrapped["ok"].(bool); !ok {
 		t.Errorf("pf_wrap did not succeed, so the keys of its success path went unmeasured: %v\n"+

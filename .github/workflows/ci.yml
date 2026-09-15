@@ -5643,6 +5643,70 @@ jobs:
           ! grep -q -- '--- SKIP' force_terminate_sentinel.log \
             || { echo "::error::an aihub#675 sentinel arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#684: FnCompleteAttempt refuses status="wrapped" with 409
+      # CONFLICT_NO_STEPS_RECORDED when a work item produced code
+      # (commit/push/pr_opened) but wi_step_state.version never moved off 0 —
+      # code landed with no step ever opened for it. no_steps_reason is the
+      # escape hatch: non-empty (after TrimSpace) it un-refuses the wrap and
+      # is recorded, byte-identical, on both the run_attempts row and the
+      # attempt_completed event; a whitespace-only value normalizes to NULL
+      # in the same place on both sides, so it cannot half-land. Only
+      # status="wrapped" is gated — a paused or failed completion of the
+      # identical shape passes straight through. Both predicate halves are
+      # scoped to the WORK ITEM rather than the run attempt, so pausing and
+      # re-claiming (a structurally unlinked second attempt) cannot make code
+      # committed under the first attempt invisible to the gate when the
+      # second one wraps — the shape measured in 10 of 2756 transcript
+      # groups. The gate's own blind spot — a work item that produced no code
+      # at all is never gated on step count — is FORCED, not chosen: the
+      # server holds no step-graph list to tell that shape apart from a real
+      # bypass. TestGateCannotSeeAStepBypassThatProducedNoCode pins exactly
+      # that, named for what it is rather than as a precision virtue.
+      - name: aihub#684 no-steps-recorded gate DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/domain/ -run 'TestNoStepsRecordedGate|TestGateCannotSeeAStepBypassThatProducedNoCode' -count=1 -v 2>&1 | tee no_steps_recorded_gate.log
+          for want in 'TestNoStepsRecordedGateRefusesWrapWithCodeAndNoStep/refused_409_with_no_reason_and_nothing_moves' \
+                      'TestNoStepsRecordedGateRefusesWrapWithCodeAndNoStep/whitespace_only_reason_is_refused_the_same_way_an_absent_one_is' \
+                      'TestNoStepsRecordedGateRefusesWrapWithCodeAndNoStep/a_real_reason_succeeds_and_is_readable_in_both_the_row_and_the_event' \
+                      'TestGateCannotSeeAStepBypassThatProducedNoCode' \
+                      'TestNoStepsRecordedGateAllowsNormalShape' \
+                      'TestNoStepsRecordedGateReadsStepStateDirectlyNotThroughListPath' \
+                      'TestNoStepsRecordedGateOnlyGatesWrapped/paused' \
+                      'TestNoStepsRecordedGateOnlyGatesWrapped/failed' \
+                      'TestNoStepsRecordedGateReasonCannotHalfLand' \
+                      'TestNoStepsRecordedGateSurvivesPauseAndReclaim/wrapping_attempt_B_without_a_reason_is_still_refused' \
+                      'TestNoStepsRecordedGateSurvivesPauseAndReclaim/a_reason_on_attempt_B_still_unblocks_it'; do
+            grep -q -- "--- PASS: $want (" no_steps_recorded_gate.log \
+              || { echo "::error::$want did not run (expected '--- PASS: $want'); the aihub#684 no-steps-recorded gate is not actually verified against a database"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' no_steps_recorded_gate.log \
+            || { echo "::error::an aihub#684 no-steps-recorded gate arm SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+      # aihub#684 AC8: pf_wrap and pf_complete_attempt converge on the exact
+      # same FnCompleteAttempt choke point instead of pf_wrap carrying a
+      # second copy of the no-steps-recorded check — both tools POST to the
+      # identical /v1/work_items/<id>/complete endpoint. The DB tests above
+      # prove the gate itself against every shape it has to tell apart; none
+      # of them can prove pf_wrap — a different tool, a different code path,
+      # reachable only over MCP — actually reaches that same gate rather than
+      # answering out of its own copy. This step drives a real claimed work
+      # item, a real throwaway git worktree and stub `gh` (no network), and
+      # the real httptest router + Postgres database so the fact is measured
+      # rather than read off the source.
+      - name: aihub#684 pf_wrap no-steps-recorded coverage E2E DB test
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test ./internal/mcp/ -run '^TestE2EWrapConvergesOnTheSameNoStepsRecordedGateAsCompleteAttempt$' -count=1 -v 2>&1 | tee wrap_no_steps_recorded.log
+          grep -q -- '--- PASS: TestE2EWrapConvergesOnTheSameNoStepsRecordedGateAsCompleteAttempt (' wrap_no_steps_recorded.log \
+            || { echo "::error::TestE2EWrapConvergesOnTheSameNoStepsRecordedGateAsCompleteAttempt did not run (expected '--- PASS'); the aihub#684 AC8 convergence between pf_wrap and pf_complete_attempt is not actually verified against a database"; exit 1; }
+          ! grep -q -- '--- SKIP' wrap_no_steps_recorded.log \
+            || { echo "::error::the aihub#684 AC8 wrap-convergence test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

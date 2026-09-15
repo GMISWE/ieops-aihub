@@ -1087,6 +1087,13 @@ func (s *Server) registerLifecycleTools() {
 				"\"dropped:<reason>\" (judged not worth tracking; the reason is required). Recorded on the attempt row "+
 				"and in the attempt_completed event; only a wrap records it. The server cannot check the list against "+
 				"the note's prose, so its honesty is yours."),
+			"no_steps_reason": prop("string", "Escape hatch for the no-steps-recorded gate (aihub#684): read only when "+
+				"status=\"wrapped\" (sending one with any other status is refused, not ignored). Required and must be "+
+				"non-empty ONLY when this work item has a commit/push/pr_opened event but never opened a single step "+
+				"(wi_step_state.version==0): the wrap is otherwise refused 409 CONFLICT_NO_STEPS_RECORDED. State why no "+
+				"step was opened. A whitespace-only value is treated exactly like an absent one - it will not satisfy the "+
+				"gate. Recorded on the attempt row and in the attempt_completed event even when the gate never fired, same "+
+				"as `derived`. A work item that produced no code at all is not gated and needs no reason."),
 		}, []string{"work_item_id", "status"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -1123,6 +1130,20 @@ func (s *Server) registerLifecycleTools() {
 			return errResult(fmt.Errorf(
 				"pause_reason is read only when status=\"paused\", but status=%q was sent with one; "+
 					"drop pause_reason or use note, which is recorded on every status", status))
+		}
+
+		// aihub#684: same posture as pause_reason immediately above, and for the
+		// same reason — this half of the check needs no database, so refusing it
+		// here spares the note emitted below. The DB-dependent half (commit
+		// events + version==0 => refused) CANNOT be hop-2-guarded: it needs two
+		// reads FnCompleteAttempt already does inside its transaction, so it is
+		// left to the server and the note ahead of THAT specific refusal is an
+		// accepted, documented cost (same shape as pf_wrap's own cost below).
+		noStepsReason := strArg(args, "no_steps_reason")
+		if noStepsReason != "" && status != "wrapped" {
+			return errResult(fmt.Errorf(
+				"no_steps_reason is read only when status=\"wrapped\", but status=%q was sent with one; "+
+					"drop it or use note, which is recorded on every status", status))
 		}
 
 		// aihub#350: the derived checks a refusal must not follow a side effect
@@ -1200,6 +1221,12 @@ func (s *Server) registerLifecycleTools() {
 		// nil-versus-empty contract of CompleteAttemptRequest.Derived.
 		if derivedPresent {
 			body["derived"] = derived
+		}
+		// aihub#684: presence-gating, same style as pause_reason — only on
+		// status=wrapped by now (the guard above refused the rest), and only
+		// when the caller actually sent one.
+		if noStepsReason != "" {
+			body["no_steps_reason"] = noStepsReason
 		}
 
 		result, err := s.client.CompleteAttempt(ctx, wiID, body)

@@ -90,6 +90,16 @@ const (
 	ErrConflictDependencyCycle     ErrCode = "CONFLICT_DEPENDENCY_CYCLE"
 	ErrConflictLockTaken           ErrCode = "CONFLICT_LOCK_TAKEN"
 	ErrConflictDualWIAgent         ErrCode = "CONFLICT_DUAL_WI_AGENT"
+	// ErrConflictNoStepsRecorded is aihub#684: complete_attempt(status="wrapped")
+	// refuses when the WORK ITEM has a commit/push/pr_opened agent_event (it
+	// produced code) but wi_step_state.version==0 (no step was ever opened for
+	// it). Both halves are scoped to the work item, not this attempt — see the
+	// gate's own comment in FnCompleteAttempt for why. A 409 like its sibling
+	// CONFLICT_STEP_IN_PROGRESS, not the ErrBadRequest family derived's guards
+	// use: this refusal is about server STATE (events that exist, a step record
+	// that does not), not a malformed request. Escape hatch: resend with a
+	// non-empty no_steps_reason.
+	ErrConflictNoStepsRecorded ErrCode = "CONFLICT_NO_STEPS_RECORDED"
 	// ErrRequiresHumanSessionMismatch has HAD NO EMITTER since aihub#359, and never really had
 	// one: its only call site was an `else if *wi.RequiresHumanSession != resolvedRHS` in
 	// FnClaimWorkItem that compared the work item row against a value just assigned from that
@@ -205,6 +215,7 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
 		ErrConflictTerminalState, ErrConflictSerializationFailure,
+		ErrConflictNoStepsRecorded,
 		ErrIdempotencyKeyReused,
 		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
 		ErrWITypeMismatch,

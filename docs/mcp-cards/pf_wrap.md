@@ -4,11 +4,15 @@
 {
   "tool": "pf_wrap",
   "description_sha256": "0ce419eb138a61273a756ad8c7515d111fd1e400340a9bdbef3f376df4680b4d",
-  "input_schema_sha256": "f828a8f58680440cdc4d5473e98fd2e58b33660cfc69e511329979e9484ff704",
+  "input_schema_sha256": "5536dece59175ea4d0af4b1fcdc306cf9b0bf36c718f5b6da3d4acd407317ada",
   "params": {
     "derived": {
       "type": "array",
       "required": true
+    },
+    "no_steps_reason": {
+      "type": "string",
+      "required": false
     },
     "note": {
       "type": "string",
@@ -50,7 +54,7 @@
 
 ## hop 0-1 — what the caller is told
 
-Seven parameters, three required.
+Eight parameters, three required.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -61,6 +65,7 @@ Seven parameters, three required.
 | `pr_body` | string | no | same |
 | `note` | string | no | closing note recorded before the attempt is completed — the ordering held by `TestPublishedNoteOrderingIsTheOrderTheToolUses`, and every retry resends it (`TestWrapCompletesAsWrappedWithNoFlagAndEveryRetryResendsItsNote`) |
 | `workspace_root` | string | no | workspace root path |
+| `no_steps_reason` | string | on gated wrap | forwarded to the identical completion call `pf_complete_attempt` uses (`aihub#684`); required-non-empty only when the no-steps-recorded gate fires (this work item has a commit/push/pr_opened event, this tool's own push/PR half counts, but `wi_step_state.version==0`). Omit it on a first attempt; if refused with `409 CONFLICT_NO_STEPS_RECORDED`, resend the identical wrap with this filled in, both driven end to end against a real server and database by `TestE2EWrapConvergesOnTheSameNoStepsRecordedGateAsCompleteAttempt`. A whitespace-only value is treated exactly like an absent one — it will not satisfy the gate. |
 
 "Idempotent **only** when a PR on the branch already covers local HEAD" is the
 qualifier that matters: local commits no PR covers are pushed, and a new PR is opened
@@ -104,6 +109,16 @@ read off the recorded request by `internal/mcp/derived_wire_shape_test.go`
 runs at all, so a wrap refused for omitting or malforming it has pushed nothing,
 opened nothing and recorded no note, with the zero-request refusal held by the
 same file (`TestWrapDerivedIsRequiredBeforeThePushHalf`).
+
+`no_steps_reason` rides the same completion body of step 3, forwarded only when
+non-empty, exactly like `pf_complete_attempt`'s own parameter of the same name —
+this tool carries no second copy of the no-steps-recorded gate, it forwards to the
+identical `FnCompleteAttempt` choke point (`aihub#684`, `AC8`), held end to end
+against a real server and database by
+`internal/mcp/wrap_no_steps_recorded_e2e_db_test.go`
+(`TestE2EWrapConvergesOnTheSameNoStepsRecordedGateAsCompleteAttempt`): a first
+call with none refuses `409 CONFLICT_NO_STEPS_RECORDED`, and the identical call
+plus a reason lands it in `run_attempts.no_steps_reason`.
 
 ## hop 4 — what it actually does
 

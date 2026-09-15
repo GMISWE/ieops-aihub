@@ -591,6 +591,13 @@ func (s *Server) registerCodingTools() {
 				"\"dropped:<reason>\" (judged not worth tracking; the reason is required). Recorded on the attempt row "+
 				"and in the attempt_completed event. The server cannot check the list against the note's prose, so its "+
 				"honesty is yours."),
+			"no_steps_reason": prop("string", "aihub#684 escape hatch. Only REQUIRED when the server's "+
+				"no-steps-recorded gate fires: this work item has a commit/push/pr_opened event but no step was "+
+				"ever opened for it (wi_step_state.version==0) - a wrap refused for that reason comes back as "+
+				"CONFLICT_NO_STEPS_RECORDED. Omit it on a first attempt; if refused, resend the same wrap with "+
+				"this filled in. A whitespace-only value is treated exactly like an absent one - it will not "+
+				"satisfy the gate. If sent on a wrap the gate did not flag, it is still recorded on the attempt "+
+				"row and event, same as `derived` is recorded whether or not it changed the outcome."),
 		}, []string{"work_item_id", "repo", "derived"}),
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
 		args, err := parseArgs(req.Params.Arguments)
@@ -691,6 +698,13 @@ func (s *Server) registerCodingTools() {
 			"claim_epoch":    sf.ClaimEpoch,
 			"session_secret": sf.SessionSecret,
 			"derived":        derived,
+		}
+		// aihub#684: presence-gated, same style as derived above — only sent when
+		// the caller actually supplied one. pf_wrap always sends status="wrapped",
+		// so there is no other-status case to guard against here (unlike
+		// pf_complete_attempt's hop-2 guard, which can be called with any status).
+		if noStepsReason := strArg(args, "no_steps_reason"); noStepsReason != "" {
+			body["no_steps_reason"] = noStepsReason
 		}
 		completeResult, err := s.client.CompleteAttempt(ctx, sf.WIID, body)
 		if err != nil {

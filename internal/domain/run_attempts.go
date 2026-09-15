@@ -985,6 +985,14 @@ type CompleteAttemptRequest struct {
 	// Entry grammar is ValidateDerived's; filed: refs are additionally resolved
 	// against work_items inside the wrap transaction.
 	Derived []string `json:"derived"`
+	// NoStepsReason is the aihub#684 escape hatch for the no-steps-recorded
+	// gate: required and non-empty (after TrimSpace) only when that gate fires
+	// on status="wrapped" — i.e. this WORK ITEM has a commit/push/pr_opened
+	// event but wi_step_state.version==0. *string, not string, for the same
+	// reason PauseReason and Derived are typed pointers: "no reason was sent"
+	// and "an empty/whitespace reason was sent" are different requests, even
+	// though the gate treats both the same way (TrimSpace-empty == absent).
+	NoStepsReason *string `json:"no_steps_reason,omitempty"`
 }
 
 // Derived-disposition entry prefixes (aihub#350). One entry per finding the
@@ -1116,6 +1124,22 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 				"drop pause_reason or use note, which is recorded on every status", req.Status))
 	}
 
+	// aihub#684: no_steps_reason is read only when status="wrapped" — it is the
+	// escape hatch for a gate that only fires on that status (AC4) — so a
+	// non-empty value sent with any other status is refused rather than
+	// recorded, same posture and same exact-`!= ""` test as pause_reason above
+	// (a stray space on the wrong status is still "you sent something where
+	// nothing is read"). This is a DIFFERENT emptiness rule from the
+	// TrimSpace-non-empty test the gate itself uses below on purpose: this one
+	// asks "did the caller send something where the field has no meaning",
+	// that one asks "did the caller's escape-hatch text actually say
+	// anything". Do not unify them into one helper.
+	if req.Status != "wrapped" && req.NoStepsReason != nil && *req.NoStepsReason != "" {
+		return NewErr(ErrBadRequest, fmt.Sprintf(
+			"no_steps_reason is read only when status=\"wrapped\", but status=%q was sent with one; "+
+				"drop it or use note, which is recorded on every status", req.Status))
+	}
+
 	// aihub#350: a wrap must disposition the findings it produced but did not
 	// fix, and "must" here means REFUSED, not defaulted. Measured 2026-09-02
 	// over all 349 aihub work items: 18 of 24 derived open items had a parent
@@ -1221,11 +1245,29 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	}
 
 	// H-R9-11: if there is a step in_progress and status=paused, force_terminate it first
+	// aihub#684: version is read in the SAME round trip (D3's "costs no extra
+	// round trip") for the no-steps-recorded gate below. It keeps its Go zero
+	// value (0) when stepErr is pgx.ErrNoRows — the semantically correct
+	// default for THAT case: no wi_step_state row at all means no step was
+	// ever opened for this work item. For any OTHER non-retryable error
+	// swallowed by the guard immediately below (aihub#545's "treats any error
+	// as no step in progress"), 0 is NOT semantically correct, only the value
+	// this function is left holding: it does not actually know whether a step
+	// was ever opened. That approximation is harmless for the pre-existing
+	// force-terminate branch (fails open, inherited from aihub#545) but is not
+	// harmless for the no-steps-recorded gate below, which is new: it fails
+	// CLOSED on that same 0, so a transient DB fault on this SELECT can 409 a
+	// caller with CONFLICT_NO_STEPS_RECORDED whose only escape is writing a
+	// no_steps_reason that is not true. Left unhandled deliberately — version
+	// is NOT NULL and class-40 is already classified above, so realistically
+	// this is ErrNoRows or nothing — but do not read this comment as claiming
+	// 0 is the correct answer for any error other than ErrNoRows.
 	var stepStatus string
 	var stepAttempt *string
+	var stepVersion int64
 	stepErr := tx.QueryRow(ctx, `
-		SELECT current_step_status, current_step_attempt FROM wi_step_state WHERE work_item_id=$1`, wiID,
-	).Scan(&stepStatus, &stepAttempt)
+		SELECT current_step_status, current_step_attempt, version FROM wi_step_state WHERE work_item_id=$1`, wiID,
+	).Scan(&stepStatus, &stepAttempt, &stepVersion)
 	// aihub#545: stepErr is read, not returned — pgx.ErrNoRows is the normal
 	// "this work item has no step state" answer and the guard below treats any
 	// error as "no step in progress". A class-40 rollback is not that: this
@@ -1244,6 +1286,81 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 			}
 		} else {
 			return NewErr(ErrConflictStepInProgress, "a step is still in_progress; set force_terminate_step=true or update step first")
+		}
+	}
+
+	// aihub#684: refuse to wrap an attempt that produced code (commit/push/
+	// pr_opened) but never opened a single step. BOTH halves of this predicate
+	// are scoped to the WORK ITEM, not this attempt: pause + re-claim mints a
+	// new attempt row with parent_attempt_id=NULL and no other row-level link
+	// to the one that pushed the code (measured 10/2756 transcript groups, see
+	// attempt_paused_terminal_dbgated_test.go), so an attempt-scoped check
+	// would be defeated by pausing before wrapping. Gated on status=="wrapped"
+	// only: a paused attempt can never wrap itself (it is always a successor
+	// attempt that eventually wraps, and the successor DOES face this gate
+	// because it is work-item-scoped), and failed is the only remaining
+	// terminal exit for an unattended drain failure — gating either would
+	// strand a run with no way out.
+	//
+	// KNOWN, NAMED under-coverage (forced, not chosen): the server holds no
+	// step-graph list — scenario_phase_configs (migration 0007) was DROPPED by
+	// migration 0017, and nothing here parses scenario markdown — so it cannot
+	// tell "this wi_type has N steps and used none of them" from "this wi_type
+	// genuinely produces no code". A work item with zero commit/push/pr_opened
+	// events is therefore allowed through with no disclosure required, WHETHER
+	// OR NOT it bypassed a real step graph. This is NOT deploy-type (or any
+	// other) work items being naturally exempt — aihub#680 was a deploy work
+	// item with a 3-step graph that bypassed it too, which proves that framing
+	// false. It is a blind spot this gate's evidence cannot see past. Do not
+	// comment or name a test as though it were a precision virtue instead of a
+	// forced limit.
+	//
+	// SECOND, DISTINCT hole, same forced cause: this predicate is scoped to the
+	// WORK ITEM (see above), and stepVersion is read ONCE per work item, not
+	// per attempt. If attempt 1 opens even a single step (stepVersion moves off
+	// 0) and is then paused or fails, and attempt 2 goes on to produce code
+	// (commit/push/pr_opened) while opening no step of its OWN, this check
+	// still reads stepVersion > 0 from attempt 1 and lets attempt 2 wrap with
+	// no disclosure. The server has no per-attempt step ledger to check
+	// instead — the same absence of a step-graph list that causes the first
+	// hole causes this one. aihub#686 tracks widening the first hole only;
+	// this second hole is not tracked by any open work item as of this
+	// comment.
+	//
+	// The event half deliberately does NOT read pf_list_work_items' step_state
+	// (domain.WorkItemStepState carries no CompletedSteps field at all) or any
+	// other list-path projection — it reads wi_step_state.version, the same row
+	// this function already locked, directly.
+	//
+	// DEPLOY COUPLING (hub<->client, NOT the DB<->binary order migration 0042
+	// documents): this gate runs in the hub binary (cmd/aihub); the
+	// no_steps_reason escape hatch is sent by the CLIENT binary (cmd/polyforge
+	// -> internal/mcp), a separate distribution vehicle the launcher updates
+	// on its own throttled schedule. Deploying the hub before every caller has
+	// picked up a polyforge build that can send no_steps_reason leaves those
+	// callers unable to answer this gate at all — wrapped becomes unreachable
+	// for them, with only failed/paused (both wrong about the outcome) left.
+	// REQUIRED ORDER: release the client (polyforge) binary first, deploy the
+	// hub second. Same coupling aihub#350 recorded in its PR body for
+	// `derived`; see migration 0042's comment for the fuller writeup.
+	if req.Status == "wrapped" && stepVersion == 0 {
+		codeTypes := make([]string, 0, len(codeProducedEventTypes))
+		for t := range codeProducedEventTypes {
+			codeTypes = append(codeTypes, t)
+		}
+		var hasCodeEvent bool
+		if qErr := tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM agent_events
+			              WHERE work_item_id=$1 AND event_type = ANY($2))`,
+			wi.ID, codeTypes).Scan(&hasCodeEvent); qErr != nil {
+			return dbErr(qErr, "failed to check code-produced events for no-steps-recorded gate")
+		}
+		if hasCodeEvent && (req.NoStepsReason == nil || strings.TrimSpace(*req.NoStepsReason) == "") {
+			return NewErr(ErrConflictNoStepsRecorded,
+				"this work item produced code (a commit/push/pr_opened event exists) but no step "+
+					"was ever opened for it (wi_step_state.version==0); open at least one step for "+
+					"this work item (a single pf_update_step call satisfies this check), or resend "+
+					"complete_attempt with a non-empty no_steps_reason explaining why none were opened")
 		}
 	}
 
@@ -1271,9 +1388,21 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	if req.Status == "wrapped" {
 		derivedJSON, _ = json.Marshal(req.Derived)
 	}
+	// aihub#684: ONE normalized value drives both the column write below and the
+	// attempt_completed payload further down, exactly like derivedJSON does for
+	// `derived` (aihub#350) — TrimSpace-empty and absent both collapse to nil so
+	// the column and the event can never disagree about whether a reason was
+	// recorded. This is a DIFFERENT emptiness rule than the pre-BeginTx guard
+	// above on purpose (see its comment): that one is exact non-empty, this one
+	// is TrimSpace non-empty, because AC1 requires a whitespace-only
+	// no_steps_reason to be refused the same way an absent one is.
+	var noStepsReasonToStore *string
+	if req.Status == "wrapped" && req.NoStepsReason != nil && strings.TrimSpace(*req.NoStepsReason) != "" {
+		noStepsReasonToStore = req.NoStepsReason // store as given, not trimmed
+	}
 	_, err = tx.Exec(ctx, `
-		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2, derived=$3 WHERE id=$4`,
-		req.Status, pauseReason, derivedJSON, req.AttemptID,
+		UPDATE run_attempts SET status=$1, ended_at=clock_timestamp(), pause_reason=$2, derived=$3, no_steps_reason=$4 WHERE id=$5`,
+		req.Status, pauseReason, derivedJSON, noStepsReasonToStore, req.AttemptID,
 	)
 	if err != nil {
 		return dbErr(err, "failed to update run_attempt status")
@@ -1342,6 +1471,13 @@ func FnCompleteAttempt(ctx context.Context, pool *pgxpool.Pool, wiID string, req
 	// dispositioned. Present on wrapped only, like the column.
 	if derivedJSON != nil {
 		evtPayloadMap["derived"] = req.Derived
+	}
+	// aihub#684: same discipline again — driven off noStepsReasonToStore, the
+	// exact value the column write above used, not off req.NoStepsReason
+	// directly, so a whitespace-only-then-rejected input cannot desynchronize
+	// the row from the timeline (AC7).
+	if noStepsReasonToStore != nil {
+		evtPayloadMap["no_steps_reason"] = *noStepsReasonToStore
 	}
 	evtPayload, _ := json.Marshal(evtPayloadMap)
 	// aihub#492: see bestEffortExec. This is the same defect the

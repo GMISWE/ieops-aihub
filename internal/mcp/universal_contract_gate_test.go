@@ -675,6 +675,12 @@ var semanticValuesNotDistinctive = map[string]bool{
 var semanticValuesByTool = map[string]string{
 	"pf_update_step.status":      "completed",
 	"pf_complete_attempt.status": "paused",
+	// ⚠️ no_steps_reason (aihub#684) is the SAME shape one status further along,
+	// and this tool-wide entry cannot also answer it: pause_reason above needs
+	// "paused", no_steps_reason needs "wrapped", and unlike derived (forwarded
+	// by presence on any status) both are REFUSED outright on the wrong one,
+	// so no single value here reaches both. fillerOverridesForProbeTarget below
+	// is the per-probed-parameter escape from this same table's own limit.
 
 	// aihub#499. Until then this parameter needed no entry: it published a
 	// 6-value enum, so probeValue's enum branch handed it a legal value for
@@ -698,6 +704,45 @@ var semanticValuesByTool = map[string]string{
 	"pf_save_artifact.type": domain.MethodologyTypeEnum[0],
 }
 
+// fillerOverridesForProbeTarget is semanticValuesByTool's escape from its own
+// limit, one level further in: that table is keyed per TOOL, so it can pin
+// only one status value no matter how many of a tool's parameters are gated
+// on a different one, and pinning a second value for ONE probe can reopen a
+// THIRD collision among the tool's other FILLER parameters.
+//
+// pf_complete_attempt is exactly that case. no_steps_reason (aihub#684) needs
+// status="wrapped" to reach its own reader, where semanticValuesByTool pins
+// "paused" tool-wide for pause_reason's sake — so probing no_steps_reason
+// needs its OWN "status" override (the entry below). But forcing status to
+// "wrapped" for that one probe then puts pause_reason — filled with its
+// ordinary non-empty generic token, since it is not the parameter under test
+// and has no entry of its own anywhere else — in front of ITS OWN guard,
+// which REFUSES a non-empty value on any status but "paused" (aihub#452),
+// same posture as no_steps_reason's guard one status back. That refusal
+// fires BEFORE no_steps_reason's own check even runs (tools_lifecycle.go
+// checks pause_reason first), so the whole request is refused and
+// no_steps_reason's token never travels — the identical false defect this
+// table's outer level was written to stop, one parameter over. An empty
+// string is what the handler already treats as "not sent"
+// (`if pauseReason != "" { ... }`), so overriding pause_reason's filler to ""
+// for this one probe target removes the collision without touching what is
+// actually under test.
+//
+// Keyed "<tool>.<paramUnderTest>" -> {fillerParamName: overrideValue}, read
+// only for a FILLER parameter (never the one under test itself) while
+// probing the named target; every other probe on the tool, including that
+// filler parameter's own probe, is untouched.
+//
+// Checked non-stale by TestContractProbeTableIsNotStale: both the
+// tool.paramUnderTest key and every filler parameter named inside it must
+// currently be published.
+var fillerOverridesForProbeTarget = map[string]map[string]any{
+	"pf_complete_attempt.no_steps_reason": {
+		"status":       "wrapped",
+		"pause_reason": "",
+	},
+}
+
 // probeValue invents the value one parameter is probed with, and returns the
 // TOKEN that proves that value travelled — empty when the value cannot carry
 // one, which routes the verdict to key-presence plus a control.
@@ -706,7 +751,14 @@ var semanticValuesByTool = map[string]string{
 // That direction is the whole point: a silently unprobed parameter is exactly
 // the hole this gate exists to close, and it would be invisible — the gate would
 // report green over a parameter it never sent.
-func probeValue(t *testing.T, tool string, p contractParam, underTest bool) (any, string) {
+//
+// underTestName is the parameter the CALLER (probeArgs/probeArgsFull) is
+// building a request to probe, which is not always p.Name: most calls here
+// are for a FILLER parameter on the same request, and it is exactly those
+// filler calls fillerOverridesForProbeTarget needs to see the target of, so
+// a filler value can be picked for the probe it is filling for rather than
+// for the tool in general.
+func probeValue(t *testing.T, tool string, p contractParam, underTest bool, underTestName string) (any, string) {
 	t.Helper()
 	prefix := fillTokenPrefix
 	if underTest {
@@ -714,6 +766,13 @@ func probeValue(t *testing.T, tool string, p contractParam, underTest bool) (any
 	}
 	tok := prefix + p.Name
 
+	if !underTest {
+		if overrides, ok := fillerOverridesForProbeTarget[tool+"."+underTestName]; ok {
+			if v, ok2 := overrides[p.Name]; ok2 {
+				return v, ""
+			}
+		}
+	}
 	if v, ok := semanticValuesByTool[tool+"."+p.Name]; ok {
 		if semanticValuesNotDistinctive[p.Name] {
 			return v, ""
@@ -827,7 +886,7 @@ func probeArgsFull(t *testing.T, tool string, params map[string]contractParam, u
 				continue
 			}
 		}
-		v, tok := probeValue(t, tool, params[name], name == underTest)
+		v, tok := probeValue(t, tool, params[name], name == underTest, underTest)
 		args[name] = v
 		added[name] = true
 		if name == underTest {
@@ -848,7 +907,7 @@ func probeArgs(t *testing.T, tool string, params map[string]contractParam, under
 		if !p.Required && name != underTest {
 			continue
 		}
-		v, tok := probeValue(t, tool, p, name == underTest)
+		v, tok := probeValue(t, tool, p, name == underTest, underTest)
 		args[name] = v
 		if name == underTest {
 			token = tok
@@ -1893,6 +1952,16 @@ var serverNamesNoToolCanReach = map[string]string{
 		"would advertise a parameter whose only reachable effect is its own rejection, aihub#394's " +
 		"signature via aihub#530's precedent. It stays published on pf_complete_attempt and " +
 		"pf_wrap, the two tools that can reach the wrapped transition it exists for.",
+	"handlePauseAttempt.no_steps_reason": "the fourth field of the same shared struct (aihub#684), " +
+		"and REFUSED rather than inert on this route for the identical reason as derived just " +
+		"above: handlePauseAttempt forces Status to \"paused\" and FnCompleteAttempt's " +
+		"pre-transaction guard answers 400 to a non-empty no_steps_reason on any status but " +
+		"\"wrapped\" — it is the escape hatch for a gate that only fires on the wrapped " +
+		"transition, and a pause is not one. An empty value states nothing and is ignored. " +
+		"Publishing it on pf_pause_attempt would advertise a parameter whose only reachable " +
+		"effect is its own rejection, aihub#394's signature via aihub#530's precedent. It stays " +
+		"published on pf_complete_attempt and pf_wrap, the two tools that can reach the wrapped " +
+		"transition it exists for.",
 }
 
 // TestContractEveryServerReadNameIsReachableFromSomeTool is G4.
@@ -2153,6 +2222,21 @@ func TestContractProbeTableIsNotStale(t *testing.T) {
 		if !publishedByTool[key] {
 			t.Errorf("semanticValuesByTool names %q, which that tool does not publish any more "+
 				"— the override is dead and the global value silently applies again", key)
+		}
+	}
+	for key, overrides := range fillerOverridesForProbeTarget {
+		if !publishedByTool[key] {
+			t.Errorf("fillerOverridesForProbeTarget names %q, which that tool does not publish any "+
+				"more — the override is dead and the ordinary filler value silently applies again "+
+				"while probing that parameter", key)
+		}
+		tool := strings.SplitN(key, ".", 2)[0]
+		for fillerName := range overrides {
+			if !publishedByTool[tool+"."+fillerName] {
+				t.Errorf("fillerOverridesForProbeTarget[%q] overrides filler %q, which %q does not "+
+					"publish any more — the override is dead and that filler's ordinary value "+
+					"silently applies again", key, fillerName, tool)
+			}
 		}
 	}
 	for name := range exclusiveParams {

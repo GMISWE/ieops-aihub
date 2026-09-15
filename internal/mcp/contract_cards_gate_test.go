@@ -3123,7 +3123,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_cancel_work_item":        {Candidates: 12, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
 	"pf_claim_work_item":         {Candidates: 29, Cited: 26, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	"pf_commit":                  {Candidates: 14, Cited: 12, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_complete_attempt":        {Candidates: 34, Cited: 34, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_complete_attempt":        {Candidates: 38, Cited: 38, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_create_api_key":          {Candidates: 8, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_create_dependency":       {Candidates: 9, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_create_project":          {Candidates: 12, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
@@ -3170,7 +3170,7 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_update_user":       {Candidates: 24, Cited: 18, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_update_work_item":  {Candidates: 66, Cited: 54, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 12},
 	"pf_whoami":            {Candidates: 13, Cited: 11, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_wrap":              {Candidates: 7, Cited: 7, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_wrap":              {Candidates: 9, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 }
 
 const (

@@ -110,7 +110,7 @@ func TestResolveModel(t *testing.T) {
 // TestGenerateRoles_PiWritesAllFiles exercises the full pipeline end to end
 // for pi: LoadRoles -> ResolveModel (fake probe standing in for pi's live
 // `pi --list-models` catalog check) -> RenderPiAgentFiles -> write to disk.
-// Asserts all 5 pf-<role>.md files land, one resolved model makes it into
+// Asserts all 5 step-<role>.md files land, one resolved model makes it into
 // frontmatter verbatim, and the read-only/write-capable split still holds
 // post-generation (explorer/reviewer carry `tools:`, the rest do not).
 //
@@ -136,7 +136,7 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
-	for _, name := range []string{"pf-executor.md", "pf-operator.md", "pf-explorer.md", "pf-reviewer.md", "pf-designer.md"} {
+	for _, name := range []string{"step-executor.md", "step-operator.md", "step-explorer.md", "step-reviewer.md", "step-designer.md"} {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -144,20 +144,20 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 			continue
 		}
 		content := string(data)
-		if name == "pf-executor.md" {
+		if name == "step-executor.md" {
 			if !strings.Contains(content, "model: anthropic/claude-sonnet-4-5") {
-				t.Errorf("pf-executor.md: expected resolved model in frontmatter, got:\n%s", content)
+				t.Errorf("step-executor.md: expected resolved model in frontmatter, got:\n%s", content)
 			}
 		}
 	}
 
-	explorer, _ := os.ReadFile(filepath.Join(dir, "pf-explorer.md"))
+	explorer, _ := os.ReadFile(filepath.Join(dir, "step-explorer.md"))
 	if !strings.Contains(string(explorer), "tools:") {
-		t.Errorf("pf-explorer.md (read_only role) should carry a tools: allowlist")
+		t.Errorf("step-explorer.md (read_only role) should carry a tools: allowlist")
 	}
-	operator, _ := os.ReadFile(filepath.Join(dir, "pf-operator.md"))
+	operator, _ := os.ReadFile(filepath.Join(dir, "step-operator.md"))
 	if strings.Contains(string(operator), "tools:") {
-		t.Errorf("pf-operator.md (write-capable role) should NOT carry a tools: line")
+		t.Errorf("step-operator.md (write-capable role) should NOT carry a tools: line")
 	}
 }
 
@@ -195,7 +195,7 @@ func TestGenerateRoles_CodexValidatesAgainstProbe(t *testing.T) {
 // generation now validates every candidate against a live catalog probe too
 // (aihub#642 code_review escalation) rather than writing whatever model ID
 // was configured unconditionally. A candidate the probe does not report as
-// present must NOT be written into the rendered pf-<role>.md's frontmatter.
+// present must NOT be written into the rendered step-<role>.md's frontmatter.
 func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 	dir := t.TempDir()
 	mc := &config.MachineConfig{
@@ -211,12 +211,12 @@ func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "pf-executor.md"))
+	data, err := os.ReadFile(filepath.Join(dir, "step-executor.md"))
 	if err != nil {
-		t.Fatalf("pf-executor.md not written: %v", err)
+		t.Fatalf("step-executor.md not written: %v", err)
 	}
 	if strings.Contains(string(data), "model:") {
-		t.Errorf("pf-executor.md: candidate not in the probe's catalog must NOT be emitted, got:\n%s", data)
+		t.Errorf("step-executor.md: candidate not in the probe's catalog must NOT be emitted, got:\n%s", data)
 	}
 }
 
@@ -384,7 +384,7 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 			var modelMarker string
 			switch harness {
 			case "pi":
-				fileName, modelMarker = "pf-executor.md", "model:"
+				fileName, modelMarker = "step-executor.md", "model:"
 			case "codex":
 				fileName, modelMarker = "step-executor.toml", "model ="
 			case "opencode":
@@ -877,8 +877,8 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 	mc := &config.MachineConfig{}
 	probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
 
-	orphan := filepath.Join(dir, "pf-zombie.md")
-	if err := os.WriteFile(orphan, []byte("---\nname: pf-zombie\n---\n"), 0o644); err != nil {
+	orphan := filepath.Join(dir, "step-zombie.md")
+	if err := os.WriteFile(orphan, []byte("---\nname: step-zombie\n---\n"), 0o644); err != nil {
 		t.Fatalf("seed orphan: %v", err)
 	}
 	// Same directory, not this generator's naming: must be left alone AND
@@ -894,12 +894,12 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, "pf-zombie.md") {
-		t.Errorf("stderr does not name the orphan pf-zombie.md; a deleted role's agent file stays "+
+	if !strings.Contains(stderr, "step-zombie.md") {
+		t.Errorf("stderr does not name the orphan step-zombie.md; a deleted role's agent file stays "+
 			"dispatchable and nothing says so. got:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "no longer exists") {
-		t.Errorf("stderr does not say WHY pf-zombie.md is a problem; got:\n%s", stderr)
+		t.Errorf("stderr does not say WHY step-zombie.md is a problem; got:\n%s", stderr)
 	}
 	// Warned, never removed.
 	if _, err := os.Stat(orphan); err != nil {
@@ -907,7 +907,7 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 			"generator must not remove files it did not write", err)
 	}
 	// Files it DID just write are not orphans.
-	if strings.Contains(stderr, "pf-executor.md looks like") {
+	if strings.Contains(stderr, "step-executor.md looks like") {
 		t.Errorf("a file generated by this very run was reported as an orphan; got:\n%s", stderr)
 	}
 	// A file that does not match the naming this generator owns is not its business.
@@ -955,12 +955,12 @@ func TestGenerateRoles_WarnsBareModelIDAndUnknownHarness(t *testing.T) {
 	// A generator that warns twice and then emits the id anyway would leave the
 	// operator with a file that reads as configured and does not dispatch --
 	// exactly what aihub#642 AC7 exists to prevent (aihub#676 review B1).
-	executor, readErr := os.ReadFile(filepath.Join(dir, "pf-executor.md"))
+	executor, readErr := os.ReadFile(filepath.Join(dir, "step-executor.md"))
 	if readErr != nil {
-		t.Fatalf("pf-executor.md not written: %v", readErr)
+		t.Fatalf("step-executor.md not written: %v", readErr)
 	}
 	if strings.Contains(string(executor), "model:") {
-		t.Errorf("pf-executor.md declares a model despite the candidate being a refused bare id:\n%s", executor)
+		t.Errorf("step-executor.md declares a model despite the candidate being a refused bare id:\n%s", executor)
 	}
 	// And the provenance is attached, so an operator with several tables knows
 	// which one to edit.

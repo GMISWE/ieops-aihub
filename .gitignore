@@ -264,7 +264,7 @@ __marimo__/
 # nothing loads them. The entry stays because the subcommand still writes here.
 #
 # Claude Code's step-<role>.md counterparts ARE committed (go:generate, not
-# boot-time); pi's pf-<role>.md and opencode's step-<role>.md counterparts are
-# written out of tree by their own install scripts. None of the three needs an
-# entry here.
+# boot-time); pi's and opencode's step-<role>.md counterparts are written out of
+# tree by their own install scripts (pi's were pf-<role>.md until aihub#682).
+# None of the three needs an entry here.
 /plugins/polyforge/.codex-plugin/agents/

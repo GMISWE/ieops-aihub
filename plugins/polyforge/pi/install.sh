@@ -83,8 +83,8 @@ place() {
 # dispatch as Claude Code's `Agent(subagent_type="polyforge:step-<role>", prompt=...)`, and this
 # function shipped that line to pi unchanged while printing "no modification needed" -- a claim
 # nothing checked. Under pi the tool is `subagent`, both argument names differ (`agent`/`task`),
-# and the agent this installer generates two steps below is `pf-<role>`, so every coordinate of
-# that line was wrong here.
+# and the agent this installer generates two steps below is the BARE `step-<role>` rather than
+# cc's `polyforge:`-namespaced form, so every coordinate of that line was wrong here.
 #
 # The fix is deliberately NOT a sed in this function. Two of the other three harnesses have no
 # installer stage at all to put one in -- .codex-plugin/plugin.json points codex at "./skills/"
@@ -157,7 +157,7 @@ fi
 say "recorded pluginRoot=$PLUGIN_ROOT"
 
 step "agent definitions -> $PI_DIR/agents/"
-# aihub#642: pf-<role>.md is no longer a static tree copied out of the
+# aihub#642: step-<role>.md is no longer a static tree copied out of the
 # checkout -- it's GENERATED per machine from internal/roles/definitions/*.yaml
 # + this machine's ~/.polyforge/config.toml [roles.tiers] candidates, via the
 # `polyforge roles generate pi` subcommand (internal/cli/roles_generate.go).
@@ -175,27 +175,47 @@ if [ -z "$POLYFORGE_BIN" ] && [ -x "$PLUGIN_ROOT/bin/polyforge" ]; then
   POLYFORGE_BIN="$PLUGIN_ROOT/bin/polyforge"
 fi
 mkdir -p "$PI_DIR/agents"
-# Stale leftovers from BEFORE aihub#642's rewrite above: this step used to
-# copy plugins/polyforge/pi/agents/*.md verbatim, and that tree shipped
-# exactly two files, pf-execute.md and pf-explore.md -- names the generator
-# above does not use (internal/roles/definitions/*.yaml names these roles
-# "executor" and "explorer", not "execute"/"explore", so it writes
-# pf-executor.md/pf-explorer.md/... instead). roles generate pi only WRITES
-# files under its own names, so it never touches these old ones; a machine
-# upgrading from a pre-aihub#642 install would otherwise keep them forever,
-# alongside their differently-named replacements, forever presenting pi with
-# both the old and the new definition for the same two roles. Retired the
-# same way the .agents/skills step further down does: moved aside rather than
-# deleted outright, in case a user had layered local edits onto one.
-for stale in pf-execute.md pf-explore.md; do
+# Leftovers under agent names this installer no longer generates. THE MECHANISM,
+# which is the same one both times it has been needed: `roles generate pi` only
+# ever WRITES files under its own current names, so it never touches a file
+# named anything else. Renaming a generated agent therefore does not replace the
+# old file on an upgrading machine, it ADDS a second one beside it -- and pi
+# loads every .md in this directory, so it would then hold two definitions of
+# the same role under two dispatchable names. Nothing warns; the stale one just
+# keeps working, with whatever prompt and model it was generated with however
+# many versions ago.
+#
+# Two generations of names have to be retired here:
+#
+#   pf-execute.md / pf-explore.md      pre-aihub#642. Back then this step copied
+#                                      plugins/polyforge/pi/agents/*.md verbatim
+#                                      and that tree shipped exactly those two
+#                                      files. aihub#642 replaced the tree with
+#                                      the generator and renamed the roles
+#                                      ("executor"/"explorer", not
+#                                      "execute"/"explore").
+#   pf-<role>.md (five)                pre-aihub#682. pi was the only one of the
+#                                      four harnesses whose agents were named
+#                                      pf-<role>; cc, codex and opencode were
+#                                      all already step-<role>. aihub#682 made
+#                                      pi's match, so every file the aihub#642
+#                                      generation wrote is now an old name too.
+#
+# Both lists stay forever: a machine that skipped a few releases upgrades
+# straight from the oldest state, and a name dropped from here is a stale agent
+# nothing will ever clean up. Retired the same way the .agents/skills step
+# further down does -- moved aside rather than deleted outright, in case a user
+# had layered local edits onto one.
+for stale in pf-execute.md pf-explore.md \
+             pf-executor.md pf-explorer.md pf-operator.md pf-reviewer.md pf-designer.md; do
   if [ -e "$PI_DIR/agents/$stale" ]; then
     mv "$PI_DIR/agents/$stale" "$PI_DIR/agents/$stale.bak-$STAMP"
-    say "retired stale $stale (pre-aihub#642 naming) -> $stale.bak-$STAMP"
+    say "retired stale $stale (superseded agent naming) -> $stale.bak-$STAMP"
   fi
 done
 if [ -n "$POLYFORGE_BIN" ]; then
   if "$POLYFORGE_BIN" roles generate pi --out "$PI_DIR/agents"; then
-    say "generated pf-*.md agent definitions into $PI_DIR/agents/"
+    say "generated step-*.md agent definitions into $PI_DIR/agents/"
   else
     warn "polyforge roles generate pi failed -- $PI_DIR/agents/ may be missing or stale"
     warn "re-run manually once fixed: $POLYFORGE_BIN roles generate pi --out \"$PI_DIR/agents\""
@@ -227,7 +247,7 @@ else
     [ -d "$SUB_SRC/prompts" ] && cp -p "$SUB_SRC"/prompts/*.md "$PI_DIR/prompts/" 2>/dev/null || true
     say "installed subagent extension from $SUB_SRC"
   else
-    warn "could not locate pi's examples/extensions/subagent — the pf-* agents will not be"
+    warn "could not locate pi's examples/extensions/subagent — the step-* agents will not be"
     warn "dispatchable until it is copied to $PI_DIR/extensions/subagent/"
   fi
 fi
@@ -367,7 +387,8 @@ cat <<EOF
 what this touches
   $PI_DIR/extensions/polyforge/   hook bridge (pi events -> polyforge's bash hooks)
   $PI_DIR/extensions/subagent/    pi's own subagent tool
-  $PI_DIR/agents/pf-*.md          polyforge agent definitions (generated per machine, aihub#642)
+  $PI_DIR/agents/step-*.md        polyforge agent definitions (generated per machine, aihub#642;
+                                  renamed from pf-*.md by aihub#682, old names retired on upgrade)
   $PI_DIR/skills/                 the polyforge skills — the copy pi loads by default
   $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings
 $PROJECT_SKILLS_LINE

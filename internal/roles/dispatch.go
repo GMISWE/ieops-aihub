@@ -29,13 +29,24 @@ import (
 //
 // WHY THIS TABLE IS IN internal/roles AND NOT ONLY IN THE MARKDOWN
 // ----------------------------------------------------------------
-// Each harness's agent IDENTITY is already decided in this package — render_cc.go writes
-// "step-<role>", render_pi.go writes "pf-<role>", render_codex.go and render_opencode.go write
-// "step-<role>". A dispatch table hand-written in markdown would be a SECOND copy of that
-// decision, free to drift: change render_pi.go's prefix and a markdown-only gate stays green
-// while every pi dispatch starts naming an agent that does not exist. The renderers below read
-// their name from this table, and internal/cli/engine_native_dispatch_model_test.go pins the
-// markdown against it — so a renamed agent file forces the documented dispatch to move with it.
+// Each harness's agent IDENTITY is already decided in this package — render_cc.go,
+// render_pi.go, render_codex.go and render_opencode.go all write "step-<role>" (pi was the last
+// holdout at "pf-<role>"; aihub#682 retired that prefix, which was a leftover of the order the
+// four adapters landed in rather than a decision). A dispatch table hand-written in markdown
+// would be a SECOND copy of that decision, free to drift: change one renderer's prefix and a
+// markdown-only gate stays green while every dispatch under that harness starts naming an agent
+// that does not exist. The renderers below read their name from this table, and
+// internal/cli/engine_native_dispatch_model_test.go pins the markdown against it — so a renamed
+// agent file forces the documented dispatch to move with it.
+//
+// ⚠️ The two markdown copies are NOT pinned equally hard, and aihub#682 measured the gap rather
+// than assuming it away. engine-native-details.md's §0f row is compared to AgentIDFormat
+// byte-for-byte. engine.native.md's one-line substitution rule was only required to state the
+// harness name and its id on the SAME line — which the PRE-aihub#682 line
+// "id `pf-<role>` (pi) / `step-<role>` (codex, opencode)" satisfies even after the rename,
+// because codex's id sits on it too. Reverting that line alone was measured GREEN. aihub#682
+// added staleIDFormsOnLine in that test to close it: no line may carry an id form that is no
+// harness's AgentIDFormat. Both copies now move when this table does.
 
 // HarnessDispatch is one harness's native way to dispatch a polyforge step agent.
 //
@@ -99,8 +110,8 @@ var harnessDispatches = []HarnessDispatch{
 	},
 	{
 		Harness:         "pi",
-		AgentNameFormat: "pf-%s",
-		AgentIDFormat:   "pf-%s",
+		AgentNameFormat: "step-%s",
+		AgentIDFormat:   "step-%s",
 		Call:            `subagent(agent=<id>, task=<§0b>)`,
 		Note: "pi's own subagent extension, which plugins/polyforge/pi/install.sh installs from " +
 			"pi's examples/extensions/subagent. Its tool is named `subagent`, and `agent` + " +
@@ -108,8 +119,9 @@ var harnessDispatches = []HarnessDispatch{
 			"Type.Optional because `tasks` and `chain` are the parallel and sequential " +
 			"alternatives, validated as \"provide exactly one mode\" — inside those two array " +
 			"shapes the same pair IS required). `agents.ts` resolves `agent` against each file's " +
-			"frontmatter `name:`, which render_pi.go writes as pf-<role>. NOTE all three of " +
-			"Claude Code's spellings differ here: the tool name, both argument names, and the id.",
+			"frontmatter `name:`, which render_pi.go writes as step-<role> (aihub#682 — it wrote " +
+			"pf-<role> until then, the only row of the four that did). NOTE all three of Claude " +
+			"Code's spellings still differ here: the tool name, both argument names, and the id.",
 	},
 	{
 		Harness:         "opencode",

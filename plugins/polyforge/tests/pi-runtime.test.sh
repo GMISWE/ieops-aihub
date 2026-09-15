@@ -785,6 +785,18 @@ else
   retire_seed_names="pf-execute.md pf-explore.md pf-executor.md pf-explorer.md pf-operator.md pf-reviewer.md pf-designer.md"
   # ...and the names the installer must NOT touch: the ones it generates itself.
   keep_seed_names="step-executor.md step-reviewer.md"
+  # 🔴 The negative control's ANTI-VACUITY PROBE, and it must be a step-*.md name
+  # the generator NEVER writes. Measured: seeding the marker into step-executor.md
+  # instead proves nothing, because `roles generate pi` rewrites that file
+  # unconditionally -- the marker is gone afterwards even on a correct installer
+  # (verified: grep -c of the marker in a freshly generated step-executor.md is 0).
+  # An existence-only check on a generated name is therefore satisfied by the
+  # GENERATOR'S OWN OUTPUT, not by the seed surviving, and a mutant that deletes
+  # every .md in the directory before generating passes it. A name outside the
+  # role catalog is the only seed whose bytes a correct run leaves alone.
+  # (`roles generate` prints an orphan WARNING about it and exits 0 -- expected,
+  # and asserted on below by the run's exit status rather than its stderr.)
+  keep_probe_name="step-local-note.md"
 
   agent_retire_run() {   # $1 = arm dir under the sandbox; $2.. = file names to seed
     local armdir="$agent_retire_sandbox/$1"
@@ -854,25 +866,22 @@ else
   fi
 
   # --- negative control: a dir holding ONLY current names loses nothing -----
-  if agent_retire_run clean $keep_seed_names; then
+  if agent_retire_run clean $keep_seed_names "$keep_probe_name"; then
     ok "agent retire arm: negative control run succeeded over an already-current agents dir"
   else
     bad "agent retire arm: negative control run failed over an already-current agents dir:"
     sed 's/^/      /' "$agent_retire_sandbox/clean/install.log" >&2
   fi
   clean_agents="$agent_retire_sandbox/clean/agent/agents"
-  # Anti-vacuity FIRST: if the seeded current-name files are not there any more,
-  # a zero .bak count below would mean "there was nothing to back up", which is
-  # the exact false green this control was rewritten to close.
-  n_kept=0
-  for n in $keep_seed_names; do
-    [ -f "$clean_agents/$n" ] && n_kept=$((n_kept + 1))
-  done
-  n_keep_expected="$(printf '%s\n' $keep_seed_names | wc -l | tr -d ' ')"
-  if [ "$n_kept" -eq "$n_keep_expected" ]; then
-    ok "agent retire arm: negative control still holds all $n_keep_expected current-name files, so the .bak count below is not vacuous"
+  # Anti-vacuity FIRST, and it asserts BYTES not existence: if the probe is gone
+  # (or was rewritten), a zero .bak count below would mean "there was nothing
+  # left to back up", which is a false green rather than a pass. Existence alone
+  # is not enough here -- see keep_probe_name's comment for the measurement.
+  if [ -f "$clean_agents/$keep_probe_name" ] \
+     && grep -q 'LOCALLY EDITED BY THE USER' "$clean_agents/$keep_probe_name"; then
+    ok "agent retire arm: negative control left $keep_probe_name byte-for-byte alone, so the .bak count below is not vacuous"
   else
-    bad "agent retire arm: negative control lost $((n_keep_expected - n_kept)) of its current-name files — the installer moved aside a name it generates itself"
+    bad "agent retire arm: negative control lost or rewrote $keep_probe_name — the installer touched a step-*.md it does not own, so a zero .bak count below would mean nothing"
   fi
   n_stray="$(find "$clean_agents" -maxdepth 1 -name '*.bak-*' 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$n_stray" -eq 0 ]; then

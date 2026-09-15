@@ -4957,6 +4957,7 @@ jobs:
                       "PASS: agent retire arm: no pf-*.md is left dispatchable" \
                       "PASS: agent retire arm: all 7 retired names have a .bak-<stamp> beside them" \
                       "PASS: agent retire arm: the retired file's own content survived intact" \
+                      "PASS: agent retire arm: negative control left step-local-note.md byte-for-byte alone" \
                       "PASS: agent retire arm: negative control produced NO .bak file at all" \
                       "ALL PASS"; do
             grep -qF -- "$want" pi_runtime.log \
@@ -4988,13 +4989,16 @@ jobs:
           # (verified), but an environment break in it now reddens this gate with several
           # FAILs instead of SKIPping past.
           #
-          # Floor raised 44 -> 50 by aihub#682, which added the agent-retire arm: six PASS
-          # lines that do not depend on pi being installed (four in the positive arm --
-          # install succeeded, no pf-*.md survives, every retired name has a .bak, the
-          # backup still holds the user's own bytes -- and two in the negative control).
-          # A seventh, "the replacement step-executor.md was generated", needs the polyforge
-          # binary the suite builds earlier and so SKIPs where go is unavailable; it is
-          # deliberately excluded from the floor and from the named checks above.
+          # Floor raised 44 -> 50 by aihub#682, which added the agent-retire arm: SEVEN PASS
+          # lines that do not depend on pi being installed -- four in the positive arm
+          # (install succeeded, no pf-*.md survives, every retired name has a .bak, the
+          # backup still holds the user's own bytes) and three in the negative control
+          # (install succeeded, the un-owned probe file is byte-for-byte intact, no .bak
+          # was produced). An eighth, "the replacement step-executor.md was generated",
+          # needs the polyforge binary the suite builds earlier and so SKIPs where go is
+          # unavailable; it is excluded from the floor and from the named checks above.
+          # 50 = 44 + 6, i.e. one line of slack below the seven actually added, matching the
+          # slack every previous raise of this floor kept. Measured 71 PASS with pi hidden.
           n=$(grep -c '^  PASS: ' pi_runtime.log || true)
           [ "${n:-0}" -ge 50 ] \
             || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 50 — checks have gone missing"; exit 1; }

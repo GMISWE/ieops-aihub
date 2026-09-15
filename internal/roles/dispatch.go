@@ -37,8 +37,16 @@ import (
 // markdown-only gate stays green while every dispatch under that harness starts naming an agent
 // that does not exist. The renderers below read their name from this table, and
 // internal/cli/engine_native_dispatch_model_test.go pins the markdown against it — so a renamed
-// agent file forces the documented dispatch to move with it. aihub#682's rename was exactly that
-// walk: one literal changed here, and the two markdown rows went red until they followed.
+// agent file forces the documented dispatch to move with it.
+//
+// ⚠️ The two markdown copies are NOT pinned equally hard, and aihub#682 measured the gap rather
+// than assuming it away. engine-native-details.md's §0f row is compared to AgentIDFormat
+// byte-for-byte. engine.native.md's one-line substitution rule was only required to state the
+// harness name and its id on the SAME line — which the PRE-aihub#682 line
+// "id `pf-<role>` (pi) / `step-<role>` (codex, opencode)" satisfies even after the rename,
+// because codex's id sits on it too. Reverting that line alone was measured GREEN. aihub#682
+// added staleIDFormsOnLine in that test to close it: no line may carry an id form that is no
+// harness's AgentIDFormat. Both copies now move when this table does.
 
 // HarnessDispatch is one harness's native way to dispatch a polyforge step agent.
 //

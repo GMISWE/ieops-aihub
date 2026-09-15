@@ -209,7 +209,7 @@ var (
 
 	// harnessRowRe builds the matcher for ONE harness's row of §0f's harness table (aihub#670),
 	// e.g.
-	//   | pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |
+	//   | pi | `step-<role>` | `subagent(agent=<id>, task=<§0b>)` |
 	// Group 1 is the agent-id cell (backticked, so a row that lost its formatting does not
 	// match at all rather than matching loosely), group 2 the dispatch-call cell, which is free
 	// text because the "no dispatchable agent" row is prose rather than a call.
@@ -749,15 +749,15 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		// Name and id in the same DOCUMENT but on different lines must not satisfy the pairing.
 		// This is the fixture that goes red if the live check is relaxed to whole-document.
 		if harnessNamePairedWithID(
-			"# pi is one of the four harnesses.\n# unrelated\n# the id is `pf-<role>`.",
-			"pi", "pf-<role>") {
+			"# pi is one of the four harnesses.\n# unrelated\n# the id is `step-<role>`.",
+			"pi", "step-<role>") {
 			t.Error("harnessNamePairedWithID accepted a name and an id on DIFFERENT lines — a " +
 				"reader of that text still cannot tell which id is theirs, which is the whole " +
 				"question the rule exists to answer")
 		}
 		// ...and the positive control, so "nothing paired" cannot mean "the matcher is dead".
-		if !harnessNamePairedWithID("# off cc: id `pf-<role>` (pi) / `step-<role>`.",
-			"pi", "pf-<role>") {
+		if !harnessNamePairedWithID("# off cc: id `step-<role>` (pi, codex, opencode).",
+			"pi", "step-<role>") {
 			t.Error("harnessNamePairedWithID rejected a correctly paired line; every pairing " +
 				"assertion above would then pass for the wrong reason")
 		}

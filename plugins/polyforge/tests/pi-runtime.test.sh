@@ -190,8 +190,8 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "== agent definitions are installable and well-formed =="
-# aihub#642: pf-<role>.md is no longer a static tree committed to this repo --
-# it is GENERATED per machine by `polyforge roles generate pi`
+# aihub#642: the per-role agent files are no longer a static tree committed to
+# this repo -- they are GENERATED per machine by `polyforge roles generate pi`
 # (internal/cli/roles_generate.go) from internal/roles/definitions/*.yaml plus
 # this machine's ~/.polyforge/config.toml [roles.tiers] candidates. So this
 # check builds the CLI (or reuses one already on PATH / at $root/bin/polyforge)
@@ -254,7 +254,7 @@ fi
 if [ -n "$generated_agents" ]; then
   missing_roles=""
   for role in executor operator explorer reviewer designer; do
-    [ -f "$generated_agents/pf-$role.md" ] || missing_roles="$missing_roles pf-$role.md"
+    [ -f "$generated_agents/step-$role.md" ] || missing_roles="$missing_roles step-$role.md"
   done
   if [ -z "$missing_roles" ]; then
     ok "generator wrote all 5 role agent files (executor/operator/explorer/reviewer/designer)"
@@ -342,12 +342,12 @@ else
       explorer|reviewer) want_tools=yes ;;
       *)                 want_tools=no ;;
     esac
-    role_out="$(python3 - "$generated_agents/pf-$role.md" "$role" "$want_tools" "$pi_tools_dir" "$root/pi/mcp.json" <<'PY'
+    role_out="$(python3 - "$generated_agents/step-$role.md" "$role" "$want_tools" "$pi_tools_dir" "$root/pi/mcp.json" <<'PY'
 import json, os, re, sys
 path, role, want_tools, pi_tools_dir, mcp_path = sys.argv[1:6]
 
 def emit(v, m):
-    print("%s|pf-%s.md: %s" % (v, role, m))
+    print("%s|step-%s.md: %s" % (v, role, m))
 
 if not os.path.isfile(path):
     emit("FAIL", "file is missing"); raise SystemExit
@@ -724,6 +724,163 @@ else
     ok "retire arm: the backup is a sibling of .agents/skills, so pi finds no second skills root"
   fi
   rm -rf "$retire_sandbox"
+  trap - EXIT
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== the installer retires agent files under names it no longer generates =="
+# aihub#682 renamed pi's generated agents pf-<role>.md -> step-<role>.md. The
+# mechanism that makes a rename dangerous here is that `polyforge roles generate
+# pi` only ever WRITES files under its own CURRENT names -- it never deletes and
+# never renames -- while pi loads EVERY .md in ~/.pi/agent/agents/. So on an
+# upgrading machine the rename does not replace the five old files, it adds five
+# new ones beside them: two dispatchable definitions per role, the stale one
+# carrying whatever prompt, model and tool policy it was generated with however
+# many releases ago, and nothing printing a word about it.
+#
+# This is the SECOND time that exact shape has occurred (aihub#642 was the
+# first, renaming pf-execute.md/pf-explore.md), which is why install.sh carries
+# an explicit retire list covering both generations, and why it is asserted here
+# rather than assumed.
+#
+# Two arms, and the NEGATIVE one is the load-bearing half: an installer that
+# backed up indiscriminately -- a `mv` over a glob, a place() applied to the
+# whole directory -- satisfies the positive arm perfectly while moving aside
+# every agent file it finds on every run, including the ones it just generated.
+#
+# 🔴 THE NEGATIVE ARM MUST SEED A CURRENT NAME, and this was measured, not
+# reasoned. The first version of it ran the installer over an EMPTY agents dir
+# and asserted no .bak appeared. The indiscriminate mutant above passes that:
+# install.sh mkdir -p's the directory immediately before the retire loop, so on
+# a first install there is nothing for a glob to match, and `for p in dir/*.md`
+# with nullglob off yields the unexpanded pattern, which `[ -e ]` rejects. The
+# control was green against a genuinely broken installer -- it was measuring
+# "an empty directory has no files in it". Seeding a file under a name the
+# installer is SUPPOSED to leave alone is what makes the two implementations
+# distinguishable.
+#
+# Neither arm needs pi. Neither needs the polyforge binary for the RETIREMENT
+# itself (that loop runs before the generate call), so both arms' assertions run
+# on any machine; only the "and the replacement actually arrived" check needs
+# one, and it SKIPs when the generator did not run earlier in this suite.
+agent_retire_sandbox="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$agent_retire_sandbox" ] || [ ! -d "$agent_retire_sandbox" ]; then
+  bad "could not create a temp dir for the agent-retire arm"
+else
+  trap 'rm -rf "$agent_retire_sandbox"' EXIT
+  # install.sh finds the generator with `command -v polyforge`, so put THIS
+  # worktree's build first on PATH rather than letting it reach whatever is
+  # installed on the box (which auto-updates daily and may predate this change
+  # -- the same trap the "agent definitions" section above documents).
+  gen_path_dir=""
+  if [ -n "${polyforge_bin:-}" ] && [ -x "${polyforge_bin:-}" ]; then
+    gen_path_dir="$agent_retire_sandbox/bin"
+    mkdir -p "$gen_path_dir"
+    cp -p "$polyforge_bin" "$gen_path_dir/polyforge"
+  fi
+
+  # Seeds one name from EACH retired generation, so dropping either list from
+  # install.sh reddens this arm.
+  retire_seed_names="pf-execute.md pf-explore.md pf-executor.md pf-explorer.md pf-operator.md pf-reviewer.md pf-designer.md"
+  # ...and the names the installer must NOT touch: the ones it generates itself.
+  keep_seed_names="step-executor.md step-reviewer.md"
+
+  agent_retire_run() {   # $1 = arm dir under the sandbox; $2.. = file names to seed
+    local armdir="$agent_retire_sandbox/$1"
+    shift
+    mkdir -p "$armdir/agent/agents" "$armdir/agent/npm/node_modules/pi-mcp-adapter" "$armdir/proj"
+    printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+      > "$armdir/agent/npm/node_modules/pi-mcp-adapter/package.json"
+    local n
+    for n in "$@"; do
+      printf -- '---\nname: %s\n---\nLOCALLY EDITED BY THE USER\n' "${n%.md}" \
+        > "$armdir/agent/agents/$n"
+    done
+    if [ -n "$gen_path_dir" ]; then
+      env PI_AGENT_DIR="$armdir/agent" PATH="$gen_path_dir:$PATH" \
+        bash "$root/pi/install.sh" "$armdir/proj" > "$armdir/install.log" 2>&1
+    else
+      env PI_AGENT_DIR="$armdir/agent" \
+        bash "$root/pi/install.sh" "$armdir/proj" > "$armdir/install.log" 2>&1
+    fi
+  }
+
+  # --- positive arm: a machine upgrading from either older naming ------------
+  if agent_retire_run upgrade $retire_seed_names; then
+    ok "agent retire arm: install.sh succeeded over an agents dir holding retired names"
+  else
+    bad "agent retire arm: install.sh failed over an agents dir holding retired names:"
+    sed 's/^/      /' "$agent_retire_sandbox/upgrade/install.log" >&2
+  fi
+  up_agents="$agent_retire_sandbox/upgrade/agent/agents"
+  n_left="$(find "$up_agents" -maxdepth 1 -name 'pf-*.md' 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$n_left" -eq 0 ]; then
+    ok "agent retire arm: no pf-*.md is left dispatchable beside the new step-*.md files"
+  else
+    bad "agent retire arm: $n_left pf-*.md survived — pi would hold two definitions per role, and the stale one still dispatches"
+  fi
+  n_seeded="$(printf '%s\n' $retire_seed_names | wc -l | tr -d ' ')"
+  n_bakd=0
+  for n in $retire_seed_names; do
+    for b in "$up_agents/$n.bak-"*; do
+      [ -f "$b" ] && { n_bakd=$((n_bakd + 1)); break; }
+    done
+  done
+  if [ "$n_bakd" -eq "$n_seeded" ]; then
+    ok "agent retire arm: all $n_seeded retired names have a .bak-<stamp> beside them"
+  else
+    bad "agent retire arm: only $n_bakd/$n_seeded retired names were moved aside — the rest were deleted outright, or a generation was dropped from install.sh's retire list"
+  fi
+  # Non-destructive: the retired file must still hold the user's own edits. A
+  # retire step that re-generated over the backup would pass every count above.
+  n_intact=0
+  for b in "$up_agents/pf-executor.md.bak-"*; do
+    [ -f "$b" ] && grep -q 'LOCALLY EDITED BY THE USER' "$b" && n_intact=1
+  done
+  if [ "$n_intact" -eq 1 ]; then
+    ok "agent retire arm: the retired file's own content survived intact in the backup"
+  else
+    bad "agent retire arm: the .bak of pf-executor.md does not hold the content that was there — it was overwritten, not moved aside"
+  fi
+  if [ -n "${generated_agents:-}" ] && [ -n "$gen_path_dir" ]; then
+    if [ -f "$up_agents/step-executor.md" ]; then
+      ok "agent retire arm: the replacement step-executor.md was generated in the same run"
+    else
+      bad "agent retire arm: no step-executor.md after the retire — the roles are now retired AND absent"
+    fi
+  else
+    skip "no polyforge binary available to this suite — 'the replacement arrived' half not checked"
+  fi
+
+  # --- negative control: a dir holding ONLY current names loses nothing -----
+  if agent_retire_run clean $keep_seed_names; then
+    ok "agent retire arm: negative control run succeeded over an already-current agents dir"
+  else
+    bad "agent retire arm: negative control run failed over an already-current agents dir:"
+    sed 's/^/      /' "$agent_retire_sandbox/clean/install.log" >&2
+  fi
+  clean_agents="$agent_retire_sandbox/clean/agent/agents"
+  # Anti-vacuity FIRST: if the seeded current-name files are not there any more,
+  # a zero .bak count below would mean "there was nothing to back up", which is
+  # the exact false green this control was rewritten to close.
+  n_kept=0
+  for n in $keep_seed_names; do
+    [ -f "$clean_agents/$n" ] && n_kept=$((n_kept + 1))
+  done
+  n_keep_expected="$(printf '%s\n' $keep_seed_names | wc -l | tr -d ' ')"
+  if [ "$n_kept" -eq "$n_keep_expected" ]; then
+    ok "agent retire arm: negative control still holds all $n_keep_expected current-name files, so the .bak count below is not vacuous"
+  else
+    bad "agent retire arm: negative control lost $((n_keep_expected - n_kept)) of its current-name files — the installer moved aside a name it generates itself"
+  fi
+  n_stray="$(find "$clean_agents" -maxdepth 1 -name '*.bak-*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$n_stray" -eq 0 ]; then
+    ok "agent retire arm: negative control produced NO .bak file at all, so only the named old files are retired"
+  else
+    bad "agent retire arm: negative control produced $n_stray .bak file(s) over current names; the retire step is firing on names it was never given, so the positive arm above proves nothing"
+  fi
+  rm -rf "$agent_retire_sandbox"
   trap - EXIT
 fi
 

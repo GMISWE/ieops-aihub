@@ -4954,6 +4954,10 @@ jobs:
                       "PASS: retire arm: the retired copy is intact at .agents/skills.bak-<stamp>" \
                       "PASS: install.sh refuses POLYFORGE_PI_SKILL_SCOPE=sideways" \
                       "PASS: the refused run wrote no skills tree at either scope" \
+                      "PASS: agent retire arm: no pf-*.md is left dispatchable" \
+                      "PASS: agent retire arm: all 7 retired names have a .bak-<stamp> beside them" \
+                      "PASS: agent retire arm: the retired file's own content survived intact" \
+                      "PASS: agent retire arm: negative control produced NO .bak file at all" \
                       "ALL PASS"; do
             grep -qF -- "$want" pi_runtime.log \
               || { echo "::error::pi-runtime.test.sh did not report '$want' — the pi IR1 configuration is not actually gated"; exit 1; }
@@ -4983,9 +4987,17 @@ jobs:
           # the runner, which it did not before. install.sh only warns when pi is absent
           # (verified), but an environment break in it now reddens this gate with several
           # FAILs instead of SKIPping past.
+          #
+          # Floor raised 44 -> 50 by aihub#682, which added the agent-retire arm: six PASS
+          # lines that do not depend on pi being installed (four in the positive arm --
+          # install succeeded, no pf-*.md survives, every retired name has a .bak, the
+          # backup still holds the user's own bytes -- and two in the negative control).
+          # A seventh, "the replacement step-executor.md was generated", needs the polyforge
+          # binary the suite builds earlier and so SKIPs where go is unavailable; it is
+          # deliberately excluded from the floor and from the named checks above.
           n=$(grep -c '^  PASS: ' pi_runtime.log || true)
-          [ "${n:-0}" -ge 44 ] \
-            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 44 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 50 ] \
+            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 50 — checks have gone missing"; exit 1; }
           echo "pi runtime gate: $n checks passed"
 
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal

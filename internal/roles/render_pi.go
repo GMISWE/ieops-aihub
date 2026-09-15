@@ -5,8 +5,11 @@ import (
 	"fmt"
 )
 
-// RenderPiAgentFiles renders every role in roleList into pi's pf-<role>.md
-// content, keyed by output file name ("pf-executor.md", ...). resolvedModels
+// RenderPiAgentFiles renders every role in roleList into pi's step-<role>.md
+// content, keyed by output file name ("step-executor.md", ...). The stem comes
+// from internal/roles/dispatch.go's pi row, never from a literal here --
+// aihub#682 renamed it there (pf-<role> -> step-<role>) and this function
+// needed no edit for the new names to land. resolvedModels
 // supplies the model to declare per role name (already resolved from the
 // machine's candidate lists by the caller, internal/cli/roles_generate.go --
 // this function never reads config or a catalog itself); a role absent from

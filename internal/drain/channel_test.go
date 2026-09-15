@@ -538,11 +538,12 @@ func TestBuildStepInvocation_TheRolesCapabilityReachesEveryHarness(t *testing.T)
 // TestBuildStepInvocation_AgentIDsComeFromTheRolesTable is the anti-duplication assertion, and it
 // is the reason this fix routes through internal/roles rather than spelling the names locally.
 //
-// Each harness's agent identity is already decided in that package — render_cc.go writes
-// "step-<role>", render_pi.go writes "pf-<role>", and Claude Code needs the plugin-namespaced form
-// while the others need the bare one. A table written here would be a SECOND copy free to drift:
-// change render_pi.go's prefix and a local copy stays green while every dispatch names an agent
-// that does not exist. This compares what the command line carries against what roles.AgentIDFor
+// Each harness's agent identity is already decided in that package — every renderer writes
+// "step-<role>" (pi's was "pf-<role>" until aihub#682), and Claude Code needs the
+// plugin-namespaced form while the others need the bare one. A table written here would be a
+// SECOND copy free to drift: change a renderer's prefix and a local copy stays green while every
+// dispatch names an agent that does not exist. This compares what the command line carries
+// against what roles.AgentIDFor
 // answers, so the two cannot disagree.
 //
 // Mutant watched: hardcoding "step-%s" for claude turns the cc arm red (it needs "polyforge:").

@@ -353,9 +353,9 @@ Role/tier agent generation (aihub#642):
                               edited ~/.polyforge/config.toml and do not want to
                               wait for the next session.
   roles generate <pi|codex|opencode> --out <dir> [--preset=<name>]
-                              Render per-role agent files (pf-<role>.md for pi,
-                              step-<role>.md for opencode, step-<role>.toml for
-                              codex) from internal/roles/definitions/*.yaml and
+                              Render per-role agent files (step-<role>.md for pi
+                              and opencode, step-<role>.toml for codex) from
+                              internal/roles/definitions/*.yaml and
                               this machine's ~/.polyforge/config.toml
                               [roles.tiers] candidate lists. Claude Code has no
                               form of this verb: its step-<role>.md files are

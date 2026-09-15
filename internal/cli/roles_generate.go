@@ -735,6 +735,38 @@ func generateRolesInto(mc *config.MachineConfig, harness, outDir string, probe C
 // stays dispatchable. The equivalent on the Claude Code side is a HARD failure
 // instead (those files are committed, so a gate can assert on them) -- see
 // internal/roles.TestCCStalenessGateRejectsOrphans.
+// retiredAgentNamePrefixes lists, per harness, the filename prefixes this
+// generator USED to write and no longer does.
+//
+// 🔴 IT EXISTS BECAUSE DERIVING THE SCAN PREFIX FROM THE CURRENT RENDER MADE THE
+// SCAN FOLLOW THE RENAME AND LEAVE THE PAST BEHIND. aihub#682 renamed pi's agent
+// files pf-<role>.md -> step-<role>.md; because the prefix above is cut from a
+// rendered name, pi's orphan scan moved from `pf-` to `step-` in the same commit,
+// and stopped warning about ANY pf-*.md. Measured on the merged tree before this
+// fix: a directory seeded with all seven historical pi names plus a step-zombie.md
+// produced exactly one warning, about step-zombie.md, while all seven pf-*.md
+// survived unmentioned and exit was 0.
+//
+// That is worse than a missed warning. pi loads every *.md in its agents
+// directory, so the operator is left with TWO dispatchable definitions for each of
+// the five roles and nothing anywhere says so — the exact duplicate-definition
+// hazard aihub#682 set out to remove, reached through the other door.
+// plugins/polyforge/pi/install.sh retires these names on the INSTALLER path, but
+// it prints `polyforge roles generate pi --out ...` as the manual remedy in two of
+// its own warnings, and that path bypasses the installer entirely.
+//
+// The derivation is kept for the CURRENT generation (that is what makes a future
+// rename self-maintaining) and this list covers the past. A new entry is needed
+// only when a harness's agent filenames change again — the same moment
+// install.sh's retire loop needs one, which is why both are worth changing
+// together.
+var retiredAgentNamePrefixes = map[string][]string{
+	// pi, before aihub#682. Covers both generations of the old naming: the
+	// pre-aihub#642 pf-execute/pf-explore and the pf-<role> set that replaced
+	// them, since the prefix is common to both.
+	"pi": {"pf-"},
+}
+
 func warnOrphanAgentFiles(w io.Writer, outDir, harness string, rendered map[string]string) {
 	// The naming rule this generator owns, per harness: same stem shape as the
 	// files it just wrote. Derived from the rendered names themselves rather
@@ -759,19 +791,59 @@ func warnOrphanAgentFiles(w io.Writer, outDir, harness string, rendered map[stri
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		if e.IsDir() || !strings.HasSuffix(name, suffix) {
 			continue
 		}
 		if _, current := rendered[name]; current {
 			continue
 		}
-		_, _ = fmt.Fprintf(w,
-			"polyforge: WARNING: %s looks like a %s agent file for a role that no longer exists. "+
-				"It was NOT removed (this directory is yours, not this generator's), but nothing "+
-				"can dispatch to it and it may still be loaded by %s. Delete it if you renamed or "+
-				"removed a role.\n",
-			filepath.Join(outDir, name), harness, harness)
+
+		switch {
+		case strings.HasPrefix(name, prefix):
+			_, _ = fmt.Fprintf(w,
+				"polyforge: WARNING: %s looks like a %s agent file for a role that no longer exists. "+
+					"It was NOT removed (this directory is yours, not this generator's), but nothing "+
+					"can dispatch to it and it may still be loaded by %s. Delete it if you renamed or "+
+					"removed a role.\n",
+				filepath.Join(outDir, name), harness, harness)
+
+		case retiredPrefixOf(harness, name) != "":
+			// A DIFFERENT problem from the one above, and it gets its own
+			// sentence: this file is not dead, it is a SECOND live definition of a
+			// role that also has a current one, which is worse and has a different
+			// remedy.
+			retired := retiredPrefixOf(harness, name)
+			stem := strings.TrimSuffix(strings.TrimPrefix(name, retired), suffix)
+			if _, dup := rendered[prefix+stem+suffix]; dup {
+				_, _ = fmt.Fprintf(w,
+					"polyforge: WARNING: %s is a %s agent file under a RETIRED name, and %s%s%s "+
+						"for the same role was just written beside it. %s loads both, so the role "+
+						"now has two dispatchable definitions and which one answers is not "+
+						"something this generator controls. It was NOT removed (this directory is "+
+						"yours); delete it, or re-run the installer, which retires it for you.\n",
+					filepath.Join(outDir, name), harness, prefix, stem, suffix, harness)
+				continue
+			}
+			_, _ = fmt.Fprintf(w,
+				"polyforge: WARNING: %s is a %s agent file under a RETIRED name (%s… was replaced "+
+					"by %s…). Nothing can dispatch to it. It was NOT removed (this directory is "+
+					"yours); delete it, or re-run the installer, which retires it for you.\n",
+				filepath.Join(outDir, name), harness, retired, prefix)
+		}
 	}
+}
+
+// retiredPrefixOf returns the retired prefix name carries for this harness, or ""
+// when it carries none. A name matching the CURRENT prefix is never reported as
+// retired, so a harness that re-adopts an old prefix cannot warn about its own
+// output.
+func retiredPrefixOf(harness, name string) string {
+	for _, retired := range retiredAgentNamePrefixes[harness] {
+		if strings.HasPrefix(name, retired) {
+			return retired
+		}
+	}
+	return ""
 }
 
 // agentFilePerm is the mode every generated agent/profile file is written with.

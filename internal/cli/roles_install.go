@@ -146,16 +146,26 @@ func resolveHarnessTargets() []harnessTarget {
 	return targets
 }
 
-// piTarget is the pi row. It mirrors plugins/polyforge/pi/install.sh:41
+// piTarget is the pi row. It mirrors plugins/polyforge/pi/install.sh
 // (`PI_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"`) plus the `/agents` suffix that
-// script appends at its line 177, because the two must not be able to disagree
-// about where the SAME files live -- the installer writes them once and this path
-// keeps them current afterwards.
+// script appends, because the two must not be able to disagree about where the
+// SAME files live -- the installer writes them once and this path keeps them
+// current afterwards.
 //
-// pi discovers agents in exactly two places (install.sh:14): ~/.pi/agent/agents/,
-// always loaded, and <project>/.pi/agents/, loaded only when agentScope is
-// project/both, which is off by default and is a repo-controlled prompt besides.
-// Only the user-scope one is ours.
+// ⚠️ $PI_AGENT_DIR IS POLYFORGE'S KNOB, NOT pi's, and the distinction matters to
+// anyone reading this as documentation of pi. Measured by aihub#682 on
+// 2026-09-15: zero occurrences of PI_AGENT_DIR anywhere in
+// @earendil-works/pi-coding-agent -- pi resolves its agent directory from $HOME
+// alone. So this variable redirects where POLYFORGE writes, and setting it
+// without also moving pi's own home means writing somewhere pi will not read.
+// It is honoured here only because install.sh honours it, and the two must
+// agree; the consequence for tests is that isolating this row needs a scratch
+// $HOME, and $PI_AGENT_DIR alone would leave the real ~/.pi/agent in play.
+//
+// pi discovers agents in exactly two places (install.sh's header):
+// ~/.pi/agent/agents/, always loaded, and <project>/.pi/agents/, loaded only when
+// agentScope is project/both, which is off by default and is a repo-controlled
+// prompt besides. Only the user-scope one is ours.
 func piTarget() harnessTarget {
 	if dir := os.Getenv("PI_AGENT_DIR"); dir != "" {
 		return harnessTarget{

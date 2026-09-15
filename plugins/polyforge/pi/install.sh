@@ -157,6 +157,39 @@ fi
 say "recorded pluginRoot=$PLUGIN_ROOT"
 
 step "agent definitions -> $PI_DIR/agents/"
+#
+# ── DIVISION OF LABOUR WITH `polyforge roles install` (aihub#683) ─────────────
+# THIS SCRIPT OWNS FIRST INSTALL. It creates $PI_DIR/agents/ and everything
+# around it that agent files are useless without: the pi runtime check, the MCP
+# adapter, the hook-bridge extension, the SUBAGENT TOOL that dispatches these
+# definitions at all, the merged .mcp.json, the skills, and the retire loop
+# below. None of that is `roles install`'s business, and none of it is re-run
+# per session.
+#
+# `polyforge roles install` OWNS KEEPING THEM UP TO DATE, afterwards. It knows
+# this same directory from a table in Go (internal/cli/roles_install.go's
+# piTarget, which mirrors PI_DIR below plus the /agents suffix), and it
+# regenerates ONLY for harnesses whose directory ALREADY EXISTS -- so it can
+# never be the thing that first creates ~/.pi/, and on a machine where this
+# script has never run it does nothing for pi at all. `polyforge serve` runs it
+# on every MCP boot, and `/pf-update` is the manual entry point for "I just
+# edited config.toml and want it now".
+#
+# ⚠️ IF YOU CHANGE $PI_DIR HERE, CHANGE piTarget TOO. The two write the SAME
+# files to the SAME place; if they disagree, this installer puts them in one
+# directory and every later boot refreshes a different one, with nothing
+# anywhere reporting a problem. internal/cli's
+# TestResolveHarnessTargets_HonoursEveryOverride pins the Go half against the
+# PI_DIR line below.
+#
+# ⚠️ AND IF YOU ADD A NAME TO THE RETIRE LOOP BELOW, ADD ITS PREFIX TO
+# internal/cli/roles_generate.go's retiredAgentNamePrefixes. The two warn
+# messages further down recommend `polyforge roles generate pi --out ...` as the
+# manual remedy, and that path never runs this loop -- so the Go side is the only
+# thing standing between a manual upgrade and two dispatchable definitions per
+# role. aihub#682's rename silently disarmed exactly that (aihub#683 rider 2).
+# ─────────────────────────────────────────────────────────────────────────────
+#
 # aihub#642: step-<role>.md is no longer a static tree copied out of the
 # checkout -- it's GENERATED per machine from internal/roles/definitions/*.yaml
 # + this machine's ~/.polyforge/config.toml [roles.tiers] candidates, via the

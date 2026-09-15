@@ -674,8 +674,18 @@ const ccAgentFilePerm = 0o644
 // no line, so the committed bytes -- and their mtimes -- survive untouched. The
 // natural bug here is to regenerate unconditionally, which would be invisible
 // (the render is identical when nothing is configured) right up until someone
-// diffed mtimes or a release changed the committed default. A machine with NO
-// [roles.tiers] at all is silent even earlier, before validation.
+// diffed mtimes or a release changed the committed default.
+//
+// A machine that DOES configure cc gets the same mtime stability for a weaker
+// but still useful reason: identical renders are detected and skipped, so only
+// a boot that actually changes something touches a file or says anything.
+//
+// This function prints NOTHING about the machine's tier table in general --
+// no ValidateCandidates output, no ~/.polyforge/roles notice. Those describe
+// the CONFIG, not this harness, and cmd/polyforge's serve path emits them once
+// for the whole boot. An earlier revision of this function emitted them too,
+// which gave any machine with codex on PATH two copies of every such warning
+// per session (measured).
 //
 // Resolution is per TIER and falls back rather than failing:
 //
@@ -700,26 +710,24 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 	if err != nil {
 		return false, err
 	}
-	if len(tiers) == 0 {
-		// The zero-configuration machine: not merely "no cc candidate" but no
-		// table at all. Nothing to validate and nothing to say.
+	if !hasCCCandidate(tiers) {
 		return false, nil
 	}
 
-	// Said for ANY non-empty table, not only a cc one. On a machine that runs
-	// only Claude Code these lines had no trigger at all before aihub#681:
-	// ValidateCandidates was reachable from `polyforge roles generate` (which
-	// such a machine never runs) and from codex profile generation (gated
-	// behind exec.LookPath("codex")), so a typo'd harness name was unreportable
-	// exactly where it was most likely to be a typo for "cc".
-	for _, problem := range config.ValidateCandidates(tiers) {
-		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
-	}
-	if path, present := config.UnreadRolesOverrideDir(); present {
-		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
-	}
-
-	if !hasCCCandidate(tiers) {
+	// Checked HERE, after the cc gate, and not while resolving the directory:
+	// a contributor running Claude Code out of a checkout with no cc candidate
+	// configured has asked for nothing and must hear nothing. Only someone who
+	// actually configured cc and will therefore wonder why it had no effect
+	// gets this line.
+	if inGitWorkTree(outDir) {
+		fmt.Fprintf(os.Stderr,
+			"polyforge: WARNING: %s is inside a git work tree, so it is a checkout rather than an "+
+				"installed plugin; the Claude Code agent files there were NOT regenerated from %s.\n"+
+				"  Writing a machine-local model into files the repo tracks would turn "+
+				"`go test ./internal/roles/` red with no hint as to why. To change the committed "+
+				"defaults, edit internal/roles/definitions/cc_aliases.yaml and run "+
+				"`go generate ./internal/roles/...`.\n",
+			outDir, config.MachineConfigPath())
 		return false, nil
 	}
 
@@ -732,14 +740,23 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 		return false, fmt.Errorf("load cc_aliases.yaml: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "polyforge: cc agents: regenerating %s from %s\n", outDir, tierSource)
-
 	resolved := make(map[string]string, len(roleList))
 	for _, r := range roleList {
 		model, rejected := resolveCCModel(tiers[r.Tier])
 		switch {
 		case model != "":
 			resolved[r.Name] = model
+			if len(rejected) > 0 {
+				// A candidate list is a PRIORITY list, so walking past an
+				// entry is normal for the other three harnesses -- "not in
+				// this machine's catalog, try the next one". For cc it is
+				// not: there is no catalog, and the only way to be skipped
+				// is to be malformed, which is always a typo. Recovering
+				// silently would let `[{model="Opus"}, {model="sonnet"}]`
+				// run on sonnet forever with nothing anywhere saying the
+				// first line is dead text.
+				fmt.Fprint(os.Stderr, skippedCCModelWarning(r.Tier, r.Name, tierSource, model, rejected))
+			}
 		case len(rejected) > 0:
 			// Loud and non-suppressible, by the same rule as the other three
 			// harnesses: no flag gates this line.
@@ -757,15 +774,40 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 		return false, fmt.Errorf("render cc agent files: %w", err)
 	}
 
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", outDir, err)
-	}
 	names := make([]string, 0, len(rendered))
 	for name := range rendered {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	// 🔴 SKIP THE WRITE WHEN THE BYTES ALREADY MATCH, and decide that BEFORE
+	// mkdir or the announcement. The steady state on a configured machine is
+	// "every boot renders exactly what is already on disk", and without this
+	// every Claude Code session on the machine would rename five files in a
+	// shared, version-keyed plugin cache directory and log a line, forever, to
+	// change nothing. It also gives the configured machine the same mtime
+	// stability AC1 makes a correctness property for the unconfigured one.
+	//
+	// A read error is NOT an error here: it means "cannot prove it matches", so
+	// the file is rewritten, which is the safe direction.
+	changed := make([]string, 0, len(names))
 	for _, name := range names {
+		current, readErr := os.ReadFile(filepath.Join(outDir, name))
+		if readErr != nil || string(current) != rendered[name] {
+			changed = append(changed, name)
+		}
+	}
+	if len(changed) == 0 {
+		return false, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "polyforge: cc agents: regenerating %v in %s from %s\n",
+		changed, outDir, tierSource)
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return false, fmt.Errorf("mkdir %s: %w", outDir, err)
+	}
+	for _, name := range changed {
 		path := filepath.Join(outDir, name)
 		if err := writeFileAtomic(path, []byte(rendered[name]), ccAgentFilePerm); err != nil {
 			return false, err
@@ -796,11 +838,21 @@ func hasCCCandidate(tiers map[string][]config.RoleCandidate) bool {
 }
 
 // resolveCCModel walks one tier's candidate list in declaration order and
-// returns the first cc model that can actually be written into the agent file's
-// `model:` line, plus every cc model it had to skip to get there (or all of
-// them, when it returns ""). Non-cc candidates are ignored entirely and are not
-// reported as rejections: a tier that lists pi and cc alternatives has not
-// misconfigured anything.
+// returns the first cc model that can be written into the agent file's `model:`
+// line, together with every cc model it had to skip to get there -- on BOTH
+// paths, the one that found a model and the one that did not.
+//
+// ⚠️ Returning `rejected` on SUCCESS is deliberate and was once a bug: this
+// used to `return c.Model, nil`, while its own doc comment claimed otherwise.
+// The two differ in exactly the case that matters. `raised = [{harness="cc",
+// model="Opus"}, {harness="cc", model="sonnet"}]` resolves to sonnet either
+// way, but with nil the capitalised typo is invisible everywhere --
+// config.ValidateCandidates does not syntax-check cc models either -- and the
+// operator's first line is dead text for as long as the second one keeps
+// working.
+//
+// Non-cc candidates are ignored entirely and are never reported as rejections:
+// a tier that lists pi and cc alternatives has not misconfigured anything.
 func resolveCCModel(candidates []config.RoleCandidate) (model string, rejected []string) {
 	for _, c := range candidates {
 		if c.Harness != "cc" {
@@ -810,29 +862,52 @@ func resolveCCModel(candidates []config.RoleCandidate) (model string, rejected [
 			rejected = append(rejected, c.Model)
 			continue
 		}
-		return c.Model, nil
+		return c.Model, rejected
 	}
 	return "", rejected
 }
+
+// skippedCCModelWarning is the NON-fatal counterpart of
+// unwritableCCModelWarning: a later candidate saved the tier, so it names what
+// was ignored and what is running instead, and does not threaten a missing
+// model field the operator is not going to get.
+func skippedCCModelWarning(tier, role, tierSource, using string, rejected []string) string {
+	return fmt.Sprintf(
+		"polyforge: WARNING: tier %q (role %q) IGNORED cc candidate(s) that cannot be written into "+
+			"a Claude Code agent file's `model:` line: %s. This role is running on %q instead, so "+
+			"nothing is broken -- but those entries are dead text, and a cc candidate is only ever "+
+			"skipped for being malformed (there is no model catalog to miss). %s\n"+
+			"  Fix or remove them in the tier table in use (%s).\n",
+		tier, role, quoteAll(rejected), using, ccModelShapeAdvice, tierSource)
+}
+
+// quoteAll renders a candidate list for a message, quoting each entry so an
+// empty or whitespace-only model is visible rather than vanishing.
+func quoteAll(models []string) string {
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		out = append(out, fmt.Sprintf("%q", m))
+	}
+	return strings.Join(out, ", ")
+}
+
+// ccModelShapeAdvice is the one sentence describing the accepted shape, shared
+// by both cc warnings so they cannot drift into describing different rules.
+const ccModelShapeAdvice = "A cc model must be a lowercase alias or full id matching [a-z][a-z0-9.-]* " +
+	"(e.g. \"sonnet\", \"opus\", \"haiku\", \"claude-sonnet-4-5\"), with NO \"<provider>/\" prefix."
 
 // unwritableCCModelWarning is the AC7 warning for a tier whose cc candidates all
 // failed the syntax check. It says what was rejected and what shape to write,
 // and it does NOT claim any catalog was consulted -- see GenerateCCAgents for
 // why this is not UnresolvedModelWarning.
 func unwritableCCModelWarning(tier, role, tierSource string, rejected []string) string {
-	quoted := make([]string, 0, len(rejected))
-	for _, m := range rejected {
-		quoted = append(quoted, fmt.Sprintf("%q", m))
-	}
 	return fmt.Sprintf(
 		"polyforge: WARNING: tier %q (role %q) names cc candidate(s) that cannot be written into a "+
 			"Claude Code agent file's `model:` line: %s -- the generated file for this role will "+
 			"have NO model field and will inherit the caller's default model instead.\n"+
-			"  A cc model must be a lowercase alias or full id matching [a-z][a-z0-9.-]* (e.g. "+
-			"\"sonnet\", \"opus\", \"haiku\", \"claude-sonnet-4-5\"), with NO \"<provider>/\" prefix. "+
-			"Nothing was substituted: polyforge does not guess a model id. Fix the tier table in "+
-			"use (%s).\n",
-		tier, role, strings.Join(quoted, ", "), tierSource)
+			"  %s Nothing was substituted: polyforge does not guess a model id. Fix the tier table "+
+			"in use (%s).\n",
+		tier, role, quoteAll(rejected), ccModelShapeAdvice, tierSource)
 }
 
 // DefaultCCAgentsDir returns the agents/ directory of the Claude Code plugin
@@ -858,8 +933,12 @@ func unwritableCCModelWarning(tier, role, tierSource string, rejected []string) 
 // The existence check is on .claude-plugin/plugin.json rather than on agents/:
 // the manifest is what makes a directory a CC plugin root, and requiring
 // agents/ to pre-exist would make this fail on a tree that legitimately has
-// none yet. ok=false is silent and final -- generation is skipped, never
-// pointed somewhere guessed.
+// none yet. ok=false is SILENT and final -- generation is skipped, never
+// pointed somewhere guessed. Nothing here writes to stderr: this runs on every
+// serve boot including pi's and codex's, where a line about Claude Code's
+// plugin layout would be noise about a harness that is not running. The one
+// case that does deserve a warning -- a checkout -- is detected in
+// GenerateCCAgents, after it knows the operator asked for cc at all.
 func DefaultCCAgentsDir() (string, bool) {
 	root := os.Getenv("CLAUDE_PLUGIN_ROOT")
 	if root == "" {
@@ -869,31 +948,48 @@ func DefaultCCAgentsDir() (string, bool) {
 	if err != nil || fi.IsDir() {
 		return "", false
 	}
-	if inGitWorkTree(root) {
-		// A contributor's checkout, not an installed plugin. Writing here would
-		// dirty tracked files and turn internal/roles' staleness gate red on
-		// their machine with no hint as to why -- the gate diffs the committed
-		// files against the REPO table, and this generator writes the MACHINE
-		// table. The installed plugin cache is not a git work tree (measured:
-		// `git rev-parse` inside
-		// /root/.claude/plugins/cache/ieops-aihub/polyforge/1.1.53 answers "not
-		// a repository"), so this costs the real path nothing.
-		fmt.Fprintf(os.Stderr,
-			"polyforge: NOTE: %s is inside a git work tree, so it looks like a checkout rather than "+
-				"an installed plugin; Claude Code agent files were NOT regenerated there. Run "+
-				"`go generate ./internal/roles/...` to refresh the committed defaults instead.\n", root)
-		return "", false
-	}
 	return filepath.Join(root, "agents"), true
 }
 
-// inGitWorkTree reports whether dir or any ancestor contains a .git entry. It
-// walks the tree in pure Go rather than shelling out to `git rev-parse`: this
-// runs on the MCP server's boot path, where cmd/polyforge's codexProbeTimeout
-// comment records what one hanging subprocess there costs every session on the
-// machine at once.
+// inGitWorkTree reports whether dir or an ancestor contains a .git entry, which
+// is how this package recognises a CONTRIBUTOR'S CHECKOUT as opposed to an
+// installed plugin. Writing a machine-local model into files a repo tracks
+// would turn internal/roles' staleness gate red on that machine with no hint as
+// to why -- the gate diffs the committed files against the REPO table, and this
+// generator writes the MACHINE table.
+//
+// It is not hypothetical: $CLAUDE_PLUGIN_ROOT does point at a source tree for a
+// local-path marketplace (measured 2026-09-15), and this machine's
+// ~/.claude/plugins/marketplaces/ieops-aihub is a full git clone of this repo,
+// plugins/polyforge/.claude-plugin/plugin.json included.
+//
+// Pure Go rather than `git rev-parse`: this runs on the MCP server's boot path,
+// where cmd/polyforge's codexProbeTimeout comment records what one hanging
+// subprocess there costs every session on the machine at once.
+//
+// 🔴 THE WALK IS BOUNDED, and an unbounded one was wrong. It used to climb to
+// "/", so it passed through ~/.claude and $HOME -- and versioning your dotfiles
+// in git is common. Any such user would have silently lost the whole feature,
+// with a NOTE telling them to run `go generate`, advice that means nothing to
+// someone who is not a contributor. The stop condition is the install layout
+// itself: <claude-config>/plugins/cache/<marketplace>/<plugin>/<version> is
+// materialised by the plugin manager and is a checkout by no path, so reaching
+// a directory named "cache" whose parent is named "plugins" ends the walk. The
+// marketplace SOURCE tree (…/plugins/marketplaces/<name>/…) hits its own .git
+// long before that, so the true positive is unaffected.
+//
+// Symlinks are resolved first: filepath.Dir is lexical, so a $CLAUDE_PLUGIN_ROOT
+// symlinked into a checkout would otherwise walk the wrong ancestors, miss the
+// repo's .git, and write through the link into tracked files -- the exact false
+// negative this guard exists to prevent.
 func inGitWorkTree(dir string) bool {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	for {
+		if filepath.Base(dir) == "cache" && filepath.Base(filepath.Dir(dir)) == "plugins" {
+			return false // inside the plugin manager's install cache
+		}
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return true
 		}

@@ -44,6 +44,35 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Machine-config pre-flight, ONCE for the whole boot (aihub#681).
+	//
+	// 🔴 These two warnings describe the CONFIG, not any one harness, and they
+	// used to live inside the per-harness generators. generateCodexProfiles
+	// printed them, and so did the new cc path, so a machine with codex on
+	// PATH got two copies of every tier-table problem and two copies of the
+	// six-line ~/.polyforge/roles notice on every single serve boot (measured
+	// before hoisting them here). One boot, one diagnosis.
+	//
+	// Hoisting also FIXES a gap rather than merely deduplicating. Before this,
+	// both warnings were reachable only from `polyforge roles generate` and
+	// from codex profile generation, the latter gated behind
+	// exec.LookPath("codex") -- so on a machine running only Claude Code,
+	// nothing ever validated the tier table at all, and a `harness = "claude"`
+	// typo was unreportable exactly where it was most likely to be a typo for
+	// "cc". Every serve boot reaches this line.
+	//
+	// A tier-table error (an unknown preset) is NOT reported here: the
+	// generators below return it as a real error with their own context, and
+	// duplicating it is the thing this block exists to stop.
+	if tiers, tierSource, tiersErr := mc.ResolveTiers(""); tiersErr == nil {
+		for _, problem := range config.ValidateCandidates(tiers) {
+			fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
+		}
+	}
+	if path, present := config.UnreadRolesOverrideDir(); present {
+		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
+	}
+
 	// codex agent-profile generation (aihub#642 plan step 10; corrected by
 	// aihub#655): the ORIGINAL call here wrote step-<role>.toml files (with
 	// `name`/`description`/`instructions` keys) into
@@ -371,17 +400,13 @@ func generateCodexProfiles(mc *config.MachineConfig) error {
 	}
 	fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
 
-	// Same two pre-flight checks internal/cli.generateRoles runs, and for the
-	// same reason -- this path and that one are the machine's two model
-	// resolvers, so a diagnosis available on one and not the other is a
-	// diagnosis an operator gets or misses depending on which one happened to
-	// run (aihub#676 findings 2 and 6).
-	for _, problem := range config.ValidateCandidates(tiers) {
-		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
-	}
-	if path, present := config.UnreadRolesOverrideDir(); present {
-		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
-	}
+	// The two pre-flight checks that used to be here -- config.ValidateCandidates
+	// and the ~/.polyforge/roles notice (aihub#676 findings 2 and 6) -- moved up
+	// into main(), which runs them once per boot for every harness. They are
+	// statements about the machine's config, so having each generator repeat
+	// them produced two copies of each on any machine with both codex and Claude
+	// Code (aihub#681). internal/cli.generateRoles keeps its own copy: it is a
+	// separate entry point that main() does not run.
 
 	probe := &codexProfileCatalogProbe{}
 	resolved := make(map[string]string, len(roleList))

@@ -125,6 +125,14 @@ func mcWithTiers(tiers map[string][]config.RoleCandidate) *config.MachineConfig 
 // anything) — only the mtime and wrote=false assertions catch it, which is
 // exactly why they are here and why a content-only test would have shipped the
 // bug.
+//
+// 🔴 RE-RUN AFTER THE IDEMPOTENCE SHORT-CIRCUIT LANDED, AND IT SURVIVED. That
+// is not a hole, it is defence in depth being honest about itself: skipping a
+// write whose bytes already match makes the unconditional path a no-op too, so
+// this test can no longer tell the two mechanisms apart. AC1's PROPERTY is
+// therefore defended twice, which is why it is stated as a property here — and
+// TestGenerateCCAgents_NoCCCandidateTouchesNothingAtAll below pins the guard
+// itself, on the one consequence idempotence cannot mask.
 func TestGenerateCCAgents_NoCCCandidateWritesNothing(t *testing.T) {
 	cases := []struct {
 		name string
@@ -191,22 +199,243 @@ func TestGenerateCCAgents_NoCCCandidateWritesNothing(t *testing.T) {
 	}
 }
 
-// TestGenerateCCAgents_NoTierTableIsEntirelySilent pins the narrower promise for
-// the zero-configuration machine: not merely "writes nothing" but "says
-// nothing". Every Claude Code session on every machine boots this code path, so
-// a line here is a line on everyone's MCP log forever.
+// TestGenerateCCAgents_NoCCCandidateTouchesNothingAtAll pins the
+// `hasCCCandidate` guard on the one consequence the idempotence short-circuit
+// CANNOT mask: a directory that does not exist yet.
 //
-// MUTANT (run, red): move the ValidateCandidates/UnreadRolesOverrideDir block
-// above the `len(tiers) == 0` early return.
-func TestGenerateCCAgents_NoTierTableIsEntirelySilent(t *testing.T) {
-	dir := ccFixtureDir(t)
-	stderr := captureStderr(t, func() {
-		if _, err := GenerateCCAgents(&config.MachineConfig{}, dir); err != nil {
-			t.Fatalf("GenerateCCAgents: %v", err)
-		}
+// With the guard, a machine that never named cc returns before LoadRoles, before
+// rendering, before the first os.ReadFile and before os.MkdirAll. Without it,
+// every read fails with ErrNotExist, every file is therefore counted as
+// "changed", and the generator CREATES an agents/ directory and fills it with
+// five files inside a plugin tree that never had one. That is the difference
+// between "does nothing" and "happens to produce the same bytes", and it is why
+// the guard is not made redundant by the short-circuit.
+//
+// MUTANT (run, red): delete the guard -> the directory springs into existence
+// with five files in it.
+func TestGenerateCCAgents_NoCCCandidateTouchesNothingAtAll(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "agents")
+	mc := mcWithTiers(map[string][]config.RoleCandidate{
+		"default": {{Harness: "pi", Model: "sub2api-anthropic/claude-sonnet-4-5"}},
 	})
+
+	var wrote bool
+	var err error
+	captureStderr(t, func() { wrote, err = GenerateCCAgents(mc, missing) })
+	if err != nil {
+		t.Fatalf("GenerateCCAgents: %v", err)
+	}
+	if wrote {
+		t.Error("wrote=true for a machine that named no cc candidate")
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		entries, _ := os.ReadDir(missing)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("%s was CREATED (holding %v). A machine that configured no cc candidate must not "+
+			"have an agents directory conjured up inside its plugin tree.", missing, names)
+	}
+
+	// Negative control: with a cc candidate the same missing directory IS
+	// created, so the assertion above is about the guard and not about
+	// GenerateCCAgents being unable to create directories at all.
+	ccMC := mcWithTiers(map[string][]config.RoleCandidate{
+		"raised": {{Harness: "cc", Model: "sonnet"}},
+	})
+	captureStderr(t, func() { wrote, err = GenerateCCAgents(ccMC, missing) })
+	if err != nil {
+		t.Fatalf("control GenerateCCAgents: %v", err)
+	}
+	if !wrote {
+		t.Fatal("control failed: a configured machine did not write into a missing directory either")
+	}
+	if got := agentModel(t, missing, "step-reviewer.md"); got != "sonnet" {
+		t.Errorf("control: step-reviewer.md model = %q, want %q", got, "sonnet")
+	}
+}
+
+// TestGenerateCCAgents_SaysNothingWhenCCIsNotConfigured pins the narrower
+// promise: not merely "writes nothing" but "says nothing". Every Claude Code
+// session on every machine boots this code path, so a line here is a line on
+// everyone's MCP log forever.
+//
+// The third case is the one a clean-context review added. This function used to
+// print config.ValidateCandidates' problems and the ~/.polyforge/roles notice
+// before the cc gate, which meant a machine with codex on PATH got two copies of
+// each (generateCodexProfiles printed the same two). Both now live in
+// cmd/polyforge's main() and run once per boot, so a table with a PROBLEM in it
+// must still leave this function silent.
+//
+// MUTANT (run, red): re-add the ValidateCandidates loop to GenerateCCAgents ->
+// the third case fires.
+func TestGenerateCCAgents_SaysNothingWhenCCIsNotConfigured(t *testing.T) {
+	cases := []struct {
+		name string
+		mc   *config.MachineConfig
+	}{
+		{"no [roles] table at all", &config.MachineConfig{}},
+		{
+			"a valid table that never names cc",
+			mcWithTiers(map[string][]config.RoleCandidate{
+				"default": {{Harness: "pi", Model: "sub2api-anthropic/claude-sonnet-4-5"}},
+			}),
+		},
+		{
+			// A table ValidateCandidates has plenty to say about. main() says
+			// it; this function must not say it again.
+			"a table with problems, which main() reports and this must not",
+			mcWithTiers(map[string][]config.RoleCandidate{
+				"default": {{Harness: "claude", Model: "opus"}},
+				"raised":  {{Harness: "pi", Model: "bare-id-no-provider"}},
+				"low":     {{Harness: "", Model: "x"}},
+			}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Proof the third case's table really is one main() would complain
+			// about -- otherwise "silent" would be trivially true.
+			if len(config.ValidateCandidates(tiersOf(tc.mc))) == 0 && strings.Contains(tc.name, "problems") {
+				t.Fatal("the 'table with problems' case has no problems; it proves nothing")
+			}
+			dir := ccFixtureDir(t)
+			stderr := captureStderr(t, func() {
+				if _, err := GenerateCCAgents(tc.mc, dir); err != nil {
+					t.Fatalf("GenerateCCAgents: %v", err)
+				}
+			})
+			if stderr != "" {
+				t.Errorf("GenerateCCAgents wrote to stderr for a machine that configured no cc "+
+					"candidate:\n%s", stderr)
+			}
+		})
+	}
+}
+
+func tiersOf(mc *config.MachineConfig) map[string][]config.RoleCandidate {
+	if mc == nil || mc.Roles == nil {
+		return nil
+	}
+	return mc.Roles.Tiers
+}
+
+// TestGenerateCCAgents_IdenticalRenderIsNotRewritten pins the idempotence
+// short-circuit. On a configured machine the steady state is "every boot renders
+// exactly what is on disk"; without this, every Claude Code session would rename
+// five files in a shared plugin cache and log a line to change nothing.
+//
+// MUTANT (run, red): delete the `if len(changed) == 0 { return false, nil }`
+// short-circuit -> the second boot rewrites, moving mtimes and printing.
+func TestGenerateCCAgents_IdenticalRenderIsNotRewritten(t *testing.T) {
+	dir := ccFixtureDir(t)
+	mc := mcWithTiers(map[string][]config.RoleCandidate{
+		"raised": {{Harness: "cc", Model: "sonnet"}},
+	})
+
+	// First boot: must write.
+	wrote, err := GenerateCCAgents(mc, dir)
+	if err != nil {
+		t.Fatalf("first GenerateCCAgents: %v", err)
+	}
+	if !wrote {
+		t.Fatal("first boot wrote nothing; the control for this test is broken")
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	for name := range snapshotDir(t, dir) {
+		if err := os.Chtimes(filepath.Join(dir, name), old, old); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+	before := snapshotDir(t, dir)
+
+	// Second boot, same config: must be a no-op, silently.
+	var wrote2 bool
+	stderr := captureStderr(t, func() { wrote2, err = GenerateCCAgents(mc, dir) })
+	if err != nil {
+		t.Fatalf("second GenerateCCAgents: %v", err)
+	}
+	if wrote2 {
+		t.Error("wrote=true on a boot that had nothing to change")
+	}
 	if stderr != "" {
-		t.Errorf("a machine with no [roles] table got output on stderr:\n%s", stderr)
+		t.Errorf("announced a regeneration that changed nothing:\n%s", stderr)
+	}
+	for name, was := range before {
+		if is := snapshotDir(t, dir)[name]; !is.mod.Equal(was.mod) {
+			t.Errorf("%s was rewritten with identical content (mtime moved)", name)
+		}
+	}
+
+	// And a real change still goes through: the negative control, without which
+	// "never writes" would pass this test too.
+	mc2 := mcWithTiers(map[string][]config.RoleCandidate{
+		"raised": {{Harness: "cc", Model: "haiku"}},
+	})
+	stderr = captureStderr(t, func() { wrote2, err = GenerateCCAgents(mc2, dir) })
+	if err != nil {
+		t.Fatalf("third GenerateCCAgents: %v", err)
+	}
+	if !wrote2 {
+		t.Error("a changed model did not trigger a write")
+	}
+	if !strings.Contains(stderr, "step-reviewer.md") {
+		t.Errorf("the announcement does not name the file that actually changed:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "step-executor.md") {
+		t.Errorf("the announcement names a file that did not change:\n%s", stderr)
+	}
+	if got := agentModel(t, dir, "step-reviewer.md"); got != "haiku" {
+		t.Errorf("step-reviewer.md model = %q, want %q", got, "haiku")
+	}
+}
+
+// TestGenerateCCAgents_SkippedCandidateStillWarns closes the silent-typo path a
+// clean-context review found. A malformed cc candidate followed by a good one
+// resolves fine, and used to do so with ZERO diagnostics anywhere:
+// resolveCCModel discarded its reject list on the success path, and
+// config.ValidateCandidates does not syntax-check cc models. The operator's
+// first line was dead text and nothing said so.
+//
+// A skip is normal for the other three harnesses -- a priority list means "not
+// in this machine's catalog, try the next" -- but cc has no catalog, so the only
+// way to be skipped is to be malformed, which is always a mistake.
+//
+// MUTANT (run, red): restore `return c.Model, nil` in resolveCCModel.
+func TestGenerateCCAgents_SkippedCandidateStillWarns(t *testing.T) {
+	dir := ccFixtureDir(t)
+	mc := mcWithTiers(map[string][]config.RoleCandidate{
+		"raised": {
+			{Harness: "cc", Model: "Opus"}, // capitalised: unreadable by both parsers
+			{Harness: "cc", Model: "sonnet"},
+		},
+	})
+	var wrote bool
+	var err error
+	stderr := captureStderr(t, func() { wrote, err = GenerateCCAgents(mc, dir) })
+	if err != nil {
+		t.Fatalf("GenerateCCAgents: %v", err)
+	}
+	if !wrote {
+		t.Fatal("wrote=false; the good candidate should still have been applied")
+	}
+	// The recovery itself must be real: a warning that came with a broken build
+	// would be worthless.
+	if got := agentModel(t, dir, "step-reviewer.md"); got != "sonnet" {
+		t.Errorf("step-reviewer.md model = %q, want %q: a later valid candidate must still win", got, "sonnet")
+	}
+	if !strings.Contains(stderr, "IGNORED") || !strings.Contains(stderr, `"Opus"`) {
+		t.Errorf("the skipped malformed candidate was not reported:\n%s", stderr)
+	}
+	// It must NOT be reported as the fatal shape: the role HAS a model, and
+	// telling the operator it will inherit the caller's would be false.
+	if strings.Contains(stderr, "NO model field") {
+		t.Errorf("a recovered skip was reported as the omit-and-warn failure:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, `"sonnet"`) {
+		t.Errorf("the warning does not say what is running instead:\n%s", stderr)
 	}
 }
 
@@ -638,10 +867,12 @@ func TestDefaultCCAgentsDir(t *testing.T) {
 		}
 	})
 
-	t.Run("declines inside a git work tree", func(t *testing.T) {
-		// A contributor's checkout, not an installed plugin. Writing the MACHINE
-		// table into files the repo tracks would turn internal/roles'
-		// cc_staleness_gate red on their machine with no hint why.
+	t.Run("resolves even inside a git work tree, and says nothing", func(t *testing.T) {
+		// The checkout REFUSAL moved into GenerateCCAgents (see
+		// TestGenerateCCAgents_RefusesToWriteIntoACheckout). This function must
+		// stay silent and mechanical: it runs on every serve boot, pi's and
+		// codex's included, where a line about Claude Code's plugin layout is
+		// noise about a harness that is not running.
 		repo := t.TempDir()
 		root := filepath.Join(repo, "plugins", "polyforge")
 		if err := os.MkdirAll(filepath.Join(root, ".claude-plugin"), 0o755); err != nil {
@@ -650,22 +881,123 @@ func TestDefaultCCAgentsDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, ".claude-plugin", "plugin.json"), []byte(`{}`), 0o644); err != nil {
 			t.Fatalf("write manifest: %v", err)
 		}
-		// Positive control FIRST: without .git this same tree resolves, so a
-		// failure below is the git check firing and not the manifest check.
-		t.Setenv("CLAUDE_PLUGIN_ROOT", root)
-		if _, ok := DefaultCCAgentsDir(); !ok {
-			t.Fatal("control failed: the tree does not resolve even before .git exists")
-		}
 		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 			t.Fatalf("mkdir .git: %v", err)
 		}
+		t.Setenv("CLAUDE_PLUGIN_ROOT", root)
 		stderr := captureStderr(t, func() {
-			if _, ok := DefaultCCAgentsDir(); ok {
-				t.Error("ok=true inside a git work tree")
+			if _, ok := DefaultCCAgentsDir(); !ok {
+				t.Error("ok=false: directory resolution is not where the checkout decision belongs")
+			}
+		})
+		if stderr != "" {
+			t.Errorf("wrote to stderr; this runs on every serve boot for every harness:\n%s", stderr)
+		}
+	})
+}
+
+// TestGenerateCCAgents_RefusesToWriteIntoACheckout pins the guard that keeps a
+// contributor's tracked files out of reach, and — equally — that it does NOT
+// fire for a real installation.
+//
+// The second half is the one a clean-context review added, and it is the more
+// likely failure in practice: the walk used to climb all the way to "/", so it
+// passed through ~/.claude and $HOME. Versioning your dotfiles in git is
+// ordinary, and any such user would have silently lost the entire feature.
+func TestGenerateCCAgents_RefusesToWriteIntoACheckout(t *testing.T) {
+	mc := mcWithTiers(map[string][]config.RoleCandidate{
+		"raised": {{Harness: "cc", Model: "sonnet"}},
+	})
+
+	t.Run("a checkout is refused, loudly, and nothing is written", func(t *testing.T) {
+		repo := t.TempDir()
+		agents := filepath.Join(repo, "plugins", "polyforge", "agents")
+		if err := os.MkdirAll(agents, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		// Stage the committed files so a rewrite would be detectable.
+		src := ccFixtureDir(t)
+		for name := range snapshotDir(t, src) {
+			body, _ := os.ReadFile(filepath.Join(src, name))
+			if err := os.WriteFile(filepath.Join(agents, name), body, 0o644); err != nil {
+				t.Fatalf("stage: %v", err)
+			}
+		}
+		// Positive control FIRST: without .git this same tree regenerates, so a
+		// refusal below is the git check firing and not something else.
+		var wrote bool
+		captureStderr(t, func() {
+			var err error
+			if wrote, err = GenerateCCAgents(mc, agents); err != nil {
+				t.Fatalf("control GenerateCCAgents: %v", err)
+			}
+		})
+		if !wrote {
+			t.Fatal("control failed: the tree does not regenerate even before .git exists")
+		}
+		before := snapshotDir(t, agents)
+
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git: %v", err)
+		}
+		// Change the config too, so a write would be visible in CONTENT and not
+		// only in mtime — the idempotence short-circuit must not be what makes
+		// this pass.
+		mc2 := mcWithTiers(map[string][]config.RoleCandidate{
+			"raised": {{Harness: "cc", Model: "haiku"}},
+		})
+		stderr := captureStderr(t, func() {
+			w, err := GenerateCCAgents(mc2, agents)
+			if err != nil {
+				t.Fatalf("GenerateCCAgents: %v", err)
+			}
+			if w {
+				t.Error("wrote=true inside a git work tree")
 			}
 		})
 		if !strings.Contains(stderr, "git work tree") {
-			t.Errorf("declined silently; an operator whose config is being ignored must be told:\n%s", stderr)
+			t.Errorf("refused silently; an operator whose config is being ignored must be told:\n%s", stderr)
+		}
+		for name, was := range snapshotDir(t, agents) {
+			if was.body != before[name].body {
+				t.Errorf("%s was modified inside a git work tree", name)
+			}
+		}
+	})
+
+	t.Run("the plugin install cache is NOT mistaken for a checkout", func(t *testing.T) {
+		// Reproduces the real install layout:
+		//   <claude-config>/plugins/cache/<marketplace>/<plugin>/<version>/agents
+		// with a .git ABOVE it, standing in for a user who versions ~/.claude or
+		// their whole home directory.
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git: %v", err)
+		}
+		agents := filepath.Join(home, ".claude", "plugins", "cache", "mp", "polyforge", "1.1.54", "agents")
+		if err := os.MkdirAll(agents, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		src := ccFixtureDir(t)
+		for name := range snapshotDir(t, src) {
+			body, _ := os.ReadFile(filepath.Join(src, name))
+			if err := os.WriteFile(filepath.Join(agents, name), body, 0o644); err != nil {
+				t.Fatalf("stage: %v", err)
+			}
+		}
+		var wrote bool
+		stderr := captureStderr(t, func() {
+			var err error
+			if wrote, err = GenerateCCAgents(mc, agents); err != nil {
+				t.Fatalf("GenerateCCAgents: %v", err)
+			}
+		})
+		if !wrote {
+			t.Fatalf("a real install under a git-versioned $HOME lost the feature entirely. "+
+				"stderr:\n%s", stderr)
+		}
+		if got := agentModel(t, agents, "step-reviewer.md"); got != "sonnet" {
+			t.Errorf("step-reviewer.md model = %q, want %q", got, "sonnet")
 		}
 	})
 }

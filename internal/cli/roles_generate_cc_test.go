@@ -721,7 +721,7 @@ func TestGenerateCCAgents_WritesAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer before.Close()
+	defer func() { _ = before.Close() }()
 	beforeStat, err := before.Stat()
 	if err != nil {
 		t.Fatalf("stat: %v", err)

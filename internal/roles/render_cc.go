@@ -38,10 +38,10 @@ func ValidCCModel(model string) bool {
 // by output file name ("step-executor.md", ...).
 //
 // This is the DEFAULT-VALUE entry point: it is what internal/roles/gen (the
-// go:generate-driven writer, aihub#642 plan step 6) and the cc_staleness_gate
-// test (plan step 7) call, so the gate diffs the committed files against the
-// same repo table that produced them and is unaffected by any machine's
-// ~/.polyforge/config.toml. aihub#681 added the per-machine entry point
+// writer driven by `go generate`, aihub#642 plan step 6) and the
+// cc_staleness_gate test (plan step 7) call, so the gate diffs the committed
+// files against the same repo table that produced them and is unaffected by any
+// machine's ~/.polyforge/config.toml. aihub#681 added the per-machine entry point
 // alongside it (RenderCCAgentFilesWithModels); both funnel through the one
 // rendering loop below, so gate, generator and the serve-startup regeneration
 // cannot silently diverge from each other.

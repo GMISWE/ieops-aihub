@@ -54,8 +54,12 @@ import (
 // containment rather than by a fuzzy match that would drift back open.
 type HarnessDispatch struct {
 	// Harness is the harness key, matching `polyforge roles generate <harness>`'s positional
-	// argument where one exists ("cc" has no generate verb: its agent files are committed under
-	// plugins/polyforge/agents/ and byte-diffed by cc_staleness_gate_test.go).
+	// argument where one exists. "cc" has no generate verb: its DEFAULTS are committed under
+	// plugins/polyforge/agents/ and byte-diffed by cc_staleness_gate_test.go, and a machine's
+	// own override is applied to those same files in place at MCP-server startup instead
+	// (aihub#681, internal/cli.GenerateCCAgents) -- which the gate deliberately does not see,
+	// because it checks the repo against the repo. Generating somewhere else on the machine
+	// would be legal but would cost the AgentIDFormat guarantee below; see that field.
 	Harness string
 
 	// AgentNameFormat is a single %s format applied to the role name, e.g. "step-%s".

@@ -44,6 +44,35 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Machine-config pre-flight, ONCE for the whole boot (aihub#681).
+	//
+	// 🔴 These two warnings describe the CONFIG, not any one harness, and they
+	// used to live inside the per-harness generators. generateCodexProfiles
+	// printed them, and so did the new cc path, so a machine with codex on
+	// PATH got two copies of every tier-table problem and two copies of the
+	// six-line ~/.polyforge/roles notice on every single serve boot (measured
+	// before hoisting them here). One boot, one diagnosis.
+	//
+	// Hoisting also FIXES a gap rather than merely deduplicating. Before this,
+	// both warnings were reachable only from `polyforge roles generate` and
+	// from codex profile generation, the latter gated behind
+	// exec.LookPath("codex") -- so on a machine running only Claude Code,
+	// nothing ever validated the tier table at all, and a `harness = "claude"`
+	// typo was unreportable exactly where it was most likely to be a typo for
+	// "cc". Every serve boot reaches this line.
+	//
+	// A tier-table error (an unknown preset) is NOT reported here: the
+	// generators below return it as a real error with their own context, and
+	// duplicating it is the thing this block exists to stop.
+	if tiers, tierSource, tiersErr := mc.ResolveTiers(""); tiersErr == nil {
+		for _, problem := range config.ValidateCandidates(tiers) {
+			fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
+		}
+	}
+	if path, present := config.UnreadRolesOverrideDir(); present {
+		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
+	}
+
 	// codex agent-profile generation (aihub#642 plan step 10; corrected by
 	// aihub#655): the ORIGINAL call here wrote step-<role>.toml files (with
 	// `name`/`description`/`instructions` keys) into
@@ -113,6 +142,30 @@ func main() {
 	if _, err := exec.LookPath("codex"); err == nil {
 		if err := generateCodexProfiles(mc); err != nil {
 			fmt.Fprintf(os.Stderr, "polyforge: codex profile generation failed (non-fatal, server continues): %v\n", err)
+		}
+	}
+
+	// Claude Code agent regeneration (aihub#681, owner decision 2026-09-15).
+	//
+	// ⚠️ NOT nested inside the codex branch above, and that is the whole point
+	// of it being a separate statement: the timing this needs -- "every time a
+	// Claude Code session boots its MCP server" -- was already unconditional
+	// here, but the only generation hanging off it was gated behind
+	// exec.LookPath("codex"), so on a machine that runs Claude Code and nothing
+	// else, none of this ran at all.
+	//
+	// There is no LookPath equivalent to gate this on: Claude Code is not
+	// necessarily on PATH, and the thing that proves this process was launched
+	// BY it is $CLAUDE_PLUGIN_ROOT, which DefaultCCAgentsDir checks. The second
+	// gate is inside GenerateCCAgents: a machine with no `harness = "cc"`
+	// candidate writes nothing and prints nothing, so the committed agent files
+	// keep their bytes and their mtimes.
+	//
+	// Same non-fatal contract as codex: role generation must never be able to
+	// break MCP server startup for anyone.
+	if ccAgentsDir, ok := cli.DefaultCCAgentsDir(); ok {
+		if _, err := cli.GenerateCCAgents(mc, ccAgentsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "polyforge: cc agent generation failed (non-fatal, server continues): %v\n", err)
 		}
 	}
 
@@ -347,17 +400,13 @@ func generateCodexProfiles(mc *config.MachineConfig) error {
 	}
 	fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
 
-	// Same two pre-flight checks internal/cli.generateRoles runs, and for the
-	// same reason -- this path and that one are the machine's two model
-	// resolvers, so a diagnosis available on one and not the other is a
-	// diagnosis an operator gets or misses depending on which one happened to
-	// run (aihub#676 findings 2 and 6).
-	for _, problem := range config.ValidateCandidates(tiers) {
-		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
-	}
-	if path, present := config.UnreadRolesOverrideDir(); present {
-		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
-	}
+	// The two pre-flight checks that used to be here -- config.ValidateCandidates
+	// and the ~/.polyforge/roles notice (aihub#676 findings 2 and 6) -- moved up
+	// into main(), which runs them once per boot for every harness. They are
+	// statements about the machine's config, so having each generator repeat
+	// them produced two copies of each on any machine with both codex and Claude
+	// Code (aihub#681). internal/cli.generateRoles keeps its own copy: it is a
+	// separate entry point that main() does not run.
 
 	probe := &codexProfileCatalogProbe{}
 	resolved := make(map[string]string, len(roleList))
@@ -592,11 +641,14 @@ Role/tier agent generation (aihub#642):
                               step-<role>.md for opencode, step-<role>.toml for
                               codex) from internal/roles/definitions/*.yaml and
                               this machine's ~/.polyforge/config.toml
-                              [roles.tiers] candidate lists. Claude Code's
-                              step-<role>.md files are generated at build time
-                              instead (committed via
-                              "go generate ./internal/roles/...") -- this
-                              subcommand never touches them.
+                              [roles.tiers] candidate lists. Claude Code has no
+                              form of this verb: its step-<role>.md files are
+                              regenerated in place inside the installed plugin,
+                              not written to an --out directory. The committed
+                              defaults come from "go generate
+                              ./internal/roles/..." and any machine-local
+                              override is applied by "polyforge serve" at
+                              startup (see below).
                               --preset generates from a named tier table
                               instead of the machine's configured selection.
                               NOTE: the codex form writes files nothing loads
@@ -608,17 +660,20 @@ Role/tier agent generation (aihub#642):
 
 Tier-table presets (aihub#673): a preset is a NAMED SNAPSHOT of the whole
 tier->model table, and selecting one SWAPS the table rather than merging with
-it. All three readers honour the same selection -- "roles generate", the
-serve-startup codex profile generation, and "polyforge drain" -- so one machine
-cannot resolve different models depending on which entry point ran:
+it. Every reader honours the same selection -- "roles generate", the
+serve-startup codex profile and Claude Code agent generation, and "polyforge
+drain" -- so one machine cannot resolve different models depending on which
+entry point ran:
     [roles]
     preset = "frugal"              # this machine's default
     [roles.presets.frugal.tiers]
     default = [{ harness = "pi", model = "sub2api-anthropic/claude-haiku-4-5" }]
 An unknown preset name is refused, never silently ignored.
 
-Model identifiers here are HARNESS-NATIVE and, for pi and opencode,
-MACHINE-LOCAL: write the full "<provider>/<model>", never the bare model id.
+Model identifiers here are HARNESS-NATIVE. Claude Code (harness = "cc") takes a
+bare alias or full model id and never a provider prefix; codex takes its own
+bare slug. For pi and opencode they are also MACHINE-LOCAL: write the full
+"<provider>/<model>", never the bare model id.
 aihub#676 measured pi 0.85.1 rejecting a bare id outright once more than one
 authenticated provider offers it, and -- worse -- resolving a bare id that only
 one provider visibly offers to a DIFFERENT channel than the intended one. The
@@ -635,6 +690,24 @@ config-profile shape codex's own "-p <name>" / "--profile <name>" flag
 loads. This is a different file (and a different, actually-scanned
 directory) than "roles generate codex --out <dir>" above writes; see
 internal/roles/render_codex.go's RenderCodexProfiles for why both exist.
+
+Claude Code agent auto-generation (aihub#681, serve startup only, not a
+subcommand): a tier may name harness = "cc", which overrides the repo-committed
+internal/roles/definitions/cc_aliases.yaml alias for that tier ON THIS MACHINE.
+When $CLAUDE_PLUGIN_ROOT points at an installed plugin and at least one such
+candidate exists, every "polyforge serve" boot rewrites that plugin's five
+agents/step-<role>.md files from this machine's table; a tier with no cc
+candidate keeps the committed alias, and a machine with no cc candidate at all
+is left byte-for-byte untouched. Write a bare alias or full model id
+("sonnet", "claude-sonnet-4-5"), never a "<provider>/<model>" pair; one that
+cannot be written into the "model:" line is refused with a warning and the
+field omitted, never rewritten into a guess.
+  It takes effect in the NEXT Claude Code session, not the one doing the
+  writing: plugin agent definitions are read once, before this server has
+  started, and are not re-read afterwards (measured, CC 2.1.258).
+  A "/plugin marketplace update" moves the plugin to a new versioned cache
+  directory and the generated files do not follow; the next boot regenerates
+  them, so this self-heals one session later.
 
 Engine (aihub#654, local-only, for a future headless orchestrator):
   engine startup --workspace-root=<dir> --worktree-root=<dir> --scenario-url=<url>

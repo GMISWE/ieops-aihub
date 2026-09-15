@@ -1107,11 +1107,17 @@ func resolvePresetModels(mc *config.MachineConfig, preset string, channels []dra
 	out := make(map[drain.Harness]map[string]string, len(harnesses))
 	for _, h := range harnesses {
 		// probeForHarness returns nil for claude, and that is the right answer
-		// rather than a gap: a RoleCandidate's harness is pi/codex/opencode by
-		// contract (config.RoleCandidate), so no tier can name claude, and
-		// ResolveModel below finds nothing for it. Leaving Claude Code's model
-		// empty is also what it wants — aihub#555 measured that passing --model
-		// silently OVERRIDES the agent file's own frontmatter.
+		// rather than a gap — but NOT for the reason this comment used to give.
+		// It said "no tier can name claude", which aihub#681 falsified: a
+		// RoleCandidate may now name harness "cc", and a machine's tier table
+		// may carry one. Two things keep this correct anyway: drain's harness
+		// key here is the string "claude" while a candidate's is "cc", so
+		// ResolveModel matches nothing either way; and leaving Claude Code's
+		// model empty is what drain WANTS, because aihub#555 measured that
+		// passing --model silently OVERRIDES the agent file's own frontmatter.
+		// Since aihub#681 that frontmatter is where this machine's configured cc
+		// model already is, so filling this in would override the operator's own
+		// choice with a second copy of it — the failure mode aihub#555 named.
 		probe := probeFor(string(h))
 		if probe == nil {
 			continue

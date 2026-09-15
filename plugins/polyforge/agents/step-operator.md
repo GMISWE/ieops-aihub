@@ -30,8 +30,12 @@ harness's full tool set. The rules that govern writes (Iron Rules, worktree boun
 arrive with your prompt and the injected payload; this file does not restate them, so they
 cannot drift here.
 
-Your model is set by this file's `model:` frontmatter, a Claude Code alias -- the one
-model identifier that means the same thing on every machine, which is why this file is
-generated at build time and committed to the repo. The dispatching loop must NOT pass a
-`model` argument: an explicit per-invocation model silently overrides this file (measured,
-aihub#555), which would turn this definition into dead text.
+Your model is set by this file's `model:` frontmatter, and it has TWO possible sources.
+By default it is a Claude Code alias from the repo-committed
+internal/roles/definitions/cc_aliases.yaml, rendered into this file by `go generate` and
+committed -- an identifier that means the same thing on every machine. But if this machine's
+~/.polyforge/config.toml names a `harness = "cc"` candidate for this role's tier, this file was
+REGENERATED from that candidate when the polyforge MCP server last started (aihub#681), and the
+value above is then machine-local and NOT portable. The dispatching loop must NOT pass a
+`model` argument either way: an explicit per-invocation model silently overrides this file
+(measured, aihub#555), which would turn this definition into dead text.

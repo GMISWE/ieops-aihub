@@ -1,10 +1,18 @@
 # Portable, repo-committed Claude Code tier->alias table (aihub#642 plan decision #2).
-# Read ONLY by the build-time CC agent generator (internal/roles/gen) -- never by
-# internal/config.LoadMachineConfig -- so no contributor's personal ~/.polyforge/config.toml
-# can introduce staleness-gate noise. CC aliases are the one model identifier that is
-# portable across machines (measured aihub#642: pi/codex/opencode identifiers are not),
-# which is exactly why this table can live in the repo while the other three harnesses'
-# equivalent data must not (see internal/config/machine.go's MachineRoles instead).
+# This is the TEAM DEFAULT, and the values internal/roles' cc_staleness_gate diffs the
+# committed plugins/polyforge/agents/step-*.md against. Nothing in internal/roles reads
+# ~/.polyforge/config.toml, so no contributor's personal config can make that gate noisy.
+#
+# CC aliases are the one model identifier that is portable across machines (measured
+# aihub#642: pi/codex/opencode identifiers are not), which is why this table CAN live in
+# the repo where the other three harnesses' equivalent data cannot.
+#
+# It is not the last word at runtime, though. Since aihub#681 a machine may override any
+# tier with `[[roles.tiers.<tier>]] harness = "cc"` in ~/.polyforge/config.toml; the MCP
+# server regenerates the plugin's agent files at startup, using this table for every tier
+# the machine did not name. Changing a value HERE is a team-wide policy change and needs
+# `go generate ./internal/roles/...` plus a commit; changing one THERE affects one machine
+# and needs nothing.
 lowest: haiku
 low: haiku
 default: sonnet

@@ -968,3 +968,119 @@ func TestGenerateRoles_WarnsBareModelIDAndUnknownHarness(t *testing.T) {
 		t.Errorf("stderr does not name the tier table the problem is in; got:\n%s", stderr)
 	}
 }
+
+// TestGenerateRoles_WarnsAboutRetiredAgentNames is aihub#683's regression test
+// for a defect aihub#682 introduced in this very function, handed over as
+// aihub#683.attrs.rider2_from_aihub_682_orphan_warning_narrowed.
+//
+// 🔴 THE RENAME DISARMED THE WARNING THAT EXISTS TO CATCH RENAMES.
+// warnOrphanAgentFiles derives its scan prefix from the names it JUST RENDERED.
+// aihub#682 moved pi's agents from pf-<role>.md to step-<role>.md, so in the same
+// commit the orphan scan moved from prefix `pf-` to prefix `step-` and stopped
+// seeing the entire generation it had just retired.
+//
+// Reproduced on the merged tree before the fix, with the binary rather than in
+// Go: a directory seeded with all seven historical pi names plus a step-zombie.md
+// produced exactly ONE warning — about step-zombie.md — while all seven pf-*.md
+// went unmentioned, exit 0.
+//
+// The consequence is not a missing log line. pi loads every *.md in its agents
+// directory, so an operator who upgrades through the rename via `polyforge roles
+// generate pi --out …` (which plugins/polyforge/pi/install.sh itself prints as
+// the manual remedy in two of its warnings, bypassing the installer's own retire
+// loop) is left with TWO dispatchable definitions for each of the five roles, and
+// the tool whose job is to say so says nothing.
+//
+// MUTANT (applied, compiled, red): delete the `retiredPrefixOf(harness, name) !=
+// ""` case from warnOrphanAgentFiles' switch. Result: every assertion below on a
+// pf-* name fails, exactly reproducing the measured pre-fix output.
+func TestGenerateRoles_WarnsAboutRetiredAgentNames(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{}
+	probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
+
+	// The two generations of retired pi naming, exactly as
+	// plugins/polyforge/pi/install.sh's retire loop lists them.
+	preRoleLayer := []string{"pf-execute.md", "pf-explore.md"}
+	retiredPerRole := []string{
+		"pf-executor.md", "pf-explorer.md", "pf-operator.md",
+		"pf-reviewer.md", "pf-designer.md",
+	}
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	stderr := captureStderr(t, func() {
+		if _, err := generateRolesInto(mc, "pi", dir, probe, "", true); err != nil {
+			t.Fatalf("generateRolesInto(pi): %v", err)
+		}
+	})
+
+	// Every retired name must be named. Silence about any one of them is a role
+	// with two live definitions.
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if !strings.Contains(stderr, name) {
+			t.Errorf("nothing was said about %s, a retired pi agent file sitting beside the "+
+				"newly written ones. pi loads every *.md in this directory.\n--- stderr ---\n%s",
+				name, stderr)
+		}
+	}
+
+	// 🔴 The five that SHADOW a current role get the stronger sentence, because
+	// theirs is a different problem with a different remedy: not a dead file, a
+	// second live definition. A single generic message for both would be a
+	// regression in meaning even while every name above appeared.
+	for _, name := range retiredPerRole {
+		idx := strings.Index(stderr, name)
+		if idx < 0 {
+			continue // already reported above
+		}
+		line := stderr[idx:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if !strings.Contains(line, "two dispatchable definitions") {
+			t.Errorf("%s shadows a role that was just written, but its warning does not say "+
+				"the role now has two dispatchable definitions:\n  %s", name, line)
+		}
+	}
+
+	// And the pre-role-layer pair, which shadow NOTHING, must not claim they do.
+	for _, name := range preRoleLayer {
+		idx := strings.Index(stderr, name)
+		if idx < 0 {
+			continue
+		}
+		line := stderr[idx:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if strings.Contains(line, "two dispatchable definitions") {
+			t.Errorf("%s has no current counterpart (there is no \"execute\"/\"explore\" role), "+
+				"so claiming a duplicate definition is false:\n  %s", name, line)
+		}
+	}
+
+	// 🔴 NEGATIVE CONTROL, and it is what stops the fix from being "warn about
+	// everything". The files this run just wrote must never be reported.
+	rendered, err := plannedFileNames("pi")
+	if err != nil {
+		t.Fatalf("plannedFileNames: %v", err)
+	}
+	if len(rendered) == 0 {
+		t.Fatal("no rendered names; the control below would be vacuous")
+	}
+	for _, name := range rendered {
+		if strings.Contains(stderr, "WARNING: "+filepath.Join(dir, name)) {
+			t.Errorf("%s was just written by this very call and was reported as an orphan", name)
+		}
+	}
+	// Nothing was deleted: this directory belongs to the operator.
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was removed; this generator warns, it does not delete: %v", name, err)
+		}
+	}
+}

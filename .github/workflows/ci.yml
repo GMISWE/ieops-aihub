@@ -4959,6 +4959,25 @@ jobs:
                       "PASS: agent retire arm: the retired file's own content survived intact" \
                       "PASS: agent retire arm: negative control left step-local-note.md byte-for-byte alone" \
                       "PASS: agent retire arm: negative control produced NO .bak file at all" \
+                      "PASS: cwd-independent MCP config: install.sh ran into a throwaway PI_AGENT_DIR" \
+                      "PASS: global MCP config: settings.scriptMode == false" \
+                      "PASS: global MCP config: settings.disableProxyTool == true" \
+                      "PASS: global MCP config: directTools is true" \
+                      "PASS: global MCP config: command is the polyforge CLI" \
+                      "PASS: cwd-independent MCP config: the probe cwd has no .mcp.json and no .pi/ of its own" \
+                      "PASS: cwd-independent MCP config: the project copy still lands in the project dir, not the probe cwd" \
+                      "PASS: degraded global write: install.sh exited non-zero, so a degraded run is not read as a complete install" \
+                      "PASS: degraded global write: the project .mcp.json was still written" \
+                      "PASS: degraded global write: project copy: settings.scriptMode == false" \
+                      "PASS: degraded global write: project copy: settings.disableProxyTool == true" \
+                      "PASS: degraded global write: project copy: directTools is true" \
+                      "PASS: degraded global write: project copy: command is the polyforge CLI" \
+                      "PASS: degraded global write: the run names the global path it could not write" \
+                      "PASS: degraded global write: the end-of-run banner names both the failure and what it breaks" \
+                      "PASS: degraded global write: the unmergeable path was left untouched, not half-written" \
+                      "PASS: degraded global write: negative control — the same install with nothing sabotaged exits 0" \
+                      "PASS: degraded global write: negative control — the unsabotaged install prints no such banner" \
+                      "PASS: degraded global write: negative control — and it DID write the global mcp.json, so the sabotage is what suppressed it" \
                       "ALL PASS"; do
             grep -qF -- "$want" pi_runtime.log \
               || { echo "::error::pi-runtime.test.sh did not report '$want' — the pi IR1 configuration is not actually gated"; exit 1; }
@@ -4999,9 +5018,37 @@ jobs:
           # unavailable; it is excluded from the floor and from the named checks above.
           # 50 = 44 + 6, i.e. one line of slack below the seven actually added, matching the
           # slack every previous raise of this floor kept. Measured 71 PASS with pi hidden.
+          #
+          # Floor raised 50 -> 56 by aihub#689, which added the cwd-independent MCP config
+          # section: SEVEN PASS lines that do not depend on pi being installed -- install
+          # succeeded, the four properties of the $PI_DIR/mcp.json the installer wrote (the
+          # SAME predicate the template arm at the top of the suite uses, so the two
+          # destinations cannot drift), and the two anti-vacuity checks that keep the probe
+          # arms honest (the probe cwd carries no MCP config of its own, and the project
+          # copy still lands in the project dir). The behaviour arm and its negative control
+          # need pi AND a real pi-mcp-adapter, so they SKIP on this runner and are excluded
+          # from the floor and from the named checks above -- which is exactly why the SEVEN
+          # above are named: on CI they are the entire gate on this change.
+          # 56 = 50 + 6, one line of slack below the seven added, same as every previous
+          # raise. Measured with pi forced absent: 78 PASS before, 85 after, 2 SKIP -> 3.
+          #
+          # Floor raised 56 -> 67 by aihub#689's review_fix, which added the degraded-global-
+          # write section: TWELVE PASS lines, none of which need pi, so unlike the probe arms
+          # above every one of them runs on this runner and every one is named in the list
+          # above. They gate a REGRESSION the first draft introduced rather than the original
+          # defect -- the new $PI_DIR/mcp.json write sits ABOVE the pre-existing
+          # $PROJECT_DIR/.mcp.json write under `set -euo pipefail`, so an unchecked failure in
+          # the new step aborted the installer before the old one ran. Nine assert the
+          # positive arm (non-zero exit, the project copy present AND carrying all four
+          # properties via the same shared predicate the other two sections use, the path
+          # named, the banner naming the consequence, and the unmergeable path left untouched)
+          # and three are the negative control that keeps them from being satisfied by an
+          # installer that fails unconditionally.
+          # 67 = 56 + 11, one line of slack below the twelve added, same as every previous
+          # raise. Measured with pi forced absent: 85 PASS before, 97 after, 3 SKIP -> 3.
           n=$(grep -c '^  PASS: ' pi_runtime.log || true)
-          [ "${n:-0}" -ge 50 ] \
-            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 50 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 67 ] \
+            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 67 — checks have gone missing"; exit 1; }
           echo "pi runtime gate: $n checks passed"
 
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal

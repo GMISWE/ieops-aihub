@@ -31,48 +31,73 @@ verdicts() {
   done
 }
 
+# Shared predicate: "this file is a polyforge MCP config with both IR1 bypass doors closed".
+# Emits PASS|/FAIL| lines for verdicts().
+#
+# ONE implementation, used TWICE since aihub#689 — for the template in the checkout, and for
+# the copy install.sh writes to $PI_DIR — because there are now two files that have to carry
+# the same four properties, and a second hand-written copy of this predicate is a copy that
+# can be relaxed on one destination without reddening anything on the other.
+#   $1 path to the JSON file
+#   $2 display name for the missing / unparseable messages
+#   $3 prefix prepended to EVERY verdict message. It is EMPTY for the template arm, which
+#      keeps those PASS lines byte-identical to the strings .github/workflows/ci.yml greps
+#      for -- a prefixed line does not contain the unprefixed one as a substring, so the two
+#      arms cannot satisfy each other's named checks.
+mcp_config_verdicts() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, os, sys
+path, display, prefix = sys.argv[1:4]
+
+# The prefix is spliced in at each CALL SITE rather than inside emit(). That is not
+# style: internal/citest/dbtestcov matches a ci.yml `for want in …` entry by its NAME
+# part against the literals in this file, treating `%s` as a gap that absorbs anything
+# (shellsuite.go wildcardRE / templateMatches, minWantOverlap=4). A bare literal like
+# `emit("PASS", "directTools is true")` carries no gap, so NO prefixed want can ever
+# match it and every assertion naming one reads as a renamed/deleted check. Keep the
+# leading %s on every message here.
+def emit(verdict, msg):
+    print("%s|%s" % (verdict, msg))
+
+if not os.path.isfile(path):
+    emit("FAIL", "%s%s is missing" % (prefix, display)); raise SystemExit
+try:
+    cfg = json.load(open(path))
+except ValueError as e:
+    emit("FAIL", "%s%s is not valid JSON (%s)" % (prefix, display, e)); raise SystemExit
+
+s = cfg.get("settings") or {}
+for key in ("scriptMode", "disableProxyTool"):
+    if key not in s:
+        emit("FAIL", "%ssettings.%s is absent — the bypass door it closes is open by default" % (prefix, key))
+want = {"scriptMode": False, "disableProxyTool": True}
+for key, val in want.items():
+    if key in s:
+        emit("PASS", "%ssettings.%s == %s" % (prefix, key, json.dumps(val))) if s[key] is val \
+            else emit("FAIL", "%ssettings.%s must be %s, found %s"
+                              % (prefix, key, json.dumps(val), json.dumps(s[key])))
+
+srv = (cfg.get("mcpServers") or {}).get("polyforge")
+if not isinstance(srv, dict):
+    emit("FAIL", "%smcpServers.polyforge is absent" % prefix)
+else:
+    # Without directTools the 45 tools collapse into the single `mcp` proxy and the gate
+    # has no individual tool name to match on — the same failure as leaving the door open.
+    emit("PASS", "%sdirectTools is true" % prefix) if srv.get("directTools") is True \
+        else emit("FAIL", "%smcpServers.polyforge.directTools must be true, found %s"
+                          % (prefix, json.dumps(srv.get("directTools"))))
+    emit("PASS", "%scommand is the polyforge CLI" % prefix) if srv.get("command") == "polyforge" \
+        else emit("FAIL", "%smcpServers.polyforge.command must be \"polyforge\", found %s"
+                          % (prefix, json.dumps(srv.get("command"))))
+PY
+}
+
 # ---------------------------------------------------------------------------
 echo "== .mcp.json template closes both IR1 bypass doors =="
 # mcpScript ("MCP-only plain-JavaScript tool") and the mcp proxy both take the REAL tool
 # name in an argument. A gate keyed on tool name sees `mcpScript`/`mcp` and never the
 # pf_commit underneath, so with either door open IR1 is decorative on pi.
-mcp_out="$(python3 - "$root" <<'PY'
-import json, os, sys
-root = sys.argv[1]
-path = os.path.join(root, "pi", "mcp.json")
-if not os.path.isfile(path):
-    print("FAIL|pi/mcp.json is missing"); raise SystemExit
-try:
-    cfg = json.load(open(path))
-except ValueError as e:
-    print("FAIL|pi/mcp.json is not valid JSON (%s)" % e); raise SystemExit
-
-s = cfg.get("settings") or {}
-for key in ("scriptMode", "disableProxyTool"):
-    if key not in s:
-        print("FAIL|settings.%s is absent — the bypass door it closes is open by default" % key)
-want = {"scriptMode": False, "disableProxyTool": True}
-for key, val in want.items():
-    if key in s:
-        print(("PASS|settings.%s == %s" % (key, json.dumps(val))) if s[key] is val
-              else ("FAIL|settings.%s must be %s, found %s" % (key, json.dumps(val), json.dumps(s[key]))))
-
-srv = (cfg.get("mcpServers") or {}).get("polyforge")
-if not isinstance(srv, dict):
-    print("FAIL|mcpServers.polyforge is absent")
-else:
-    # Without directTools the 45 tools collapse into the single `mcp` proxy and the gate
-    # has no individual tool name to match on — the same failure as leaving the door open.
-    print("PASS|directTools is true" if srv.get("directTools") is True
-          else "FAIL|mcpServers.polyforge.directTools must be true, found %s" % json.dumps(srv.get("directTools")))
-    print("PASS|command is the polyforge CLI" if srv.get("command") == "polyforge"
-          else "FAIL|mcpServers.polyforge.command must be \"polyforge\", found %s" % json.dumps(srv.get("command")))
-PY
-)"
-while IFS='|' read -r verdict msg; do
-  [ -n "${verdict:-}" ] || continue
-  [ "$verdict" = "PASS" ] && ok "$msg" || bad "$msg"
-done <<< "$mcp_out"
+verdicts <<< "$(mcp_config_verdicts "$root/pi/mcp.json" "pi/mcp.json" "")"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -890,6 +915,292 @@ else
     bad "agent retire arm: negative control produced $n_stray .bak file(s) over current names; the retire step is firing on names it was never given, so the positive arm above proves nothing"
   fi
   rm -rf "$agent_retire_sandbox"
+  trap - EXIT
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== the MCP config pi reads is cwd-INDEPENDENT (aihub#689) =="
+# THE DEFECT THIS GATES. pi dispatches every step-role agent as a REAL CHILD PROCESS (its
+# subagent extension spawn()s pi again) with cwd set to the task worktree, and it never
+# passes --mcp-config. The adapter resolves the project config as resolve(cwd, ".mcp.json")
+# with NO upward walk, and a polyforge task worktree has no .mcp.json of its own — so the
+# child registered ZERO MCP servers, held zero polyforge_pf_* tools, and the mandatory first
+# pf_get_step of every auto-executed work item was refused. A tool REGISTRATION failure, not
+# a permission one: the read-only roles already name polyforge_pf_get_step in the `tools:`
+# allowlist the section above checks, and there was simply no tool of that name to allow.
+# install.sh therefore ALSO writes the template to $PI_DIR/mcp.json, the adapter's
+# Pi-global source, which is read at every cwd.
+#
+# THREE ARMS, and the THIRD is the load-bearing one:
+#   file       — install.sh wrote $PI_DIR/mcp.json and it still closes both bypass doors.
+#                Runs everywhere, needs no pi. Shares its predicate with the template
+#                section at the top of this file, so the two destinations cannot drift.
+#   behaviour  — pi, started from a cwd that has NO .mcp.json, registers the server anyway.
+#   negative   — the SAME probe with $PI_DIR/mcp.json deleted registers NOTHING.
+# Without the negative control the behaviour arm passes on a pi that picked the config up
+# from somewhere else entirely — a real risk rather than a theoretical one, because FOUR of
+# the six standard sources are cwd-independent (~/.config/mcp/mcp.json, ~/.agents/mcp.json,
+# ~/.agents/mcp/mcp.json, $PI_DIR/mcp.json) — and the whole section would collapse back into
+# the file arm. That is how aihub#606/#617/#682 each shipped a broken installer past a green
+# suite. HOME is sandboxed alongside PI_CODING_AGENT_DIR for the same reason: the other three
+# cwd-independent sources are HOME-relative, so a developer who happens to have one would
+# otherwise redden the negative control for a reason that has nothing to do with this change.
+#
+# 🔴 THE PROBE MUST HOLD STDIN OPEN, and that was measured, not reasoned. The MCP status line
+# arrives ASYNCHRONOUSLY, after the rpc request has already been answered, and `printf ... |
+# pi` closes the pipe and exits BEFORE it lands. Measured on pi 0.85.1 + pi-mcp-adapter
+# 2.33.0, config held constant and correct: the close-immediately probe produced the marker
+# in 1 of 6 runs — a coin toss that reads as a clean failure. The loop below holds the write
+# end open until the marker appears or the deadline passes, so the positive arm settles in
+# ~1s (measured 3/3) and only the negative arm pays the full 20s wait.
+#
+# LLM-free, like the skills probe above: --mode rpc + get_commands needs no API key and makes
+# no model call. It does not need the `polyforge` binary either — the marker reports what was
+# REGISTERED from config, and was measured identical with polyforge hidden from PATH.
+#
+# $1 cwd to start pi in, $2 output file, $3 sandbox agent dir, $4 sandbox HOME.
+pi_mcp_probe() {
+  local cwd="$1" out="$2" agent="$3" fakehome="$4"
+  rm -f "$out" "$out.err"
+  : > "$out"
+  ( printf '{"id":1,"type":"get_commands"}\n'
+    # 🔴 Break on the SETTLED status, not on any "MCP: " line. The adapter emits an
+    # intermediate "MCP: connecting to N servers..." first, and a loop that stops there
+    # closes stdin while the real answer is still in flight -- measured reddening the
+    # positive arm on a cold mcp-cache.json while the identical probe passed by luck on a
+    # warm one. "servers? enabled" is the terminal line in both the connected and the
+    # failed-to-connect case, and the assertions below read the count out of it.
+    for _ in $(seq 1 80); do
+      grep -qE 'servers? enabled' "$out" 2>/dev/null && break
+      sleep 0.25
+    done ) \
+  | ( cd "$cwd" && HOME="$fakehome" PI_CODING_AGENT_DIR="$agent" \
+        timeout 120 "$pi_bin" --mode rpc --no-session 2>"$out.err" ) > "$out" || true
+}
+
+# 🔴 THE STUB ADAPTER THE OTHER SECTIONS USE IS NOT ENOUGH HERE, and getting this wrong is a
+# FALSE GREEN, not a false red. Those sections stub
+# $PI_DIR/npm/node_modules/pi-mcp-adapter/package.json only to keep install.sh off the
+# network ("already installed" branch). But this section's claim is that the ADAPTER reads
+# the config, and a stub registers no extension at all: measured, a sandbox built that way
+# reports no MCP server in BOTH arms, so the positive arm reddens for an unrelated reason
+# and the negative control passes for the wrong one. A real adapter is therefore linked in,
+# and where none exists both probe arms SKIP rather than assert anything.
+#
+# SYMLINKED, not copied: the tree is 88 MB, and nothing here writes to it. pi discovers npm
+# packages from settings.json ("packages"), which the real install.sh flow gets from
+# `pi install npm:pi-mcp-adapter` — the step this sandbox is deliberately skipping — so the
+# fixture writes that entry itself.
+adapter_modules=""
+for cand in \
+  "$HOME/.pi/agent/npm/node_modules" \
+  "$(npm root -g 2>/dev/null || true)"; do
+  [ -n "$cand" ] && [ -d "$cand/pi-mcp-adapter" ] && { adapter_modules="$cand"; break; }
+done
+
+mcp_cwd_sandbox="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$mcp_cwd_sandbox" ] || [ ! -d "$mcp_cwd_sandbox" ]; then
+  bad "could not create a temp dir for the cwd-independent MCP config arm"
+else
+  trap 'rm -rf "$mcp_cwd_sandbox"' EXIT
+  mkdir -p "$mcp_cwd_sandbox/agent/npm" \
+           "$mcp_cwd_sandbox/proj" "$mcp_cwd_sandbox/elsewhere" "$mcp_cwd_sandbox/home"
+  if [ -n "$adapter_modules" ]; then
+    ln -s "$adapter_modules" "$mcp_cwd_sandbox/agent/npm/node_modules"
+    printf '{"packages":["npm:pi-mcp-adapter"]}\n' > "$mcp_cwd_sandbox/agent/settings.json"
+  else
+    mkdir -p "$mcp_cwd_sandbox/agent/npm/node_modules/pi-mcp-adapter"
+    printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+      > "$mcp_cwd_sandbox/agent/npm/node_modules/pi-mcp-adapter/package.json"
+  fi
+  if env PI_AGENT_DIR="$mcp_cwd_sandbox/agent" \
+       bash "$root/pi/install.sh" "$mcp_cwd_sandbox/proj" \
+       > "$mcp_cwd_sandbox/install.log" 2>&1; then
+    ok "cwd-independent MCP config: install.sh ran into a throwaway PI_AGENT_DIR"
+  else
+    bad "cwd-independent MCP config: install.sh failed in a throwaway dir:"
+    sed 's/^/      /' "$mcp_cwd_sandbox/install.log" >&2
+  fi
+
+  # --- file arm. No pi needed, so this half runs in CI too. ------------------------------
+  verdicts <<< "$(mcp_config_verdicts "$mcp_cwd_sandbox/agent/mcp.json" \
+                    "\$PI_DIR/mcp.json" "global MCP config: ")"
+
+  # 🔴 ANTI-VACUITY for both probe arms, asserted rather than assumed. The probe cwd must not
+  # be the project dir and must hold no MCP config of its own, or "pi found a server" says
+  # nothing about the GLOBAL copy. A later edit that pointed the probe at $sandbox/proj would
+  # leave every assertion below green and meaningless.
+  if [ -e "$mcp_cwd_sandbox/elsewhere/.mcp.json" ] || [ -e "$mcp_cwd_sandbox/elsewhere/.pi" ]; then
+    bad "cwd-independent MCP config: the probe cwd holds its own MCP config — the behaviour arm would prove nothing"
+  else
+    ok "cwd-independent MCP config: the probe cwd has no .mcp.json and no .pi/ of its own"
+  fi
+  # ...and the installer must genuinely have written the project copy elsewhere, or "the
+  # global one is what did the work" is not a distinction this sandbox can draw.
+  if [ -f "$mcp_cwd_sandbox/proj/.mcp.json" ]; then
+    ok "cwd-independent MCP config: the project copy still lands in the project dir, not the probe cwd"
+  else
+    bad "cwd-independent MCP config: no $mcp_cwd_sandbox/proj/.mcp.json — the installer stopped writing the project copy"
+  fi
+
+  # --- behaviour arm + negative control. Opportunistic. ---------------------------------
+  if [ -z "$pi_bin" ]; then
+    skip "cwd-independent MCP config: pi not installed here — MCP registration not probed"
+  elif [ -z "$adapter_modules" ]; then
+    skip "cwd-independent MCP config: no real pi-mcp-adapter to link in — MCP registration not probed"
+  elif ! command -v timeout >/dev/null 2>&1; then
+    skip "cwd-independent MCP config: coreutils timeout unavailable — not running pi unbounded"
+  else
+    pi_mcp_probe "$mcp_cwd_sandbox/elsewhere" "$mcp_cwd_sandbox/pos.out" \
+                 "$mcp_cwd_sandbox/agent" "$mcp_cwd_sandbox/home"
+    # The probe must have RUN. Without this, "no marker" in the negative control below is
+    # satisfied by a pi that crashed on startup, and the control proves nothing either.
+    if grep -q '"command":"get_commands","success":true' "$mcp_cwd_sandbox/pos.out"; then
+      ok "cwd-independent MCP config: pi answered the rpc probe from a cwd with no .mcp.json"
+    else
+      bad "cwd-independent MCP config: pi returned no successful get_commands response — the probe did not run, so neither arm below means anything"
+      sed 's/^/      /' "$mcp_cwd_sandbox/pos.out.err" >&2
+    fi
+    if grep -q 'MCP: 1 server enabled' "$mcp_cwd_sandbox/pos.out"; then
+      ok "cwd-independent MCP config: pi registered the polyforge server from a cwd with no .mcp.json"
+    else
+      bad "cwd-independent MCP config: pi registered NO MCP server from a cwd with no .mcp.json — a spawned step-role subagent would hold zero polyforge_pf_* tools and its first pf_get_step would be refused"
+    fi
+
+    # 🔴 THE NEGATIVE CONTROL. Same sandbox, same probe, one variable: the file.
+    rm -f "$mcp_cwd_sandbox/agent/mcp.json"
+    pi_mcp_probe "$mcp_cwd_sandbox/elsewhere" "$mcp_cwd_sandbox/neg.out" \
+                 "$mcp_cwd_sandbox/agent" "$mcp_cwd_sandbox/home"
+    if grep -q '"command":"get_commands","success":true' "$mcp_cwd_sandbox/neg.out"; then
+      ok "cwd-independent MCP config: negative control — pi still ran with the global config deleted"
+    else
+      bad "cwd-independent MCP config: negative control — pi returned no successful get_commands response, so its silence about MCP is not evidence"
+    fi
+    if grep -q 'MCP: ' "$mcp_cwd_sandbox/neg.out"; then
+      bad "cwd-independent MCP config: negative control — pi STILL registered an MCP server with \$PI_DIR/mcp.json deleted, so the positive arm above is being satisfied by some other config source and proves nothing about what install.sh wrote"
+    else
+      ok "cwd-independent MCP config: negative control — deleting \$PI_DIR/mcp.json leaves pi with no MCP server at all, so the positive arm is about that file"
+    fi
+  fi
+  rm -rf "$mcp_cwd_sandbox"
+  trap - EXIT
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "== a failed GLOBAL config write does not take the PROJECT one down (aihub#689) =="
+# THE REGRESSION THIS GATES, which is NOT the defect the section above gates. install.sh runs
+# under `set -euo pipefail`, and aihub#689 added the $PI_DIR/mcp.json write ABOVE the
+# $PROJECT_DIR/.mcp.json write that every main pi session in the project already depended on
+# — a step which, until then, had been the last one and so could never pre-empt anything. An
+# unchecked `cp` in the NEW step therefore aborted the whole installer before the OLD step
+# ran: with a stale DIRECTORY at $PI_DIR/mcp.json the run ended on a bare one-line `cp:` and
+# the project copy was never written at all. A new capability that can delete an existing one
+# is a worse bug than the one it was added to fix.
+#
+# So the new step is DEGRADABLE, and both halves of that are asserted here:
+#   it does not abort  — the project copy is still written, and still a real config;
+#   it is not quiet    — the path is named, the end-of-run banner names the consequence, and
+#                        the script exits NON-ZERO.
+# The second half is not decoration. A quietly-skipped global copy re-creates precisely the
+# defect aihub#689 exists to fix, and the next person to find out would be an auto-executed
+# work item whose mandatory first pf_get_step is refused — so "non-fatal" without "loud" is
+# not a fix, it is the same bug with the evidence removed.
+#
+# A DIRECTORY is the sabotage because it is the failure that was actually reproduced in
+# review, and because it needs no unusual privileges: the other two triggers named there (a
+# read-only mount, a file owned by someone else) make this arm either unrunnable as a normal
+# user or vacuous as root. Needs no pi, so unlike the probe arms above this one runs in CI.
+#
+# 🔴 AND IT HAS A NEGATIVE CONTROL, for the reason aihub#606/#617/#682 each shipped a broken
+# installer past a green suite: "it printed a warning and exited 1" proves nothing unless the
+# SAME installer, in the SAME sandbox, with the sabotage as the ONLY variable, exits 0 and
+# prints no such thing. Without the control, a merge_mcp that failed unconditionally — or a
+# banner printed on every run — satisfies every assertion above it.
+degraded_sandbox="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$degraded_sandbox" ] || [ ! -d "$degraded_sandbox" ]; then
+  bad "could not create a temp dir for the degraded-global-write arm"
+else
+  trap 'rm -rf "$degraded_sandbox"' EXIT
+  # $1 = arm dir under the sandbox; $2 = "sabotage" to put a DIRECTORY where the global
+  # config has to go. Everything else is identical between the two arms BY CONSTRUCTION —
+  # one function, one call site shape — which is what makes the control a control.
+  degraded_run() {
+    local armdir="$degraded_sandbox/$1"
+    mkdir -p "$armdir/agent/npm/node_modules/pi-mcp-adapter" "$armdir/proj"
+    printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
+      > "$armdir/agent/npm/node_modules/pi-mcp-adapter/package.json"
+    if [ "${2:-}" = "sabotage" ]; then mkdir -p "$armdir/agent/mcp.json"; fi
+    env PI_AGENT_DIR="$armdir/agent" \
+      bash "$root/pi/install.sh" "$armdir/proj" > "$armdir/install.log" 2>&1
+  }
+
+  # --- positive arm: the global destination cannot be written ---------------------------
+  degraded_run sabotaged sabotage && deg_rc=0 || deg_rc=$?
+  deg_log="$degraded_sandbox/sabotaged/install.log"
+  if [ "$deg_rc" -ne 0 ]; then
+    ok "degraded global write: install.sh exited non-zero, so a degraded run is not read as a complete install (exit $deg_rc)"
+  else
+    bad "degraded global write: install.sh exited 0 with \$PI_DIR/mcp.json unwritten — a caller cannot tell this run apart from a working one, and the aihub#689 defect is back with nothing saying so"
+  fi
+
+  # THE REGRESSION ITSELF.
+  if [ -f "$degraded_sandbox/sabotaged/proj/.mcp.json" ]; then
+    ok "degraded global write: the project .mcp.json was still written"
+  else
+    bad "degraded global write: the project .mcp.json was NEVER written — the new global step aborted the installer before the pre-existing step it was added above"
+  fi
+  # ...and it has to be a real config, not merely a file at that path. A presence-only
+  # assertion here is satisfied by a zero-byte touch, which is the exact shape of false green
+  # aihub#606/#617/#682 shared. Same predicate as both sections above, so the three
+  # destinations cannot drift apart.
+  verdicts <<< "$(mcp_config_verdicts "$degraded_sandbox/sabotaged/proj/.mcp.json" \
+                    "the project .mcp.json after a degraded global write" \
+                    "degraded global write: project copy: ")"
+
+  # LOUD, in two separate places, because either one alone is easy to lose in 40 lines of
+  # install output. First: the path that could not be written, which is what to go and fix.
+  if grep -q "$degraded_sandbox/sabotaged/agent/mcp.json" "$deg_log"; then
+    ok "degraded global write: the run names the global path it could not write"
+  else
+    bad "degraded global write: nothing in the output names \$PI_DIR/mcp.json, so the user cannot tell which path to fix"
+  fi
+  # Second: the CONSEQUENCE, which is what tells a reader whether the warning can be ignored.
+  # It cannot — that consequence is the entire content of aihub#689.
+  if grep -q 'INCOMPLETE INSTALL' "$deg_log" && grep -q 'pf_get_step' "$deg_log"; then
+    ok "degraded global write: the end-of-run banner names both the failure and what it breaks"
+  else
+    bad "degraded global write: no end-of-run banner naming the subagent consequence — a warning that only names a syscall is one a user skips, and this one means every auto-executed work item fails its first pf_get_step"
+  fi
+  # A refusal has to BE a refusal: nothing may have been written into the path it declined.
+  if [ -d "$degraded_sandbox/sabotaged/agent/mcp.json" ] \
+     && [ -z "$(ls -A "$degraded_sandbox/sabotaged/agent/mcp.json" 2>/dev/null)" ]; then
+    ok "degraded global write: the unmergeable path was left untouched, not half-written"
+  else
+    bad "degraded global write: the installer wrote into the path it said it was refusing to touch"
+  fi
+
+  # --- 🔴 negative control: same sandbox, same function, sabotage the only variable -------
+  degraded_run control && ctl_rc=0 || ctl_rc=$?
+  ctl_log="$degraded_sandbox/control/install.log"
+  if [ "$ctl_rc" -eq 0 ]; then
+    ok "degraded global write: negative control — the same install with nothing sabotaged exits 0"
+  else
+    bad "degraded global write: negative control — the UNSABOTAGED install also failed (exit $ctl_rc), so the non-zero exit above is not evidence about the sabotage:"
+    sed 's/^/      /' "$ctl_log" >&2
+  fi
+  if grep -q 'INCOMPLETE INSTALL' "$ctl_log"; then
+    bad "degraded global write: negative control — the UNSABOTAGED install also printed the banner, so the banner is unconditional and the assertion above proves nothing"
+  else
+    ok "degraded global write: negative control — the unsabotaged install prints no such banner"
+  fi
+  if [ -f "$degraded_sandbox/control/agent/mcp.json" ]; then
+    ok "degraded global write: negative control — and it DID write the global mcp.json, so the sabotage is what suppressed it"
+  else
+    bad "degraded global write: negative control — the global mcp.json is absent with nothing sabotaged, so this arm is measuring something other than the sabotage"
+  fi
+  rm -rf "$degraded_sandbox"
   trap - EXIT
 fi
 

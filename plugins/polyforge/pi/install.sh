@@ -29,7 +29,9 @@
 # Everything this writes is listed under "what this touches" in the summary at the end.
 # Re-running is safe: nothing is overwritten without a backup alongside it. Three cases are
 # not plain file copies and are handled explicitly —
-#   .mcp.json           is MERGED (other MCP servers in it are preserved), not replaced;
+#   the two MCP configs are MERGED (other MCP servers in them are preserved), not replaced.
+#                       There are TWO of them since aihub#689 — $PROJECT_DIR/.mcp.json and
+#                       $PI_DIR/mcp.json — and both go through the same merge_mcp() below;
 #   .agents/skills/     is a tree, so the whole directory is backed up before it is refreshed
 #                       — and under POLYFORGE_PI_SKILL_SCOPE=user it is MOVED ASIDE to the
 #                       same .bak-<stamp> name rather than refreshed or deleted;
@@ -49,6 +51,13 @@ PI_SKILL_SCOPE="${POLYFORGE_PI_SKILL_SCOPE:-both}"
 # $$ as well as the timestamp: date has one-second granularity, and two runs inside the
 # same second would otherwise have the second overwrite the first run's backup.
 STAMP="$(date +%Y%m%d%H%M%S)-$$"
+# Flipped to 0 if the global-MCP step below cannot write $PI_DIR/mcp.json. That step is
+# DEGRADABLE (see its call site) so it cannot take the rest of the install down with it —
+# but a degraded run re-creates exactly the defect aihub#689 exists to fix, so the flag is
+# read again at the very end to shout about it and to exit non-zero. Declared HERE rather
+# than at the step so `set -u` cannot turn "the step was never reached" into an unbound
+# variable error in the summary.
+GLOBAL_MCP_OK=1
 
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -103,6 +112,109 @@ place_skills() {
   mkdir -p "$dst"
   cp -r "$PLUGIN_ROOT"/skills/* "$dst/"
   say "installed $count skills into $label (harness-neutral by construction; see aihub#670)"
+}
+
+# place() for an MCP config. Only the `polyforge` server entry and the settings keys the
+# adapter depends on are IMPOSED; everything else already in the file is PRESERVED.
+#
+# ⚠️ DELIBERATELY NOT place(). place() is a whole-file copy, and either destination may
+# already declare MCP servers this script knows nothing about — the project's own, or, at
+# $PI_DIR, the user's GLOBAL ones, which belong to every other project on this box. Copying
+# the template over either would silently unregister all of them, leaving them in a .bak the
+# user has no reason to look at. That reasoning is the project file's, written when this was
+# one destination (aihub#503); aihub#689 added the second, and a promise this script keeps
+# for one file named mcp.json and not the other is a promise no reader can rely on — which
+# is the same argument place_skills() exists for.
+#
+# ⚠️ EVERY failure-prone command in here is CHECKED EXPLICITLY and turned into a `return 1`,
+# rather than being left to `set -e`. Two reasons, and the first is not optional: both call
+# sites now test this function's return value, and a function invoked in a condition context
+# has `set -e` DISABLED for its whole body — so an unchecked `cp` here would no longer abort,
+# it would fall through to the next line and corrupt something quietly. The second is that
+# `set -e` reported these as a bare one-line `cp:` 300 lines from the step that caused it
+# (aihub#689 review), which is how this was found.
+#   $1 destination path
+#   $2 label used in this step's messages
+# Returns 0 when the destination now carries the polyforge server, 1 when it does not.
+merge_mcp() {
+  local dst="$1" label="$2"
+  if [ ! -e "$dst" ]; then
+    if ! cp -p "$PLUGIN_ROOT/pi/mcp.json" "$dst"; then
+      warn "could not create $dst (read-only mount? unwritable parent directory?)"
+      return 1
+    fi
+    say "wrote $label (polyforge server, directTools, both bypass doors closed)"
+    return 0
+  fi
+  # Exists but is not a regular file: a directory, a dangling symlink, a socket. There is
+  # nothing to merge, and every branch below would fail on it one command at a time.
+  if [ ! -f "$dst" ]; then
+    warn "$dst exists but is NOT a regular file — refusing to merge into it. Move it aside"
+    warn "and re-run, or the polyforge MCP server will not be registered from this path."
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    if ! cp -p "$dst" "$dst.bak-$STAMP"; then
+      warn "could not back up $dst -> $(basename "$dst").bak-$STAMP — the original is"
+      warn "therefore NOT being touched. Fix the permissions on that path and re-run."
+      return 1
+    fi
+    if python3 - "$PLUGIN_ROOT/pi/mcp.json" "$dst" "$label" "$dst.bak-$STAMP" <<'PY'
+import json, sys
+tmpl = json.load(open(sys.argv[1]))
+dst, label, bak = sys.argv[2], sys.argv[3], sys.argv[4]
+# THREE states of an existing destination, reported apart (aihub#689 review). Rebuilding a
+# file from the template and merging into it are very different things to have happened to a
+# config that may declare servers belonging to every other project on this box, and until
+# now the only trace of the former was `kept 0 other server(s): -` — which reads as "there
+# was nothing there". Still FAIL-SAFE: an unreadable or malformed file is rebuilt, never
+# aborted on, and its original bytes are always in the .bak this names out loud.
+raw = open(dst, "rb").read()
+salvage = None
+if not raw.strip():
+    salvage = "empty"
+    cur = {}
+else:
+    try:
+        cur = json.loads(raw)
+        if not isinstance(cur, dict):
+            raise ValueError("top level is a %s, not an object" % type(cur).__name__)
+    except Exception as e:
+        salvage = "%s: %s" % (type(e).__name__, e)
+        cur = {}
+servers = cur.setdefault("mcpServers", {})
+kept = [k for k in servers if k != "polyforge"]
+servers["polyforge"] = tmpl["mcpServers"]["polyforge"]
+settings = cur.setdefault("settings", {})
+overridden = [k for k, v in tmpl["settings"].items() if k in settings and settings[k] != v]
+settings.update(tmpl["settings"])
+json.dump(cur, open(dst, "w"), indent=2)
+open(dst, "a").write("\n")
+if salvage is None:
+    print("  merged into existing %s; kept %d other server(s): %s"
+          % (label, len(kept), ", ".join(kept) or "-"))
+elif salvage == "empty":
+    print("  %s existed but was EMPTY — wrote a fresh config into it, nothing to merge" % label)
+else:
+    print("  ⚠️  %s did NOT parse as a JSON object (%s)." % (label, salvage))
+    print("  ⚠️  It was REBUILT from the template, NOT merged: any MCP server or setting it")
+    print("  ⚠️  declared is no longer in effect. Nothing was destroyed — the original bytes")
+    print("  ⚠️  are at %s — but you must merge back anything you still need by hand." % bak)
+if overridden:
+    print("  ⚠️  overrode conflicting settings (these are security-relevant): %s" % ", ".join(overridden))
+PY
+    then
+      say "backed up the previous $label -> $(basename "$dst").bak-$STAMP"
+      return 0
+    fi
+    warn "could not merge into $dst. Nothing was lost: its previous contents are intact at"
+    warn "$dst.bak-$STAMP."
+    return 1
+  fi
+  warn "$dst exists and python3 is unavailable to merge into it — NOT overwriting."
+  warn "Add this by hand, or the adapter will not register the polyforge tools:"
+  sed 's/^/      /' "$PLUGIN_ROOT/pi/mcp.json" >&2
+  return 0
 }
 
 [ -f "$PLUGIN_ROOT/pi-hooks.json" ] || die "not a polyforge plugin checkout: $PLUGIN_ROOT"
@@ -285,50 +397,85 @@ else
   fi
 fi
 
+step "global MCP config -> $PI_DIR/mcp.json"
+# WHY A SECOND COPY OF THE SAME TEMPLATE (aihub#689).
+#
+# pi dispatches every step-role agent as a REAL CHILD PROCESS (its subagent extension
+# spawn()s pi again), with cwd set to the task worktree, and it never passes --mcp-config.
+# The adapter resolves the project config as resolve(cwd, ".mcp.json") with NO upward walk,
+# and a polyforge task worktree has no .mcp.json of its own — so the child registered ZERO
+# MCP servers, therefore zero polyforge_pf_* tools, and the mandatory first pf_get_step of
+# every auto-executed work item was refused. That is a tool REGISTRATION failure, not a
+# permission one: the read-only roles already name polyforge_pf_get_step in their `tools:`
+# allowlist, and it never had a tool of that name to allow.
+#
+# $PI_DIR/mcp.json is the adapter's first-class "Pi global override" source
+# (dist/config.js getPiGlobalConfigPath), and it is read at EVERY cwd — the one property
+# the project copy below does not have. Source order, LATER WINS:
+#   ~/.config/mcp/mcp.json -> ~/.agents/mcp.json -> ~/.agents/mcp/mcp.json
+#   -> $PI_DIR/mcp.json -> <cwd>/.mcp.json -> <cwd>/.pi/mcp.json
+# so this entry is ordered BEFORE both project sources and the project file still wins.
+# Nothing about the existing main-session behaviour changes.
+#
+# Measured on pi 0.85.1 + pi-mcp-adapter 2.33.0, sandboxed PI_CODING_AGENT_DIR and HOME,
+# with the hold-stdin-open rpc probe tests/pi-runtime.test.sh now carries:
+#   this file only, cwd with no .mcp.json -> "MCP: 1 server enabled"   (the fix)
+#   project .mcp.json only               -> "MCP: 1 server enabled"   (unchanged)
+#   BOTH                                 -> "MCP: 1 server enabled", zero stderr, and NO
+#                                           duplicate/shadow notice: loadMcpConfig merges
+#                                           same-named entries silently, and the only
+#                                           console.warn on that path is for Claude-plugin
+#                                           servers, which this is not
+#   neither                              -> no MCP status line at all
+#
+# ⚠️ DO NOT "simplify" this with PI_MCP_CONFIG_MODE=exclusive. Exclusive mode makes this
+# file the ONLY source, which silently shadows the project .mcp.json below along with every
+# other MCP server the user has configured anywhere.
+#
+# 🔴 DEGRADABLE, AND DELIBERATELY SO — this is the one step in the script whose failure is
+# caught rather than fatal. It is NEW, and the step below it is OLD: every main pi session
+# in this project already depends on $PROJECT_DIR/.mcp.json, and it has been the LAST thing
+# this script wrote for as long as it has existed, so nothing could ever pre-empt it. Adding
+# a new write above it under `set -euo pipefail` silently changed that: with $PI_DIR/mcp.json
+# a stale DIRECTORY, the installer aborted here with a one-line `cp:` and the project copy
+# was never written at all (reproduced in review). A new capability that can take down an
+# existing one is a worse bug than the one this step fixes.
+#
+# So a failure here is caught, and paid for at the END of the script instead: a banner naming
+# the exact consequence, and a NON-ZERO EXIT so no caller reads a degraded run as a complete
+# install. That is the other half of the trade — "non-fatal" must not mean "quiet", because a
+# quietly-skipped global copy re-creates precisely the defect above, and the next person to
+# notice would be an auto-executed work item whose first pf_get_step is refused.
+#
+# The step below is NOT degradable and is left exactly as fatal as it was before this change.
+# Making it non-fatal too would be a behaviour change beyond this fix, and in the wrong
+# direction: an install that cannot write the project config has not installed anything the
+# main session can use.
+mkdir -p "$PI_DIR"
+if ! merge_mcp "$PI_DIR/mcp.json" "$PI_DIR/mcp.json"; then
+  GLOBAL_MCP_OK=0
+  warn "continuing anyway — the project copy below is a PRE-EXISTING capability and this new"
+  warn "step must not be able to take it down. See the banner at the end of this run."
+fi
+
 step "MCP config -> $PROJECT_DIR/.mcp.json"
 # scriptMode:false and disableProxyTool:true in this file are SECURITY settings, not
 # performance tuning: mcpScript and the mcp proxy both carry the real tool name in an
 # argument, so a name-keyed gate cannot see a pf_commit underneath them.
-# tests/pi-runtime.test.sh asserts both keys. They are necessary but NOT sufficient — on a
-# cold metadata cache the adapter registers the proxy tool anyway, which is why the bridge
-# extension also denies `mcp`/`mcpScript` outright.
+# tests/pi-runtime.test.sh asserts both keys, in BOTH destinations. They are necessary but
+# NOT sufficient — on a cold metadata cache the adapter registers the proxy tool anyway,
+# which is why the bridge extension also denies `mcp`/`mcpScript` outright.
 #
-# MERGED, not replaced. .mcp.json is the project's file and may already declare other MCP
-# servers; writing the template over it would silently delete every one of them, leaving
-# them only in a .bak the user has no reason to look at. Only the `polyforge` server entry
-# and the settings keys this adapter depends on are imposed; everything else is preserved.
-MCP_DST="$PROJECT_DIR/.mcp.json"
-if [ ! -e "$MCP_DST" ]; then
-  cp -p "$PLUGIN_ROOT/pi/mcp.json" "$MCP_DST"
-  say "wrote .mcp.json (polyforge server, directTools, both bypass doors closed)"
-elif command -v python3 >/dev/null 2>&1; then
-  cp -p "$MCP_DST" "$MCP_DST.bak-$STAMP"
-  python3 - "$PLUGIN_ROOT/pi/mcp.json" "$MCP_DST" <<'PY'
-import json, sys
-tmpl = json.load(open(sys.argv[1]))
-try:
-    cur = json.load(open(sys.argv[2]))
-    if not isinstance(cur, dict): raise ValueError
-except Exception:
-    cur = {}
-servers = cur.setdefault("mcpServers", {})
-kept = [k for k in servers if k != "polyforge"]
-servers["polyforge"] = tmpl["mcpServers"]["polyforge"]
-settings = cur.setdefault("settings", {})
-overridden = [k for k, v in tmpl["settings"].items() if k in settings and settings[k] != v]
-settings.update(tmpl["settings"])
-json.dump(cur, open(sys.argv[2], "w"), indent=2)
-open(sys.argv[2], "a").write("\n")
-print("  merged into existing .mcp.json; kept %d other server(s): %s"
-      % (len(kept), ", ".join(kept) or "-"))
-if overridden:
-    print("  ⚠️  overrode conflicting settings (these are security-relevant): %s" % ", ".join(overridden))
-PY
-  say "backed up the previous .mcp.json -> .mcp.json.bak-$STAMP"
-else
-  warn "$MCP_DST exists and python3 is unavailable to merge into it — NOT overwriting."
-  warn "Add this by hand, or the adapter will not register the polyforge tools:"
-  sed 's/^/      /' "$PLUGIN_ROOT/pi/mcp.json" >&2
+# MERGED, not replaced — see merge_mcp() for why, and note it applies to the global copy
+# above just as much as to this one.
+#
+# FATAL, unlike the global step above: this is the file the main pi session in this project
+# actually reads, and an install that could not write it has produced nothing usable. That is
+# the behaviour this script has always had here (`set -e` on an unchecked `cp`); all that has
+# changed is that the reason is now printed instead of a bare `cp:` line.
+if ! merge_mcp "$PROJECT_DIR/.mcp.json" ".mcp.json"; then
+  warn "this is the copy the main pi session in this project reads, so this is fatal."
+  die "could not write $PROJECT_DIR/.mcp.json — see the message above"
 fi
 
 # Count what pi will actually load — a directory holding a SKILL.md — not every directory
@@ -423,7 +570,35 @@ what this touches
   $PI_DIR/agents/step-*.md        polyforge agent definitions (generated per machine, aihub#642;
                                   renamed from pf-*.md by aihub#682, old names retired on upgrade)
   $PI_DIR/skills/                 the polyforge skills — the copy pi loads by default
-  $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings
+  $PI_DIR/mcp.json                the SAME MCP config, read at every cwd (aihub#689). This
+                                  is what gives a spawned step-role subagent — whose cwd is
+                                  a task worktree with no .mcp.json of its own — the
+                                  polyforge tools at all. Merged, not overwritten.
+
+                                  ⚠️  IT IS MACHINE-WIDE, AND THAT IS THE POINT. Being read
+                                  at every cwd means every pi session on this box — in every
+                                  project, polyforge or not — now registers the polyforge MCP
+                                  server and inherits all FOUR of this template's settings
+                                  keys, not just the two security ones. scriptMode=false and
+                                  disableProxyTool=true close pi's IR1 bypass doors and are
+                                  the reason this file exists; toolPrefix="server" and
+                                  warnOnLargeDirectTools=false are NOT security settings —
+                                  they change how unrelated MCP servers are named and how
+                                  loudly large direct-tool sets are reported, in sessions
+                                  that have nothing to do with polyforge. Any value you had
+                                  already set for those was reported above as "overrode
+                                  conflicting settings", and your original file is in the
+                                  .bak beside it.
+
+                                  This is inherent to any cwd-independent fix rather than a
+                                  defect in this one: the subagent's cwd is a task worktree,
+                                  which no project-scoped file can reach. It is disclosed for
+                                  the same reason the duplicated skills tree below is. To opt
+                                  out, delete this file — at the cost of the defect coming
+                                  back, i.e. spawned step-role subagents holding zero
+                                  polyforge tools and failing their first pf_get_step.
+  $PROJECT_DIR/.mcp.json          polyforge MCP server + the two security settings. Higher
+                                  precedence than the global copy above, so this still wins.
 $PROJECT_SKILLS_LINE
 
 verify
@@ -431,6 +606,15 @@ verify
   Expect 45 polyforge_pf_* tools, and NEITHER \`mcp\` nor \`mcpScript\`.
   On the very first run \`mcp\` may still be listed — the adapter needs one run to populate
   ~/.pi/agent/mcp-cache.json. Calling it is refused by the bridge either way.
+
+  The global copy, from a cwd that has NO .mcp.json of its own — this is the subagent case
+  (aihub#689), and it needs no API key either:
+  cd /tmp && ( printf '{"id":1,"type":"get_commands"}\\n'; sleep 5 ) \\
+    | pi --mode rpc --no-session | grep -o 'MCP: [0-9]* server[s]* enabled'
+  Expect "MCP: 1 server enabled". Nothing at all means $PI_DIR/mcp.json is not being read.
+  NOTE the \`sleep 5\`, and do not drop it: the MCP status line arrives ASYNCHRONOUSLY, after
+  the request has been answered, so a probe that closes stdin immediately exits BEFORE it and
+  prints nothing on a perfectly good install. Measured 1 marker in 6 runs without it.
 
   The skills, without needing an API key — this counts what pi LOADED, not what was copied:
   cd "$PROJECT_DIR" && printf '{"id":1,"type":"get_commands"}' \\
@@ -444,3 +628,28 @@ verify
   without. (Under zsh MULTIOS merges the two and it "works", which is how the wrong advice
   reads as fine on a dev box.)
 EOF
+
+# The other half of making the global-MCP step degradable (aihub#689 review). Everything
+# above installed; the one thing that did not is the thing this work item exists to deliver,
+# so it gets the LAST word on stderr and the exit status — "non-fatal" must not decay into
+# "unnoticed". Placed after the summary so the reader still gets the full "what this touches"
+# list, and phrased as the consequence rather than the syscall, because the consequence is
+# what tells them whether they can ignore it (they cannot).
+if [ "$GLOBAL_MCP_OK" != "1" ]; then
+  printf '\n' >&2
+  warn "───────────────────────────────────────────────────────────────────────────"
+  warn "INCOMPLETE INSTALL: $PI_DIR/mcp.json was NOT written."
+  warn ""
+  warn "Everything else above did install, and the main pi session in this project"
+  warn "will work. What will NOT work is any step-role subagent pi spawns: its cwd"
+  warn "is the task worktree, which has no .mcp.json, and the adapter does not walk"
+  warn "upwards — so it registers ZERO MCP servers, holds zero polyforge_pf_* tools,"
+  warn "and its mandatory first pf_get_step is refused. That is the exact defect"
+  warn "this file fixes (aihub#689)."
+  warn ""
+  warn "The reason is in the message further up. Usual causes: a stale directory or"
+  warn "symlink at that path, a read-only mount, or a file owned by another user."
+  warn "Clear it and re-run this installer; nothing here is destructive to re-run."
+  warn "───────────────────────────────────────────────────────────────────────────"
+  exit 1
+fi

@@ -541,9 +541,73 @@ func TestInGitWorkTree_StopsAtHome(t *testing.T) {
 	}
 }
 
+// TestResolveHarnessTargets_RefusesACheckoutThatDoesNotExistYet is a REGRESSION
+// test for a bug this file's first draft shipped and its own checkout test
+// missed.
+//
+// 🔴 THE GUARD WAS WRITTEN `t.exists && inGitWorkTree(t.dir)`, so it evaluated
+// only for a directory that was already there — and the case it most needs to
+// catch is a target inside a checkout that has NOT been created yet. Gate (1)
+// does not apply to an explicitly named harness, so nothing else stood in the
+// way and generateRolesInto mkdir -p'd straight into the repository.
+//
+// Reproduced against the pre-fix binary, not merely reasoned about:
+// PI_AGENT_DIR=<home>/src/dotfiles/pi with <home>/src/dotfiles/.git present and
+// no pi/agents yet wrote five pf-*.md files inside the checkout. The
+// pre-existing TestResolveHarnessTargets_RefusesACheckout could not see it: it
+// pre-creates the leaf directory in setup, which is exactly the condition the
+// broken guard required.
+//
+// MUTANT (applied, compiled, red): restore `t.exists &&` in front of
+// inGitWorkTree in resolveHarnessTargets.
+func TestResolveHarnessTargets_RefusesACheckoutThatDoesNotExistYet(t *testing.T) {
+	home := isolateHarnessEnv(t)
+	repo := filepath.Join(home, "src", "dotfiles")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// Deliberately NOT creating <repo>/pi/agents: its absence is the bug.
+	t.Setenv("PI_AGENT_DIR", filepath.Join(repo, "pi"))
+
+	reports, err := installTargets(everyHarnessConfigured(), "pi", installOptions{
+		requireExistingDir: false, // what `--harness pi` passes — the broken path
+		probeFor:           stubProbes,
+	})
+	if err != nil {
+		t.Fatalf("installTargets: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("want exactly pi's report, got %d", len(reports))
+	}
+	if reports[0].skipped == "" {
+		t.Errorf("`--harness pi` into a not-yet-created directory inside a git checkout was "+
+			"NOT refused: %+v", reports[0])
+	}
+	if n := len(reports[0].written); n != 0 {
+		t.Errorf("wrote %d file(s) into a git checkout", n)
+	}
+	// The strongest form of the assertion: nothing was created anywhere under the
+	// repository, not even the directory.
+	var created []string
+	_ = filepath.Walk(repo, func(p string, fi os.FileInfo, err error) error {
+		if err == nil && p != repo && !strings.Contains(p, ".git") {
+			created = append(created, p)
+		}
+		return nil
+	})
+	if len(created) != 0 {
+		t.Errorf("the guard let %d path(s) be created inside a checkout: %v", len(created), created)
+	}
+}
+
 // TestResolveHarnessTargets_RefusesACheckout is the guard's effect on the table:
 // a row whose directory is a checkout is BLOCKED rather than merely skipped, and
 // says so.
+//
+// ⚠️ This arm pre-creates the leaf directory, which means it exercises only the
+// already-exists half. The not-yet-created half is the test above; the two are
+// deliberately separate because a single test covering "a checkout" that happened
+// to create the directory is what let the bug through.
 func TestResolveHarnessTargets_RefusesACheckout(t *testing.T) {
 	home := isolateHarnessEnv(t)
 	piRoot := filepath.Join(home, "src", "dotfiles")
@@ -970,5 +1034,152 @@ func TestGenerateRolesInto_SkipsIdenticalRenders(t *testing.T) {
 	}
 	if len(second) != 0 {
 		t.Errorf("a second identical generation rewrote %d file(s): %v", len(second), second)
+	}
+}
+
+// TestSyncRolesOnStartup_CodexIsExemptFromTheTierTableGate is a REGRESSION test
+// for the second defect review found: generalising aihub#681's cc-shaped
+// "the tier table must name this harness" rule to all four harnesses silently
+// REMOVED a shipped feature for codex.
+//
+// 🔴 codex HAS NO INSTALLER. `find plugins -name install.sh` returns pi's and
+// opencode's; $CODEX_HOME/step-<role>.config.toml has exactly one writer in this
+// repo, the serve boot path. So for codex the gate's own justification ("the
+// installer's files stand unchanged") is false: there are no files, and under the
+// gate there never would be. Before aihub#683, a codex user with an empty tier
+// table still got working profiles — no `model` key, but sandbox_mode and
+// developer_instructions, which is the rest of the payload — and `codex -p
+// step-reviewer` worked. The gate would have broken that for everyone who never
+// wrote a `harness = "codex"` candidate.
+//
+// MUTANT (applied, compiled, red): drop `&& t.harness != "codex"` from the gate
+// in installOne. Result: ~/.codex stays empty and this test fails.
+func TestSyncRolesOnStartup_CodexIsExemptFromTheTierTableGate(t *testing.T) {
+	if !codexInstalled() {
+		t.Skip("codex is not on PATH; the pre-existing aihub#655 LookPath gate applies first")
+	}
+	home := isolateHarnessEnv(t)
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// A tier table that names pi and NOT codex — the machine the gate would have
+	// silently switched off.
+	mc := mcWithTiers(map[string][]config.RoleCandidate{
+		"lowest":  {{Harness: "pi", Model: "prov/a"}},
+		"low":     {{Harness: "pi", Model: "prov/a"}},
+		"default": {{Harness: "pi", Model: "prov/a"}},
+		"raised":  {{Harness: "pi", Model: "prov/a"}},
+	})
+	captureStderr(t, func() { syncRolesOnStartup(mc, stubProbes) })
+
+	names, err := plannedFileNames("codex")
+	if err != nil {
+		t.Fatalf("plannedFileNames: %v", err)
+	}
+	for _, name := range names {
+		if _, statErr := os.Stat(filepath.Join(codexHome, name)); statErr != nil {
+			t.Fatalf("$CODEX_HOME/%s was not written on a machine with codex installed and a "+
+				"tier table that never names codex. Nothing else in this repo writes that file, "+
+				"so `codex -p %s` is now broken where it used to work.",
+				name, strings.TrimSuffix(name, ".config.toml"))
+		}
+	}
+
+	// The negative control that keeps the exemption honest: it is codex-specific,
+	// not a hole in the gate. opencode's directory exists and its row is unnamed,
+	// so it must still be left alone.
+	ocDir := filepath.Join(home, ".config", "opencode", "agent")
+	if err := os.MkdirAll(ocDir, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	captureStderr(t, func() { syncRolesOnStartup(mc, stubProbes) })
+	if n := countEntries(t, ocDir); n != 0 {
+		t.Errorf("opencode's directory holds %d entr(ies); the codex exemption must not have "+
+			"widened into a general hole in gate (2)", n)
+	}
+}
+
+// TestRolesInstall_PresetSkipsCCRatherThanFailing is a REGRESSION test for the
+// third defect review found.
+//
+// `--preset` cannot apply to cc: its files are regenerated in place inside the
+// installed plugin from the machine's own [roles] selection, so a per-invocation
+// override would be overwritten by the next session. The first draft expressed
+// that as a hard ERROR from generateForHarness, which meant `roles install
+// --preset=<name>` inside a Claude Code session whose preset names cc wrote
+// pi/opencode/codex, then failed the WHOLE command and exited 1 — a partial write
+// reported as a failed run, for a flag plugins/polyforge/skills/pf-update/SKILL.md
+// advertises.
+//
+// MUTANT (applied, compiled, red): move the preset/cc case back into
+// generateForHarness as `return nil, fmt.Errorf(...)`. Result: cc's report carries
+// an error, printInstallReports reports failure, and both assertions fail.
+func TestRolesInstall_PresetSkipsCCRatherThanFailing(t *testing.T) {
+	home := isolateHarnessEnv(t)
+
+	// A plugin root that looks installed, so the cc row resolves and is reached.
+	root := filepath.Join(home, "plugin")
+	if err := os.MkdirAll(filepath.Join(root, ".claude-plugin"), 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".claude-plugin", "plugin.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", root)
+	piDir := filepath.Join(home, ".pi", "agent", "agents")
+	if err := os.MkdirAll(piDir, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	mc := &config.MachineConfig{Roles: &config.MachineRoles{
+		Presets: map[string]*config.RolesPreset{"frugal": {Tiers: map[string][]config.RoleCandidate{
+			"lowest":  {{Harness: "pi", Model: "prov/a"}, {Harness: "cc", Model: "haiku"}},
+			"low":     {{Harness: "pi", Model: "prov/a"}, {Harness: "cc", Model: "haiku"}},
+			"default": {{Harness: "pi", Model: "prov/a"}, {Harness: "cc", Model: "sonnet"}},
+			"raised":  {{Harness: "pi", Model: "prov/a"}, {Harness: "cc", Model: "sonnet"}},
+		}}},
+	}}
+
+	var reports []installReport
+	var err error
+	captureStderr(t, func() {
+		reports, err = installTargets(mc, "", installOptions{
+			preset:             "frugal",
+			requireExistingDir: true,
+			probeFor:           stubProbes,
+		})
+	})
+	if err != nil {
+		t.Fatalf("installTargets: %v", err)
+	}
+
+	var sb strings.Builder
+	failed := printInstallReports(&sb, reports, false)
+	if failed {
+		t.Errorf("`roles install --preset=frugal` reported failure, so it would exit 1, because "+
+			"one row cannot honour the flag:\n%s", sb.String())
+	}
+
+	var cc installReport
+	for _, r := range reports {
+		if r.harness == "cc" {
+			cc = r
+		}
+	}
+	if cc.err != nil {
+		t.Errorf("the cc row carries an error rather than a skip: %v", cc.err)
+	}
+	if cc.skipped == "" {
+		t.Error("the cc row neither failed nor explained itself; a silently ignored --preset is " +
+			"the outcome the refusal exists to prevent")
+	}
+	// And the rows that CAN honour the preset still did.
+	if n := countEntries(t, piDir); n == 0 {
+		t.Error("pi was not written, so this test is not exercising the mixed-row case")
 	}
 }

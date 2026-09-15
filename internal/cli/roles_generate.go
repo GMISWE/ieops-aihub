@@ -579,11 +579,16 @@ func UnresolvedModelWarning(harness, tier, role, tierSource string, why ResolveF
 // GenerateRoles renders and writes one harness's ("pi", "codex", or
 // "opencode") agent files into outDir, resolving each role's tier against mc.Roles.Tiers
 // (aihub#642 design decision #5). It returns an error rather than exiting the
-// process on any failure -- this is deliberately reusable from a context that
-// must never crash the host (cmd/polyforge/main.go's serve startup path,
-// which calls this after config.EnsureMachineConfig() and only logs a
-// warning on error; see RunRolesGenerate below for the CLI-exits-on-error
-// wrapper used by `polyforge roles generate`).
+// process on any failure -- deliberately reusable from a context that must never
+// crash the host; see RunRolesGenerate below for the CLI-exits-on-error wrapper
+// used by `polyforge roles generate`.
+//
+// ⚠️ IT NO LONGER HAS A PRODUCTION CALLER. This comment used to say the serve
+// startup path "calls this after config.EnsureMachineConfig()"; since aihub#683
+// that path goes through SyncRolesOnStartup -> generateRolesInto, which is this
+// function's body plus the written-paths list and the once-per-process preflight
+// switch. Kept as the stable exported spelling (and used by tests); prefer
+// generateRolesInto inside this package.
 //
 // A tier with no resolvable candidate for this harness is not an error: the
 // generated file for that role simply has no model field, and a loud,
@@ -665,9 +670,15 @@ func generateRolesInto(mc *config.MachineConfig, harness, outDir string, probe C
 	// Provenance on stderr, not stdout: stdout carries the subcommand's own
 	// success line, and an operator comparing two machines needs to see WHICH
 	// table produced these files, not merely that some table did.
-	fmt.Fprintf(os.Stderr, "polyforge: roles generate %s: tier table from %s\n", harness, tierSource)
-
+	//
+	// ⚠️ Tied to `preflight`, which is the "a human typed a command" flag. This
+	// line was unconditional until aihub#683's review, and this function is now on
+	// the every-boot path for pi and opencode — so a machine configuring both
+	// printed two `roles generate ...` lines per MCP session, naming a subcommand
+	// nobody invoked, on a boot that in the steady state changes nothing. See
+	// SyncRolesOnStartup: a boot that changed nothing says nothing.
 	if preflight {
+		fmt.Fprintf(os.Stderr, "polyforge: roles generate %s: tier table from %s\n", harness, tierSource)
 		machineConfigPreflight(os.Stderr, tiers, tierSource)
 	}
 
@@ -696,10 +707,16 @@ func generateRolesInto(mc *config.MachineConfig, harness, outDir string, probe C
 		return nil, fmt.Errorf("render %s agent files: %w", harness, err)
 	}
 
+	// Decided BEFORE mkdir, which is changedFiles' documented contract and which
+	// generateCCAgents and generateCodexProfiles both honour. Benign here today
+	// (the startup gate guarantees the directory exists on that path, and the
+	// explicit path wants it created either way), but a comment two callers obey
+	// and a third quietly does not is a comment that will mislead.
+	changed := changedFiles(outDir, rendered)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
-	written, err := writeGeneratedFiles(outDir, rendered, changedFiles(outDir, rendered), agentFilePerm)
+	written, err := writeGeneratedFiles(outDir, rendered, changed, agentFilePerm)
 	if err != nil {
 		return written, err
 	}
@@ -901,9 +918,12 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 // generateCCAgents is GenerateCCAgents returning the absolute paths it wrote
 // rather than merely whether it wrote anything. aihub#683's `roles install` has
 // to NAME them (AC5: "said it finished" and "actually finished" must be
-// distinguishable by reading the output), while every pre-existing caller only
-// branches on the boolean -- hence the wrapper above rather than a changed
-// signature across twenty call sites.
+// distinguishable by reading the output).
+//
+// The boolean wrapper above is kept rather than the signature changed because
+// aihub#681's twenty-odd test call sites all branch on the boolean and rewriting
+// them would bury this change's real diff. Note it has no PRODUCTION caller any
+// more: cmd/polyforge/main.go now reaches this through SyncRolesOnStartup.
 func generateCCAgents(mc *config.MachineConfig, outDir string) ([]string, error) {
 	tiers, tierSource, err := mc.ResolveTiers("")
 	if err != nil {
@@ -1186,8 +1206,13 @@ func inGitWorkTree(dir string) bool {
 	}
 	home := ""
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
-		home = h
-		if resolved, err := filepath.EvalSymlinks(h); err == nil {
+		// Clean first: the comparison below is string equality, and a trailing
+		// slash in $HOME ("/root/") would make it never match, silently disabling
+		// stop condition (2). EvalSymlinks already cleans, but it fails on a home
+		// directory that does not exist, and that branch must not be the one that
+		// leaves a dirty path behind.
+		home = filepath.Clean(h)
+		if resolved, err := filepath.EvalSymlinks(home); err == nil {
 			home = resolved
 		}
 	}
@@ -1217,14 +1242,18 @@ func inGitWorkTree(dir string) bool {
 // invoking this directly wants a non-zero exit code on failure, not a
 // silently-degraded install.
 //
-// opencode generation is deliberately install-script-invoked ONLY: unlike
-// codex (see DefaultCodexAgentsDir below), there is no auto-regeneration hook
-// for opencode in cmd/polyforge/main.go's serve startup path -- that call
-// site is aihub#654's locked territory, and opencode's install script
-// (plugins/polyforge/opencode/install.sh) computes its own --out target
-// directly in shell rather than through a Go-side Default*Dir helper, so no
-// such helper is added here. Wiring an auto-regen hook into serve startup, if
-// ever wanted, is left to a follow-up work item.
+// ⚠️ THE PARAGRAPH THAT WAS HERE IS NOW FALSE, and it is worth saying so rather
+// than deleting it. It read: "opencode generation is deliberately
+// install-script-invoked ONLY ... there is no auto-regeneration hook for opencode
+// in cmd/polyforge/main.go's serve startup path ... Wiring an auto-regen hook
+// into serve startup, if ever wanted, is left to a follow-up work item."
+// aihub#683 IS that follow-up. opencode's target directory is now a row in
+// internal/cli/roles_install.go's table (opencodeTarget, mirroring the same
+// three-level expansion its install script computes in shell), and
+// SyncRolesOnStartup regenerates it on every serve boot -- subject to the two
+// gates there, so a machine that never installed opencode still gets nothing.
+// This verb remains the install script's entry point and still takes an
+// explicit --out.
 func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 	usage := "usage: polyforge roles generate <pi|codex|opencode> --out <dir> [--preset=<name>]"
 	if len(args) < 1 || args[0] != "generate" {

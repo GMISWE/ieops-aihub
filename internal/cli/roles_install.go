@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -28,9 +29,11 @@ import (
 //   - pi       `PI_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"` in a shell installer
 //   - opencode a three-deep shell parameter expansion in a different installer
 //
-// A fifth answer, DefaultCodexAgentsDir, pointed at a directory codex has never
-// scanned (aihub#655) and was deleted with this change rather than left to be
-// mistaken for this table's codex row.
+// A fifth answer, DefaultCodexAgentsDir, points at a directory codex has never
+// scanned (aihub#655) and has had no production caller since. It is annotated as
+// superseded by this file's codexTarget; deleting it needs the test file
+// aihub#682 is holding, so it is left as a follow-up rather than as a competing
+// answer anybody should read.
 //
 // The Go side therefore could not answer the question for half the harnesses,
 // which is why "install the agent definitions" was only ever a thing an install
@@ -117,7 +120,23 @@ func resolveHarnessTargets() []harnessTarget {
 		// ($HOME) exists ONLY because of this generalisation: without it every
 		// $HOME-relative row here would refuse to write on any machine whose home
 		// directory is versioned.
-		if t.exists && inGitWorkTree(t.dir) {
+		//
+		// 🔴 DELIBERATELY NOT GUARDED BY t.exists, AND THAT BUG SHIPPED IN THIS
+		// FUNCTION'S FIRST DRAFT. Written as `t.exists && inGitWorkTree(...)` the
+		// guard evaluates only for a directory that is already there — so the one
+		// case it most needs to catch, a target INSIDE a checkout that has not
+		// been created yet, sailed straight through it: gate (1) does not apply to
+		// an explicitly named harness, and generateRolesInto then mkdir -p's the
+		// path. Reproduced before the fix: PI_AGENT_DIR=~/src/dotfiles/pi with
+		// ~/src/dotfiles/.git present and no pi/agents yet wrote five agent files
+		// into the checkout. The skip message for gate (1) below RECOMMENDS
+		// `--harness <h>`, so the broken form was reachable by following this
+		// tool's own advice.
+		//
+		// inGitWorkTree handles a non-existent dir correctly: EvalSymlinks fails
+		// and leaves the lexical path, and the walk then Lstats ancestors that do
+		// exist.
+		if inGitWorkTree(t.dir) {
 			t.blocked = fmt.Sprintf("%s is inside a git work tree, so it is a checkout rather "+
 				"than an installed harness; writing this machine's model choices into files a "+
 				"repository tracks would turn that repository's tests red with no hint as to why",
@@ -413,11 +432,51 @@ func installOne(mc *config.MachineConfig, t harnessTarget, tiers map[string][]co
 		r.skipped = "the codex CLI is not on PATH, so nothing will ever read $CODEX_HOME; " +
 			"run `polyforge roles install --harness codex` to write the profiles anyway"
 		return r
-	case !hasHarnessCandidate(tiers, t.harness):
+	case !hasHarnessCandidate(tiers, t.harness) && t.harness != "codex":
 		// Gate (2).
+		//
+		// 🔴 codex IS EXEMPT, AND THE EXEMPTION IS THE WHOLE POINT OF THE GATE'S
+		// OWN JUSTIFICATION. Gate (2) is sound because an unnamed harness's files
+		// were already written by ITS INSTALLER and are left standing. codex has
+		// no installer: `find plugins -name install.sh` returns pi's and
+		// opencode's and nothing else, and $CODEX_HOME/step-<role>.config.toml has
+		// exactly one writer in this repo — this function, on the serve boot path.
+		// Applying the gate to codex therefore does not mean "leave the installer's
+		// files alone", it means "there are no files, and there never will be":
+		// `codex -p step-reviewer` would stop working for every codex user who has
+		// not written a `harness = "codex"` candidate, and would never start on a
+		// fresh machine. Before aihub#683 the codex path was gated on
+		// exec.LookPath alone and wrote profiles regardless of the tier table; a
+		// profile with no `model` key is still a working profile, because
+		// sandbox_mode and developer_instructions are the rest of the payload.
+		//
+		// The cost of the exemption is the AC7 warning per role on a codex machine
+		// that names no codex candidate — which is exactly what that machine
+		// printed before this change too, so it is preserved behaviour rather than
+		// new noise.
 		r.skipped = fmt.Sprintf("this machine's tier table names no `harness = %q` candidate, so "+
 			"there is nothing machine-local to apply; %s's installed defaults stand unchanged",
 			t.harness, t.harness)
+		return r
+	case opts.preset != "" && t.harness == "cc":
+		// 🔴 A SKIP, NOT AN ERROR, and the difference is a whole exit code. cc has
+		// no per-invocation preset: GenerateCCAgents resolves this machine's own
+		// [roles] selection and writes in place inside the installed plugin, where
+		// the next session would regenerate from the machine selection anyway — so
+		// honouring --preset here would write something that does not survive, and
+		// ignoring it silently would be worse.
+		//
+		// Returning an ERROR for it (the first draft) made `roles install
+		// --preset=<name>` fail outright on any Claude Code machine whose preset
+		// names cc: the pi/opencode/codex rows run first and are written, then cc
+		// errors, printInstallReports reports failure and the command exits 1 —
+		// a partial write reported as a failed command, for a flag the /pf-update
+		// skill advertises. One row cannot honour the flag; that is this row's
+		// news to report, not the command's verdict.
+		r.skipped = "--preset does not apply to cc: its agent files are regenerated in place " +
+			"inside the installed plugin from this machine's own [roles] selection, and a " +
+			"per-invocation override would be overwritten by the next session. Every other " +
+			"harness honoured the preset"
 		return r
 	}
 
@@ -437,9 +496,23 @@ func installOne(mc *config.MachineConfig, t harnessTarget, tiers map[string][]co
 	written, err := generateForHarness(mc, t, opts)
 	r.written, r.err = written, err
 	if plannedErr == nil && err == nil {
-		// Reported rather than inferred: "5 files, 1 written" and "5 files, 5
-		// written" are different events and an operator reading a quiet run needs
-		// to know which one happened.
+		// "5 files, 1 written" and "5 files, 5 written" are different events and an
+		// operator reading a quiet run needs to know which one happened.
+		//
+		// ⚠️ THIS INFERS "not written ⇒ already identical", WHICH IS ONLY SOUND
+		// BECAUSE EVERY OTHER REASON A GENERATOR CAN RETURN EMPTY IS INTERCEPTED
+		// ABOVE. On the success path each generator returns (nil, nil) only after
+		// comparing every rendered file and finding them all equal; its other early
+		// exits -- cc's git-work-tree refusal and its no-cc-candidate guard -- are
+		// caught by t.blocked and gate (2) before generateForHarness is reached, so
+		// they cannot land here and be mis-reported as "already current".
+		//
+		// 🔴 If a generator ever gains another empty-return path, this becomes a
+		// lie in the output, and the fix is to have the generators report the count
+		// rather than have this line deduce it. Review caught exactly that: before
+		// the checkout guard was corrected to run for a not-yet-created directory,
+		// cc's own refusal DID reach here and printed "unchanged (already current):
+		// 5 file(s)" for five files that did not exist.
 		r.unchanged = len(planned) - len(written)
 		if r.unchanged < 0 {
 			r.unchanged = 0
@@ -456,14 +529,6 @@ func installOne(mc *config.MachineConfig, t harnessTarget, tiers map[string][]co
 func generateForHarness(mc *config.MachineConfig, t harnessTarget, opts installOptions) ([]string, error) {
 	switch t.harness {
 	case "cc":
-		// cc has no --out form and no preset override: GenerateCCAgents resolves
-		// the machine's own selection and writes in place inside the plugin. A
-		// --preset here would be silently ignored, so it is refused instead.
-		if opts.preset != "" {
-			return nil, fmt.Errorf("--preset is not supported for cc: its agent files are " +
-				"regenerated in place inside the installed plugin from this machine's own [roles] " +
-				"selection, and a per-invocation override would not survive the next session")
-		}
 		return generateCCAgents(mc, t.dir)
 	case "codex":
 		return generateCodexProfiles(mc, t.dir, opts.probe("codex"), opts.preset, opts.preflight)
@@ -577,8 +642,11 @@ func generateCodexProfiles(mc *config.MachineConfig, codexHome string, probe Cat
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
+	// Tied to `preflight` for the same reason generateRolesInto's twin line is:
+	// this runs on every serve boot, and a boot that changes nothing must say
+	// nothing.
 	if preflight {
+		fmt.Fprintf(os.Stderr, "polyforge: codex profiles: tier table from %s\n", tierSource)
 		machineConfigPreflight(os.Stderr, tiers, tierSource)
 	}
 
@@ -643,6 +711,16 @@ func generateCodexProfiles(mc *config.MachineConfig, codexHome string, probe Cat
 //
 // It is non-fatal by contract: every error is a line on stderr. Role generation
 // must never be able to break MCP server startup for anyone.
+//
+// ⚠️ KNOWN, ACCEPTED LIMITATION of running it detached: if the process exits
+// between writeFileAtomic's CreateTemp and its Rename, the deferred cleanup does
+// not run and a `<name>.tmp-<random>` file is left in the target directory.
+// Bounded in practice -- the window is microseconds per file, and the harnesses
+// that scan these directories match on the real extension (`.md`, `.config.toml`)
+// which a `.tmp-…` suffix does not satisfy, so a leftover is inert rather than
+// loadable. It is NOT reported by warnOrphanAgentFiles, which also requires the
+// real suffix. If such files are ever observed in anger, the fix is a sweep of
+// `*.tmp-*` at the start of the sync, not abandoning the rename.
 func SyncRolesOnStartup(mc *config.MachineConfig) {
 	syncRolesOnStartup(mc, nil)
 }
@@ -698,7 +776,7 @@ func RunRolesInstall(mc *config.MachineConfig, args []string) {
 	preset := fs.String("preset", "", "named tier-table snapshot to generate from (default: the machine's [roles] preset)")
 	_ = fs.Parse(args)
 
-	if *harness != "" && !slicesContains(harnessOrder(), *harness) {
+	if *harness != "" && !slices.Contains(harnessOrder(), *harness) {
 		fmt.Fprintf(os.Stderr, "roles install: unknown harness %q (must be one of %s)\n",
 			*harness, strings.Join(harnessOrder(), ", "))
 		os.Exit(1)
@@ -758,23 +836,21 @@ func printInstallReports(w io.Writer, reports []installReport, dryRun bool) (fai
 	}
 
 	if dryRun {
-		_, _ = fmt.Fprintf(w, "\n%d file(s) would be written. Nothing was written: --dry-run.\n", total)
+		// ⚠️ SAYS WHAT IT DID NOT CHECK. A dry run lists every file the generator
+		// would CONSIDER, not the subset whose bytes differ -- deciding that needs
+		// the resolved models, which means running each harness's catalog
+		// subprocess (up to catalogProbeTimeout each, and `opencode models` alone
+		// was measured at 8.2s cold). Paying seconds and three logins to print four
+		// paths is the wrong trade, but silently overstating "would write" against
+		// a real run that reports "0 file(s) written" would undercut exactly the
+		// honesty property the per-path output exists for. So it is stated.
+		_, _ = fmt.Fprintf(w, "\n%d file(s) would be written. Nothing was written: --dry-run.\n"+
+			"(Paths a real run would CONSIDER. It leaves any file whose contents already match, "+
+			"so it may report fewer; --dry-run does not read the current files.)\n", total)
 	} else {
 		_, _ = fmt.Fprintf(w, "\n%d file(s) written.\n", total)
 	}
 	return failed
-}
-
-// slicesContains is a local spelling of slices.Contains, kept local because this
-// package targets a Go version whose stdlib `slices` import would be the only one
-// in the file and the helper is three lines.
-func slicesContains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 // codexInstalled reports whether the codex CLI is on PATH. Kept as the one

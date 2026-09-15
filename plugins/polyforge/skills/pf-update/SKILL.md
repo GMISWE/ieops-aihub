@@ -20,7 +20,7 @@ description: >
 **Flags**:
 - `--dry-run` - print the exact paths that would be written, write nothing.
 - `--harness <h>` - one harness only. This is also the only way to create a harness's directory: without it, a harness whose directory does not exist is skipped.
-- `--preset <name>` - render from a named `[roles.presets]` table instead of this machine's selection. Not accepted for `cc`.
+- `--preset <name>` - render from a named `[roles.presets]` table instead of this machine's selection. The `cc` row is **skipped** (with a reason on its line) rather than honoured: Claude Code's files are regenerated in place inside the installed plugin from this machine's own selection, so a per-invocation override would be overwritten by the next session. Every other harness honours it, and the command still exits 0.
 
 ## When to use
 

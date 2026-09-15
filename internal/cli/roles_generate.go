@@ -628,6 +628,283 @@ func warnOrphanAgentFiles(w io.Writer, outDir, harness string, rendered map[stri
 	}
 }
 
+// ccAgentFilePerm is the mode the CC agent files are written with. It matches
+// what internal/roles/gen commits them as, so a regenerated file is
+// indistinguishable from the shipped one in everything but content.
+const ccAgentFilePerm = 0o644
+
+// GenerateCCAgents regenerates the plugin's five step-<role>.md Claude Code
+// agent files in outDir from THIS MACHINE's tier table, and reports whether it
+// wrote anything (aihub#681, owner decision 2026-09-15).
+//
+// WHY THE INSTALLED PLUGIN'S OWN DIRECTORY, AND NOT ~/.claude/agents/
+// -------------------------------------------------------------------
+// Not because the plugin directory is the only legal place for a CC agent. It
+// is not: ~/.claude/agents/ is a first-class user-scope location, and the
+// obvious symmetric design -- ship no agents in the plugin at all, dispatch the
+// BARE name, and generate into ~/.claude/agents/ exactly the way the pi
+// installer writes ~/.pi/agent/agents/ -- is coherent, live-watched by CC
+// (so it would take effect in the SAME session, which this path cannot), and
+// would need no writes into a version-keyed plugin cache at all. It is rejected
+// on an integrity property, not on feasibility, and it is worth knowing that if
+// the property ever stops mattering the cheaper design is sitting right there.
+//
+// The property is RESOLUTION DETERMINISM, and it was measured by aihub#555 and
+// is recorded in internal/roles/dispatch.go's HarnessDispatch.AgentIDFormat: a
+// bare agent name resolves to a same-named PROJECT or USER agent when one
+// exists, while the "polyforge:"-namespaced id always resolves to the plugin's
+// own file. Keeping the files inside the plugin is what keeps the namespaced id
+// available, and the namespaced id is a guarantee about WHICH FILE RUNS.
+//
+// That guarantee is load-bearing for exactly one of these five roles, which is
+// enough. step-reviewer is read-only BY CONSTRUCTION -- aihub#338 recorded two
+// defects caught by reviewers that could not have written the fix -- and under a
+// bare name any checked-out repository's project-scope
+// .claude/agents/step-reviewer.md would outrank the user-scope copy and silently
+// take over that dispatch with a repo-controlled prompt that CAN write.
+// plugins/polyforge/pi/install.sh's header already names this hazard class in
+// its own terms ("a project-local agent is a repo-controlled prompt that can run
+// bash, so the default-off is a deliberate supply-chain gate, not an
+// oversight"). Moving CC to bare names would open that gate for the one agent
+// whose read-only-ness is the entire point of having it.
+//
+// 🔴 THE GUARD IS THE FEATURE. A machine whose resolved tier table names no
+// `harness = "cc"` candidate must end up byte-for-byte where it started: this
+// returns wrote=false having opened no file, created no directory and printed
+// no line, so the committed bytes -- and their mtimes -- survive untouched. The
+// natural bug here is to regenerate unconditionally, which would be invisible
+// (the render is identical when nothing is configured) right up until someone
+// diffed mtimes or a release changed the committed default. A machine with NO
+// [roles.tiers] at all is silent even earlier, before validation.
+//
+// Resolution is per TIER and falls back rather than failing:
+//
+//   - the tier names a usable cc candidate  -> that model
+//   - the tier names no cc candidate at all -> cc_aliases.yaml's default, which
+//     is the whole point of keeping that file: this is a per-tier override, not
+//     a replacement of the table
+//   - the tier names cc candidates but none is writable -> NO model field, plus
+//     a loud warning (aihub#642 AC7's omit-and-warn, never a guessed id)
+//
+// It deliberately does NOT use ResolveModelWithCause/UnresolvedModelWarning like
+// the other three harnesses. Those say "checked against <harness>'s live catalog
+// and none is present", and cc has no catalog to check -- reusing them would
+// have printed a sentence describing a probe that never ran, which is the
+// aihub#676 class of defect (a warning that sends the operator to the wrong
+// place) reintroduced for the sake of sharing code.
+//
+// Errors are the caller's to log, not to die on: this runs on the MCP server's
+// boot path.
+func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err error) {
+	tiers, tierSource, err := mc.ResolveTiers("")
+	if err != nil {
+		return false, err
+	}
+	if len(tiers) == 0 {
+		// The zero-configuration machine: not merely "no cc candidate" but no
+		// table at all. Nothing to validate and nothing to say.
+		return false, nil
+	}
+
+	// Said for ANY non-empty table, not only a cc one. On a machine that runs
+	// only Claude Code these lines had no trigger at all before aihub#681:
+	// ValidateCandidates was reachable from `polyforge roles generate` (which
+	// such a machine never runs) and from codex profile generation (gated
+	// behind exec.LookPath("codex")), so a typo'd harness name was unreportable
+	// exactly where it was most likely to be a typo for "cc".
+	for _, problem := range config.ValidateCandidates(tiers) {
+		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
+	}
+	if path, present := config.UnreadRolesOverrideDir(); present {
+		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
+	}
+
+	if !hasCCCandidate(tiers) {
+		return false, nil
+	}
+
+	roleList, err := roles.LoadRoles()
+	if err != nil {
+		return false, fmt.Errorf("load roles: %w", err)
+	}
+	aliases, err := roles.LoadCCAliases()
+	if err != nil {
+		return false, fmt.Errorf("load cc_aliases.yaml: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "polyforge: cc agents: regenerating %s from %s\n", outDir, tierSource)
+
+	resolved := make(map[string]string, len(roleList))
+	for _, r := range roleList {
+		model, rejected := resolveCCModel(tiers[r.Tier])
+		switch {
+		case model != "":
+			resolved[r.Name] = model
+		case len(rejected) > 0:
+			// Loud and non-suppressible, by the same rule as the other three
+			// harnesses: no flag gates this line.
+			fmt.Fprint(os.Stderr, unwritableCCModelWarning(r.Tier, r.Name, tierSource, rejected))
+			// resolved[r.Name] stays unset -> no model field.
+		default:
+			// This tier said nothing about cc. Keep the committed default
+			// rather than degrading a role the operator never mentioned.
+			resolved[r.Name] = aliases[r.Tier]
+		}
+	}
+
+	rendered, err := roles.RenderCCAgentFilesWithModels(roleList, resolved)
+	if err != nil {
+		return false, fmt.Errorf("render cc agent files: %w", err)
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return false, fmt.Errorf("mkdir %s: %w", outDir, err)
+	}
+	names := make([]string, 0, len(rendered))
+	for name := range rendered {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(outDir, name)
+		if err := writeFileAtomic(path, []byte(rendered[name]), ccAgentFilePerm); err != nil {
+			return false, err
+		}
+	}
+	// No warnOrphanAgentFiles call: outDir here is the plugin's own agents
+	// directory, whose orphans are a HARD failure in the repo instead
+	// (internal/roles.TestCCStalenessGate's orphan scan), and a stale file in a
+	// released plugin's cache directory is not something this machine's operator
+	// put there or can act on.
+	return true, nil
+}
+
+// hasCCCandidate reports whether any tier in the table names harness "cc". It
+// asks about the RAW table rather than about resolution, because the question
+// the guard needs answered is "did this operator ask for cc at all" -- a
+// candidate whose model turns out to be unwritable still means yes, and must
+// still produce the omit-and-warn path rather than silent inaction.
+func hasCCCandidate(tiers map[string][]config.RoleCandidate) bool {
+	for _, candidates := range tiers {
+		for _, c := range candidates {
+			if c.Harness == "cc" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveCCModel walks one tier's candidate list in declaration order and
+// returns the first cc model that can actually be written into the agent file's
+// `model:` line, plus every cc model it had to skip to get there (or all of
+// them, when it returns ""). Non-cc candidates are ignored entirely and are not
+// reported as rejections: a tier that lists pi and cc alternatives has not
+// misconfigured anything.
+func resolveCCModel(candidates []config.RoleCandidate) (model string, rejected []string) {
+	for _, c := range candidates {
+		if c.Harness != "cc" {
+			continue
+		}
+		if c.Model == "" || !roles.ValidCCModel(c.Model) {
+			rejected = append(rejected, c.Model)
+			continue
+		}
+		return c.Model, nil
+	}
+	return "", rejected
+}
+
+// unwritableCCModelWarning is the AC7 warning for a tier whose cc candidates all
+// failed the syntax check. It says what was rejected and what shape to write,
+// and it does NOT claim any catalog was consulted -- see GenerateCCAgents for
+// why this is not UnresolvedModelWarning.
+func unwritableCCModelWarning(tier, role, tierSource string, rejected []string) string {
+	quoted := make([]string, 0, len(rejected))
+	for _, m := range rejected {
+		quoted = append(quoted, fmt.Sprintf("%q", m))
+	}
+	return fmt.Sprintf(
+		"polyforge: WARNING: tier %q (role %q) names cc candidate(s) that cannot be written into a "+
+			"Claude Code agent file's `model:` line: %s -- the generated file for this role will "+
+			"have NO model field and will inherit the caller's default model instead.\n"+
+			"  A cc model must be a lowercase alias or full id matching [a-z][a-z0-9.-]* (e.g. "+
+			"\"sonnet\", \"opus\", \"haiku\", \"claude-sonnet-4-5\"), with NO \"<provider>/\" prefix. "+
+			"Nothing was substituted: polyforge does not guess a model id. Fix the tier table in "+
+			"use (%s).\n",
+		tier, role, strings.Join(quoted, ", "), tierSource)
+}
+
+// DefaultCCAgentsDir returns the agents/ directory of the Claude Code plugin
+// tree this process was launched from, or ok=false when it was not launched
+// from one.
+//
+// 🔴 IT USES $CLAUDE_PLUGIN_ROOT AND DELIBERATELY DOES NOT FALL BACK TO cwd,
+// and both halves are measured (2026-09-15, Claude Code 2.1.258, by reading
+// /proc/<pid>/environ and /proc/<pid>/cwd of the live MCP server processes on
+// this machine):
+//
+//   - CLAUDE_PLUGIN_ROOT is EXPORTED into the MCP server's environment, not
+//     merely substituted into the command string:
+//     "/root/.claude/plugins/cache/ieops-aihub/polyforge/1.1.53".
+//   - the server's cwd is the SESSION's working directory, NOT the plugin root,
+//     even though .claude-plugin/plugin.json sets `"cwd": "${CLAUDE_PLUGIN_ROOT}"`.
+//
+// ⚠️ That second measurement contradicts DefaultCodexAgentsDir's doc comment
+// below, which asserts the opposite; see the correction recorded there. A cwd
+// fallback here would therefore not be a safety net, it would aim this
+// generator at whatever directory the user happened to open Claude Code in.
+//
+// The existence check is on .claude-plugin/plugin.json rather than on agents/:
+// the manifest is what makes a directory a CC plugin root, and requiring
+// agents/ to pre-exist would make this fail on a tree that legitimately has
+// none yet. ok=false is silent and final -- generation is skipped, never
+// pointed somewhere guessed.
+func DefaultCCAgentsDir() (string, bool) {
+	root := os.Getenv("CLAUDE_PLUGIN_ROOT")
+	if root == "" {
+		return "", false
+	}
+	fi, err := os.Stat(filepath.Join(root, ".claude-plugin", "plugin.json"))
+	if err != nil || fi.IsDir() {
+		return "", false
+	}
+	if inGitWorkTree(root) {
+		// A contributor's checkout, not an installed plugin. Writing here would
+		// dirty tracked files and turn internal/roles' staleness gate red on
+		// their machine with no hint as to why -- the gate diffs the committed
+		// files against the REPO table, and this generator writes the MACHINE
+		// table. The installed plugin cache is not a git work tree (measured:
+		// `git rev-parse` inside
+		// /root/.claude/plugins/cache/ieops-aihub/polyforge/1.1.53 answers "not
+		// a repository"), so this costs the real path nothing.
+		fmt.Fprintf(os.Stderr,
+			"polyforge: NOTE: %s is inside a git work tree, so it looks like a checkout rather than "+
+				"an installed plugin; Claude Code agent files were NOT regenerated there. Run "+
+				"`go generate ./internal/roles/...` to refresh the committed defaults instead.\n", root)
+		return "", false
+	}
+	return filepath.Join(root, "agents"), true
+}
+
+// inGitWorkTree reports whether dir or any ancestor contains a .git entry. It
+// walks the tree in pure Go rather than shelling out to `git rev-parse`: this
+// runs on the MCP server's boot path, where cmd/polyforge's codexProbeTimeout
+// comment records what one hanging subprocess there costs every session on the
+// machine at once.
+func inGitWorkTree(dir string) bool {
+	for {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
 // RunRolesGenerate is the `polyforge roles generate <pi|codex|opencode> --out
 // <dir>` CLI subcommand (aihub#642 plan steps 10/11; opencode added by
 // aihub#653), dispatched from cmd/polyforge/main.go's runCLI. Unlike
@@ -657,6 +934,25 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 	}
 	harness := args[0]
 	if harness != "pi" && harness != "codex" && harness != "opencode" {
+		// "cc" is answered specifically rather than lumped in with typos. It IS
+		// a valid harness key in ~/.polyforge/config.toml (aihub#681), so an
+		// operator who just wrote one there and reached for the obvious verb
+		// must not be told that cc is not a thing -- only that this verb is not
+		// how cc is generated, and what is.
+		if harness == "cc" || harness == "claude" || harness == "claude-code" {
+			fmt.Fprintf(os.Stderr,
+				"roles generate: there is no %q form of this verb. Claude Code's agent files are\n"+
+					"  regenerated in place inside the installed plugin, so there is no --out directory\n"+
+					"  to point at (see internal/cli.GenerateCCAgents for why that target and not\n"+
+					"  ~/.claude/agents/).\n"+
+					"  A `harness = \"cc\"` candidate in %s IS honoured -- `polyforge serve` regenerates\n"+
+					"  the plugin's agents/step-<role>.md files from it at startup, and the new value\n"+
+					"  takes effect in your NEXT Claude Code session.\n"+
+					"  To change the committed team-wide defaults instead, edit\n"+
+					"  internal/roles/definitions/cc_aliases.yaml and run `go generate ./internal/roles/...`.\n",
+				harness, config.MachineConfigPath())
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "roles generate: unsupported harness %q (must be \"pi\", \"codex\", or \"opencode\")\n%s\n", harness, usage)
 		os.Exit(1)
 	}
@@ -705,13 +1001,28 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 // check), so a path derived from os.Executable() would silently point at the
 // wrong plugin tree the moment those two disagree -- exactly the failure mode
 // the spec calls out for the embed-source decision, which applies equally
-// here. cwd is trustworthy instead: both .claude-plugin/plugin.json's
-// mcpServers.polyforge.cwd ("${CLAUDE_PLUGIN_ROOT}") and
-// .codex-plugin/mcp.json's (".", resolved against the same base as its own
+// here. cwd was chosen instead, on the reasoning that both
+// .claude-plugin/plugin.json's mcpServers.polyforge.cwd ("${CLAUDE_PLUGIN_ROOT}")
+// and .codex-plugin/mcp.json's (".", resolved against the same base as its own
 // sibling "./bin/polyforge-mcp.sh" command path) set the MCP server's cwd to
 // the plugin root, and bin/polyforge-mcp.sh execs the polyforge binary
 // without ever changing directory -- so a `serve` process launched by either
-// harness's own MCP config already has cwd == the plugin root.
+// harness's own MCP config would have cwd == the plugin root.
+//
+// 🔴 THE CLAUDE CODE HALF OF THAT IS FALSE, MEASURED 2026-09-15 (aihub#681, CC
+// 2.1.258). Reading /proc/<pid>/cwd of the live polyforge MCP server processes
+// on this machine gives the SESSION's working directory
+// ("/root/code/aicoding/gmi-ws"), not the plugin root
+// ("/root/.claude/plugins/cache/ieops-aihub/polyforge/1.1.53"), despite the
+// manifest's `"cwd": "${CLAUDE_PLUGIN_ROOT}"`. $CLAUDE_PLUGIN_ROOT itself IS
+// exported into that environment and is correct. The codex half was not
+// re-measured, so it is left standing as written rather than generalised from
+// one harness's evidence -- the same error this comment made in the first
+// place. Nothing in production calls this function any more (aihub#655 moved
+// codex generation to $CODEX_HOME), so this is a correction to a claim a
+// future reader would otherwise inherit, not a live bug; aihub#681's
+// DefaultCCAgentsDir above is the function that had to know, and it uses the
+// environment variable.
 //
 // ok=false (generation must be skipped, never guessed at) when
 // cwd/.codex-plugin does not exist -- e.g. a bare `go run ./cmd/polyforge

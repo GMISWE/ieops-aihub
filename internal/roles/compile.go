@@ -176,10 +176,21 @@ is refused, report that rather than approving unverified.`
 	return ""
 }
 
-// modelSourceNote names WHERE this role's model came from, per harness. The CC
-// branch is the only one that may claim portability (cc_aliases.yaml ships in
-// the repo); the other three carry a machine-local identifier resolved at
-// generation time against that machine's own catalog.
+// modelSourceNote names WHERE this role's model came from, per harness. The
+// other three harnesses always carry a machine-local identifier resolved at
+// generation time against that machine's own catalog. CC carries EITHER: the
+// repo-committed cc_aliases.yaml default, or -- since aihub#681 -- a value from
+// this machine's own ~/.polyforge/config.toml.
+//
+// 🔴 This branch used to assert portability unconditionally ("which is why this
+// file is generated at build time and committed to the repo"). aihub#681 made
+// that a half-truth: the committed bytes are still the portable default, but a
+// machine that names a `harness = "cc"` candidate has these files regenerated
+// from its own config at MCP-server startup, so the value a reader sees may be
+// machine-local. A generated file that denies the feature that generated it is
+// the failure mode this repo keeps recording, so the note names both sources
+// and does not claim the reader can tell which one produced it from the prose
+// alone -- only the machine's config.toml can answer that.
 //
 // The aihub#555 "an explicit per-invocation model silently overrides this file"
 // measurement is stated ONLY under cc, because that is the only harness it was
@@ -194,11 +205,15 @@ degradation, not a silent one.`
 	}
 	switch harness {
 	case "cc":
-		return `Your model is set by this file's ` + "`model:`" + ` frontmatter, a Claude Code alias -- the one
-model identifier that means the same thing on every machine, which is why this file is
-generated at build time and committed to the repo. The dispatching loop must NOT pass a
-` + "`model`" + ` argument: an explicit per-invocation model silently overrides this file (measured,
-aihub#555), which would turn this definition into dead text.`
+		return `Your model is set by this file's ` + "`model:`" + ` frontmatter, and it has TWO possible sources.
+By default it is a Claude Code alias from the repo-committed
+internal/roles/definitions/cc_aliases.yaml, rendered into this file by ` + "`go generate`" + ` and
+committed -- an identifier that means the same thing on every machine. But if this machine's
+~/.polyforge/config.toml names a ` + "`harness = \"cc\"`" + ` candidate for this role's tier, this file was
+REGENERATED from that candidate when the polyforge MCP server last started (aihub#681), and the
+value above is then machine-local and NOT portable. The dispatching loop must NOT pass a
+` + "`model`" + ` argument either way: an explicit per-invocation model silently overrides this file
+(measured, aihub#555), which would turn this definition into dead text.`
 	case "pi":
 		return `Your model is set by this file's ` + "`model:`" + ` frontmatter. It is a machine-local
 ` + "`provider/model`" + ` identifier, resolved when this file was generated from

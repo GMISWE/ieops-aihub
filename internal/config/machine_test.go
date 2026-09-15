@@ -704,16 +704,48 @@ func TestValidateCandidates(t *testing.T) {
 			wantLen: 0,
 		},
 		{
-			name:     "unknown harness is named, with the known set",
-			in:       map[string][]RoleCandidate{"default": {{Harness: "claude", Model: "x/y"}}},
-			wantEach: []string{`unknown harness "claude"`, "codex, opencode, pi", `tier "default" candidate 0`},
+			name: "unknown harness is named, with the known set",
+			in:   map[string][]RoleCandidate{"default": {{Harness: "claude", Model: "x/y"}}},
+			// "cc, codex, opencode, pi" is asserted with the LEADING "cc, ", not
+			// as the suffix "codex, opencode, pi" this used to check. That
+			// suffix still matched after aihub#681 prepended "cc" to
+			// ConfigurableHarnesses, i.e. the assertion would have stayed green
+			// whether or not the new harness was advertised to the operator at
+			// all -- a passing test that had stopped testing the thing.
+			wantEach: []string{`unknown harness "claude"`, "cc, codex, opencode, pi", `tier "default" candidate 0`},
 			wantLen:  1,
 		},
 		{
-			name:     "cc gets the specific reason it is not configurable here",
-			in:       map[string][]RoleCandidate{"raised": {{Harness: "cc", Model: "opus"}}},
-			wantEach: []string{"cc_aliases.yaml"},
+			// aihub#681 INVERTED this case. It used to be named "cc gets the
+			// specific reason it is not configurable here" and pinned a hint
+			// pointing at cc_aliases.yaml; cc is now a configurable harness, so
+			// a cc candidate must be accepted in silence like any other. The
+			// old expectation is kept as prose rather than as an assertion
+			// precisely because the assertion is what changed sides.
+			name:    "a cc candidate is valid and produces no problem at all",
+			in:      map[string][]RoleCandidate{"raised": {{Harness: "cc", Model: "opus"}}},
+			wantLen: 0,
+		},
+		{
+			// The discriminator for the case above: cc is accepted because it is
+			// KNOWN, not because ValidateCandidates stopped looking at the
+			// harness field. A near-miss spelling must still be refused, and the
+			// hint must now name the correct spelling rather than deny the
+			// feature.
+			name:     "a near-miss spelling of cc is still refused, and told the right spelling",
+			in:       map[string][]RoleCandidate{"raised": {{Harness: "claude-code", Model: "opus"}}},
+			wantEach: []string{`unknown harness "claude-code"`, `spelled "cc"`, "configurable"},
+			wantNone: []string{"not configurable"},
 			wantLen:  1,
+		},
+		{
+			// cc takes a BARE alias, so the pi/opencode provider-prefix rule
+			// must not reach it. Without this, "sonnet" would be one edit away
+			// from being reported as a bare id needing "<provider>/sonnet".
+			name:     "a bare cc alias is NOT flagged for lacking a provider prefix",
+			in:       map[string][]RoleCandidate{"lowest": {{Harness: "cc", Model: "haiku"}}},
+			wantNone: []string{"BARE"},
+			wantLen:  0,
 		},
 		{
 			name: "whitespace in a harness name is called out explicitly",

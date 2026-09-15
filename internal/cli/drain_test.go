@@ -1207,8 +1207,11 @@ func TestResolvePresetModels_MapsTierToModelPerHarness(t *testing.T) {
 	}
 	// Claude Code must never be given a model from this table. aihub#555
 	// measured that passing --model to `claude -p` silently OVERRIDES the agent
-	// file's own frontmatter, and config.RoleCandidate's contract is that a
-	// candidate's harness is pi/codex/opencode -- never cc.
+	// file's own frontmatter. That reason is the whole reason: the second one
+	// this comment used to give -- "a candidate's harness is pi/codex/opencode,
+	// never cc" -- stopped being true at aihub#681, which added "cc" to
+	// config.ConfigurableHarnesses. A cc candidate now lands in the agent file's
+	// frontmatter instead, which is exactly where drain must leave it.
 	if _, ok := got[drain.HarnessClaude]; ok {
 		t.Errorf("claude was given tier models %+v; passing --model to Claude Code silently "+
 			"overrides the agent file frontmatter (aihub#555)", got[drain.HarnessClaude])

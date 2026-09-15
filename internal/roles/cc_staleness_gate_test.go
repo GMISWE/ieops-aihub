@@ -17,6 +17,16 @@ import (
 // `go generate ./internal/roles/...` (or `go run ./internal/roles/gen`) and
 // commit the result -- never hand-edit a generated step-*.md file.
 //
+// ⚠️ ONE CAUSE IT DELIBERATELY CANNOT HAVE, since aihub#681 made these files
+// machine-overridable: a `harness = "cc"` candidate in the developer's own
+// ~/.polyforge/config.toml. That path (internal/cli.GenerateCCAgents) writes
+// into the INSTALLED plugin's agents directory under $CLAUDE_PLUGIN_ROOT, never
+// into the repo, and it refuses outright when that directory turns out to be
+// inside a git work tree. This test resolves through RenderCCAgentFiles, which
+// reads only the embedded cc_aliases.yaml. Keeping that separation is the whole
+// reason cc_aliases.yaml was kept rather than replaced by the machine table: a
+// personal config must never be able to turn this gate red, in either direction.
+//
 // This mirrors internal/mcp/contract_cards_gate_test.go's regenerate-and-diff
 // pattern, but does TRUE byte diffing rather than a semantic per-field diff:
 // these 5 files have no hand-written prose sections that must survive

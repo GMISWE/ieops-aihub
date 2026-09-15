@@ -25,6 +25,11 @@ var definitionsFS embed.FS
 // definitions/ or compile.go's CC shape. This is the first go:generate
 // directive in this repo; the cc_staleness_gate test (aihub#642) fails the
 // build if the committed files drift from what this produces.
+//
+// What it produces is the COMMITTED DEFAULT. Since aihub#681 a machine may also
+// have those files rewritten from its own ~/.polyforge/config.toml at MCP-server
+// startup; that path renders through the same functions but never touches the
+// repo, so it cannot make this gate red (see CCAliases).
 //go:generate go run ./gen
 
 // Capability is the one harness-agnostic capability a role carries today. The
@@ -142,11 +147,22 @@ func (r Role) SortedStepIDs() []string {
 	return out
 }
 
-// CCAliases is the portable, repo-committed, harness-agnostic table translating
-// a tier name to a Claude Code model alias (sonnet/opus/haiku). It is read ONLY
-// by the build-time CC agent generator (internal/roles/gen) — never by
-// internal/config.LoadMachineConfig — so no contributor's personal config.toml
-// can introduce staleness-gate noise (aihub#642 plan decision #2).
+// CCAliases is the portable, repo-committed table translating a tier name to a
+// Claude Code model alias (sonnet/opus/haiku). It is the COMMITTED DEFAULT: the
+// values `go generate` bakes into plugins/polyforge/agents/step-*.md, and the
+// values the cc_staleness_gate diffs those files against.
+//
+// Nothing in this package reads ~/.polyforge/config.toml, and that is still the
+// property aihub#642 plan decision #2 was protecting: no contributor's personal
+// config can make the staleness gate noisy, because the gate resolves through
+// this table and only this table.
+//
+// ⚠️ It is no longer the ONLY source of a CC model at runtime, and this comment
+// said it was until aihub#681. A machine whose config.toml names a
+// `harness = "cc"` candidate has internal/cli.GenerateCCAgents rewrite those
+// same files at MCP-server startup, per tier, falling back to this table for
+// every tier it does not mention. So: this table decides what is COMMITTED and
+// what the gate checks; the machine's table decides what that machine RUNS.
 type CCAliases map[string]string
 
 // LoadCCAliases parses the embedded cc_aliases.yaml sibling file and validates

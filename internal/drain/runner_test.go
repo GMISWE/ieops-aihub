@@ -63,10 +63,129 @@ type fakeHub struct {
 	// gate/gateOnce serialise the one genuinely concurrent scenario in this file: a worker whose
 	// first step blocks until a SIBLING worker has lost a lock race to its attempt. Without it
 	// "the holder is my own live attempt" is a race the test would only sometimes reach.
+	//
+	// It is closed inside claim() for any id OTHER THAN holdFirstStepOf (i.e. the CONTENDER),
+	// registered as a defer before any branch of claim() runs, guarded by gateOnce so only the
+	// first qualifying return path fires it. That "any return path" is load-bearing (aihub#687):
+	// the close used to live inside the lockedByRunning refusal branch alone, so a contender
+	// whose claim() returned via a DIFFERENT branch (a foreign lock holder, "not queued", or even
+	// a bare success caused by the ordering bug claimGate now closes) left the holder's dispatch
+	// blocked forever — CI run 34918148398.
 	gate     chan struct{}
 	gateOnce sync.Once
 	// holdFirstStepOf names the work item whose first dispatch waits on the gate.
 	holdFirstStepOf string
+
+	// claimGate/claimGateOnce/claimGateHolder make claim ORDER deterministic instead of leaving it
+	// to the scheduler (aihub#687). executeRound feeds an UNBUFFERED index channel to N workers:
+	// receiving index 0 does not order claim(wi1) before claim(wi2) reaching claim() at all, only
+	// before the CHANNEL SEND for index 1 — so a contender whose lockedByRunning names the holder
+	// can reach its decision while the holder is still "queued", claim successfully instead of
+	// being refused, and never close `gate` above.
+	//
+	// A claim() call for an id whose lockedByRunning equals claimGateHolder waits on claimGate,
+	// releasing h.mu first (the holder's own claim needs the same mutex to proceed and close the
+	// gate — see armLockRaceGate), until claimGateHolder's own claim() call has returned. That
+	// claim() call closes claimGate from a defer, guarded by claimGateOnce, on every one of ITS
+	// return paths.
+	claimGate       chan struct{}
+	claimGateOnce   sync.Once
+	claimGateHolder string
+
+	// onClaimLocked, when set, is called inside claim() immediately after h.mu.Lock() and before
+	// any decision. It runs UNDER the mutex, which is the whole point: a test can use it to
+	// release a parked HOLDER goroutine while the CONTENDER's claim() call still holds h.mu, so
+	// the contender's decision provably happens first — the exact bad interleaving claimGate
+	// exists to survive, forced instead of hoped for. Nil in every test that does not need it.
+	onClaimLocked func(id string)
+}
+
+// armLockRaceGate wires the two-gate lock-race scenario this file's concurrent tests share: gate
+// holds holder's first dispatch in flight until the contender — the work item in the hub whose
+// lockedByRunning names holder — has been decided, and claimGate forces the contender to always
+// observe holder as "running" rather than racing it.
+//
+// The preconditions are ENFORCED here, not assumed, because a silently-violated one turns this
+// helper into the thing it exists to prevent. What IS checked, and why each one is load-bearing:
+//   - b.MaxParallel >= 2: holder and contender can never be in the same round otherwise.
+//   - holder is in the hub AND its status is "queued": claim() only ever runs for a candidate
+//     executable() offers, and only a "queued" item is offered. A holder that is missing or not
+//     queued is never claimed, so claimGate — closed exclusively from the HOLDER's own claim()
+//     call — is never closed either, and every contender parked on it hangs forever.
+//   - the number of work items naming holder as lockedByRunning is STRICTLY LESS than
+//     b.MaxParallel, not merely >= 1. This is the check a reviewer's probe (aihub#687,
+//     mem_442Sz9ym) proved missing: executeRound runs exactly b.Parallelism() workers pulling
+//     indices off one unbuffered channel, and a worker that parks on claimGate inside claim()
+//     does not return to pull another index. If the contender count equals or exceeds
+//     MaxParallel, EVERY worker in the pool can end up parked at once — regardless of where
+//     OrderCandidates sorts holder — and the feeder's blocking send for holder's own index then
+//     has no free worker to reach, so nobody ever calls claim(holder) to close the gate: a hang,
+//     not a race. With contenders < MaxParallel at least one worker is always free to reach
+//     holder's index no matter its sort position, which is what makes the check sufficient rather
+//     than merely necessary.
+//
+// What is NOT enforced: anything about the contenders' or holder's relative ORDER. That is
+// deliberate — the whole point is that this scenario must hang-free regardless of where
+// OrderCandidates places holder, not merely in the arrangement a given test happens to construct.
+func (h *fakeHub) armLockRaceGate(t *testing.T, holder string, b Budget) {
+	t.Helper()
+	if b.MaxParallel < 2 {
+		t.Fatalf("armLockRaceGate(%q): Budget.MaxParallel = %d, want >= 2 — the race this arms "+
+			"cannot occur unless holder and contender can run in the same round", holder, b.MaxParallel)
+	}
+	holderWI, ok := h.wis[holder]
+	if !ok {
+		t.Fatalf("armLockRaceGate: holder %q is not in the hub", holder)
+	}
+	if holderWI.status != "queued" {
+		t.Fatalf("armLockRaceGate(%q): holder status = %q, want \"queued\" — a holder that is not "+
+			"claimable is never claimed, so claimGate would never be closed either", holder, holderWI.status)
+	}
+	contenderCount := 0
+	for _, w := range h.wis {
+		if w.lockedByRunning == holder {
+			contenderCount++
+		}
+	}
+	if contenderCount == 0 {
+		t.Fatalf("armLockRaceGate: no work item in the hub has lockedByRunning = %q; nothing would "+
+			"ever wait on claimGate, so it would never be closed either", holder)
+	}
+	if contenderCount >= b.MaxParallel {
+		t.Fatalf("armLockRaceGate(%q): %d work items name holder as lockedByRunning, want < "+
+			"Budget.MaxParallel (%d) — with that many contenders every worker in the pool can end "+
+			"up parked on claimGate at once, whatever position holder sorts into, and the feeder "+
+			"never has a free worker left to hand holder's own index to", holder, contenderCount, b.MaxParallel)
+	}
+	h.gate = make(chan struct{})
+	h.holdFirstStepOf = holder
+	h.claimGate = make(chan struct{})
+	h.claimGateHolder = holder
+}
+
+// runWithHangDetector runs r.Run in a goroutine and FAILS the test if it has not returned within
+// timeout, rather than letting a regression hang the whole package for its 10-minute go-test
+// timeout the way CI run 34918148398 did (aihub#687). This is a detector, not a fix-by-timeout:
+// on a hang the assertion goes red, it does not silently let the run "pass" by never finishing.
+func runWithHangDetector(t *testing.T, r *Runner, timeout time.Duration) (RunReport, error) {
+	t.Helper()
+	type result struct {
+		report RunReport
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := r.Run(context.Background())
+		done <- result{report, err}
+	}()
+	select {
+	case res := <-done:
+		return res.report, res.err
+	case <-time.After(timeout):
+		t.Fatalf("r.Run did not return within %s: this is the hang the fake's gates exist to make "+
+			"impossible by construction, not a slow test", timeout)
+		return RunReport{}, nil // unreachable; t.Fatalf stops the goroutine
+	}
 }
 
 func newFakeHub(steps []string, wis ...fakeWI) *fakeHub {
@@ -173,8 +292,39 @@ func (h *fakeHub) outsidersLocked(w *fakeWI, inScope map[string]bool) []BlockerR
 
 func (h *fakeHub) claim(_ context.Context, id, _ string) (*ClaimInfo, *Blocker, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.claimAttempts[id]++
+	if h.onClaimLocked != nil {
+		h.onClaimLocked(id)
+	}
+
+	// claimGate: an id whose lockedByRunning names this hub's designated holder waits HERE,
+	// before deciding anything, until the holder's own claim() call has returned — so it always
+	// observes the holder as "running" instead of racing it through the scheduler. Release h.mu
+	// while parked: the holder's own claim() call below needs the same mutex to proceed and close
+	// this gate, so holding it here would deadlock the two goroutines against each other.
+	if h.claimGate != nil && id != h.claimGateHolder {
+		if w, ok := h.wis[id]; ok && w.lockedByRunning == h.claimGateHolder {
+			h.mu.Unlock()
+			<-h.claimGate
+			h.mu.Lock()
+		}
+	}
+
+	defer h.mu.Unlock()
+	// gate (stepGate): released for the CONTENDER — any id other than holdFirstStepOf — on EVERY
+	// return path below, registered as a defer before any branch runs so it is unconditional
+	// rather than living inside one branch. A contender that exits via the foreign-lockHolder
+	// branch, the "not queued" branch, or even a bare success, must still let the holder's
+	// blocked first dispatch proceed; only the lockedByRunning refusal used to do that.
+	if h.gate != nil && id != h.holdFirstStepOf {
+		defer h.gateOnce.Do(func() { close(h.gate) })
+	}
+	// claimGate: released for the HOLDER's own claim on every return path, so a contender parked
+	// above wakes the instant the holder has been decided — successfully or not.
+	if h.claimGate != nil && id == h.claimGateHolder {
+		defer h.claimGateOnce.Do(func() { close(h.claimGate) })
+	}
+
 	w, ok := h.wis[id]
 	if !ok {
 		return nil, nil, fmt.Errorf("no such work item %s", id)
@@ -187,9 +337,6 @@ func (h *fakeHub) claim(_ context.Context, id, _ string) (*ClaimInfo, *Blocker, 
 	if other, ok := h.wis[w.lockedByRunning]; ok && other.status == "running" {
 		// The attempt id is the SAME one claim() handed out for `other` — which is what makes
 		// this refusal distinguishable from a foreign one, and the whole point of the fix.
-		if h.gate != nil {
-			h.gateOnce.Do(func() { close(h.gate) })
-		}
 		return nil, &Blocker{WorkItem: other.Slug, Actor: "me", Resource: "internal/x.go",
 				AttemptID: "ra_" + other.ID},
 			fmt.Errorf("%w: held by %s", ErrLockTaken, other.ID)
@@ -1717,11 +1864,13 @@ func TestRun_ALockHeldByThisRunsOwnAttemptIsRetriedNextRound(t *testing.T) {
 	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
 	wi2.lockedByRunning = "wi1"
 	h := newFakeHub([]string{"code_change"}, wi1, wi2)
-	h.gate = make(chan struct{})
-	h.holdFirstStepOf = "wi1" // wi1 does not finish until wi2 has lost the race to its attempt
+	budget := Budget{MaxParallel: 2, MaxRounds: 5}
+	h.armLockRaceGate(t, "wi1", budget) // wi1 does not finish until wi2 has lost the race to its
+	// attempt, and wi2's claim is forced to wait for wi1's so this is deterministic rather than
+	// depending on which worker the scheduler happens to run first (aihub#687).
 
-	r := runnerFor(h, Budget{MaxParallel: 2, MaxRounds: 5})
-	report, err := r.Run(context.Background())
+	r := runnerFor(h, budget)
+	report, err := runWithHangDetector(t, r, 10*time.Second)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1786,12 +1935,12 @@ func TestRun_AnOwnAttemptThatNEVEREndsStopsBeingRetryable(t *testing.T) {
 	wi2.lockedByRunning = "wi1"
 
 	h := newFakeHub([]string{"code_change"}, wi1, wi2)
-	h.gate = make(chan struct{})
-	h.holdFirstStepOf = "wi1"
-
 	const rounds = 5
-	r := runnerFor(h, Budget{MaxParallel: 2, MaxRounds: rounds})
-	report, err := r.Run(context.Background())
+	budget := Budget{MaxParallel: 2, MaxRounds: rounds}
+	h.armLockRaceGate(t, "wi1", budget)
+
+	r := runnerFor(h, budget)
+	report, err := runWithHangDetector(t, r, 10*time.Second)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1812,6 +1961,170 @@ func TestRun_AnOwnAttemptThatNEVEREndsStopsBeingRetryable(t *testing.T) {
 	if report.StopReason == StopMaxRounds {
 		t.Errorf("stop reason = %s: the loop was still retrying wi2 when the round budget ran out. "+
 			"Without a round budget this run does not terminate", report.StopReason)
+	}
+}
+
+// TestFakeClaimGate_ReleasesTheHolderOnEveryContenderBranch is R1 from aihub#687.
+//
+// gate (the stepGate above) used to be closed from exactly one place: inside claim()'s
+// lockedByRunning refusal branch. That is fine as long as the contender's claim() call always
+// takes that branch — but nothing forced it to. CI run 34918148398 hung the whole package for its
+// 10-minute timeout because executeRound feeds an UNBUFFERED index channel to N workers: receiving
+// index 0 orders nothing about when claim(wi1) runs relative to claim(wi2) reaching its own
+// decision, so the contender's claim() call can return via a DIFFERENT branch than the refusal —
+// and when it does, the OLD code never closed the gate, and the holder's first dispatch (which was
+// waiting on it) blocked forever.
+//
+// This reproduces that without any goroutine race at all, exactly as the design calls for: claim
+// the holder directly, give the CONTENDER a foreign lockHolder so its claim() is GUARANTEED to
+// return via the foreign-lockHolder branch (never the lockedByRunning refusal), and show the
+// holder's dispatch — the only goroutine here — hangs.
+//
+// Mutant watched RED: moving the gate-close defer back inside the lockedByRunning branch only
+// (i.e. reverting to the pre-fix shape).
+func TestFakeClaimGate_ReleasesTheHolderOnEveryContenderBranch(t *testing.T) {
+	run := func(t *testing.T, contenderForeign bool) error {
+		t.Helper()
+		holder := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
+		contender := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
+		if contenderForeign {
+			// The branch the old code never closed the gate from: claim(wi2) returns at the
+			// foreign-lockHolder early return, never reaching the lockedByRunning check at all.
+			contender.lockHolder = "somebody-else#9"
+		} else {
+			// The ONE branch the old code already handled — the negative control.
+			contender.lockedByRunning = "wi1"
+		}
+		h := newFakeHub([]string{"code_change"}, holder, contender)
+		h.gate = make(chan struct{})
+		h.holdFirstStepOf = "wi1"
+
+		if _, _, err := h.claim(context.Background(), "wi1", "k1"); err != nil {
+			t.Fatalf("claim(wi1): %v", err)
+		}
+
+		dispatchDone := make(chan error, 1)
+		go func() {
+			_, derr := h.dispatch(context.Background(), DispatchRequest{
+				Claim: ClaimInfo{WorkItemID: "wi1"}, Step: StepSpec{ID: "code_change"}, Index: 1,
+			})
+			dispatchDone <- derr
+		}()
+
+		if _, _, err := h.claim(context.Background(), "wi2", "k2"); err == nil {
+			t.Fatalf("claim(wi2): want an error, got none")
+		}
+
+		select {
+		case err := <-dispatchDone:
+			return err
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("holder's dispatch did not return within 10s: the contender's claim " +
+				"exited via a branch that never closed the gate — exactly CI run 34918148398")
+		}
+	}
+
+	const n = 10
+
+	// Negative control FIRST, deliberately: the SAME two-call, one-dispatch harness, but the
+	// contender is refused via lockedByRunning instead of a foreign lock — the ONE branch that
+	// closed the gate even before this fix. It must pass regardless of the fix, proving the
+	// failure mode below is about WHICH branch closes the gate and not some incidental bug in
+	// this harness. It runs first because a t.Fatalf in the positive half would otherwise skip
+	// it, which is precisely when its answer is wanted: a reader looking at a red run needs to
+	// see that the control was green in the SAME run (measured 2026-09-15 — reverting the fix
+	// aborted the test before the control ever executed).
+	for i := 0; i < n; i++ {
+		if err := run(t, false); err != nil {
+			t.Fatalf("run %d/%d (contender lockedByRunning, negative control): %v", i+1, n, err)
+		}
+	}
+
+	// Positive: 10/10 deterministic hangs on the pre-aihub#687 gate-close placement — measured by
+	// literally reverting the fix and re-running (3/3 runs failed on iteration 1/10); on the FIXED
+	// code (this file, as committed) it must be 10/10 green.
+	for i := 0; i < n; i++ {
+		if err := run(t, true); err != nil {
+			t.Fatalf("run %d/%d (contender foreign-locked): %v", i+1, n, err)
+		}
+	}
+}
+
+// TestRun_ContenderClaimArrivingFirstMustNotLoseTheRefusal is R2 from aihub#687.
+//
+// R1 above shows the gate is released unconditionally now. This test targets the OTHER half of
+// the fix — claimGate — which makes claim ORDER deterministic instead of racing the scheduler in
+// the first place: it forces, via onClaimLocked, the EXACT bad interleaving that made CI run
+// 34918148398 hang. The contender's claim() call acquires h.mu and starts deciding BEFORE the
+// holder's claim() call has even been attempted, so on a build with claimGate's WAIT removed the
+// contender sees the holder still "queued", claims successfully instead of being refused, and the
+// gate that is supposed to unblock the holder's dispatch is never closed by anybody (gate is only
+// ever closed by "a return path other than the holder's own claim" — see the fix in claim()).
+//
+// The assertion is written to fail on "it merely terminated": a run can terminate with wi2 having
+// simply won the claim outright, which is exactly the defect. The property under test is that the
+// contender was REFUSED once (its first claim(), forced first, sees the holder still queued only
+// in the sense that it must wait rather than falling through) and then claimed successfully once
+// the holder is actually running — never that it merely finished.
+//
+// Mutant watched RED: removing claimGate's wait (keeping the gate fix from R1). The run still
+// terminates — gate is still closed unconditionally — but wi2 is claimed exactly once, never
+// refused, which is what the assertion below must catch.
+func TestRun_ContenderClaimArrivingFirstMustNotLoseTheRefusal(t *testing.T) {
+	wi1 := fwi("wi1", "urgent", "2026-01-01T00:00:00Z")
+	wi2 := fwi("wi2", "normal", "2026-01-01T00:00:01Z")
+	wi2.lockedByRunning = "wi1"
+	h := newFakeHub([]string{"code_change"}, wi1, wi2)
+	budget := Budget{MaxParallel: 2, MaxRounds: 5}
+	h.armLockRaceGate(t, "wi1", budget)
+
+	// Force the bad interleaving deterministically instead of hoping the scheduler produces it:
+	// the holder's claim() call is not even ATTEMPTED until the contender's claim() call is
+	// provably holding h.mu — proving the contender's decision happens first, every run.
+	contenderLocked := make(chan struct{})
+	var once sync.Once
+	h.onClaimLocked = func(id string) {
+		if id == "wi2" {
+			once.Do(func() { close(contenderLocked) })
+		}
+	}
+	r := runnerFor(h, budget)
+	innerClaim := r.Claim
+	r.Claim = func(ctx context.Context, id, key string) (*ClaimInfo, *Blocker, error) {
+		if id == "wi1" {
+			select {
+			case <-contenderLocked:
+			case <-time.After(10 * time.Second):
+				t.Error("wi2 never reached claim(); the fixture, not the code under test, is broken")
+			}
+		}
+		return innerClaim(ctx, id, key)
+	}
+
+	report, err := runWithHangDetector(t, r, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Totals.Wrapped != 2 {
+		t.Fatalf("wrapped = %d, want 2. outcomes=%+v", report.Totals.Wrapped, report.Outcomes)
+	}
+
+	// The property under test: refused exactly once, then claimed and completed — not merely
+	// "the run terminated", which a mutant that drops the claimGate wait still does (gate alone
+	// still unblocks the holder). See the mutant note in the doc comment above.
+	var wi2Results []Result
+	for _, o := range report.Outcomes {
+		if o.Candidate.ID == "wi2" {
+			wi2Results = append(wi2Results, o.Result)
+		}
+	}
+	if len(wi2Results) != 2 || wi2Results[0] != ResultLockBlocked || wi2Results[1] != ResultWrapped {
+		t.Fatalf("wi2 outcomes = %v, want [%s %s]: refused exactly once by the forced bad "+
+			"interleaving, then claimed and completed once the holder was actually running",
+			wi2Results, ResultLockBlocked, ResultWrapped)
+	}
+	if n := h.claimAttempts["wi2"]; n != 2 {
+		t.Errorf("wi2 was claimed %d times, want exactly 2 (one refusal, one success)", n)
 	}
 }
 

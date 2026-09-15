@@ -258,7 +258,7 @@ is the model, not the process).
 | harness | agent id for role `<role>` (codex: a profile name, not a call argument) | the dispatch call, `<id>` = that agent id |
 |---|---|---|
 | cc | `polyforge:step-<role>` | `Agent(subagent_type=<id>, prompt=<§0b>)` |
-| pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |
+| pi | `step-<role>` | `subagent(agent=<id>, task=<§0b>)` |
 | opencode | `step-<role>` | `task(subagent_type=<id>, prompt=<§0b>, description=<3-5 words>)` |
 | codex | `step-<role>` | **none today** - run the step yourself, see below |
 
@@ -271,8 +271,10 @@ the documented dispatch pointing at a name nobody ships.
 Per row, what actually breaks if you copy cc's line instead of yours:
 
 - **pi** - the tool is `subagent`, not `Agent`; BOTH argument names differ (`agent` / `task`);
-  and the id is `pf-<role>`. `pf-execute`'s own installer generates those files
-  (`polyforge roles generate pi`), so the agents exist - only the call is wrong.
+  and the id is the BARE `step-<role>`, not cc's `polyforge:`-namespaced form (pi's ids were
+  `pf-<role>` until aihub#682 - a machine that has not re-run the installer since may still hold
+  both). `pf-execute`'s own installer generates those files (`polyforge roles generate pi`), so
+  the agents exist - only the call is wrong.
 - **opencode** - the trap row, because `subagent_type` is spelled exactly as cc spells it. The
   TOOL is `task`; `description` (3-5 words) is REQUIRED and cc's call has no such argument; and
   `Agent.get("polyforge:step-...")` throws `Unknown agent type: ... is not a valid agent type`.

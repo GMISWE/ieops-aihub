@@ -102,6 +102,28 @@ fi
 say "recorded pluginRoot=$PLUGIN_ROOT"
 
 step "agent definitions -> $AGENT_DIR/"
+#
+# ── DIVISION OF LABOUR WITH `polyforge roles install` (aihub#683) ────────────────────
+# THIS SCRIPT OWNS FIRST INSTALL. It creates $AGENT_DIR and the things agent files are
+# useless without: the opencode runtime check, the hook-bridge plugin in
+# $OC_CONFIG_DIR/plugin/, its pluginRoot sidecar, and the merged project opencode.json.
+# None of that is `roles install`'s business.
+#
+# `polyforge roles install` OWNS KEEPING THEM UP TO DATE, afterwards. It knows this same
+# directory from a table in Go (internal/cli/roles_install.go's opencodeTarget, which
+# mirrors the THREE-level expansion at the top of this file exactly:
+# POLYFORGE_OPENCODE_AGENT_DIR, then OPENCODE_CONFIG_DIR, then XDG_CONFIG_HOME, then
+# ~/.config/opencode/agent -- note the SINGULAR `agent`). It regenerates only for
+# harnesses whose directory ALREADY EXISTS, so it can never be what first creates it.
+# `polyforge serve` runs it on every MCP boot; `/pf-update` is the manual entry point.
+#
+# ⚠️ IF YOU CHANGE THE AGENT_DIR EXPANSION, CHANGE opencodeTarget TOO. The two write the
+# SAME files to the SAME place; if they disagree, this installer puts them in one
+# directory and every later boot refreshes a different one, silently. internal/cli's
+# TestResolveHarnessTargets_HonoursEveryOverride pins the Go half, including the
+# precedence order, against those lines.
+# ────────────────────────────────────────────────────────────────────────────────────
+#
 # aihub#642 (pi, codex) / aihub#653 (opencode): step-<role>.md is GENERATED per machine from
 # internal/roles/definitions/*.yaml + this machine's ~/.polyforge/config.toml [roles.tiers]
 # candidates, via `polyforge roles generate opencode` (internal/cli/roles_generate.go). This

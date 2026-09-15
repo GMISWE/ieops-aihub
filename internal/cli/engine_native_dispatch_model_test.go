@@ -209,7 +209,7 @@ var (
 
 	// harnessRowRe builds the matcher for ONE harness's row of §0f's harness table (aihub#670),
 	// e.g.
-	//   | pi | `pf-<role>` | `subagent(agent=<id>, task=<§0b>)` |
+	//   | pi | `step-<role>` | `subagent(agent=<id>, task=<§0b>)` |
 	// Group 1 is the agent-id cell (backticked, so a row that lost its formatting does not
 	// match at all rather than matching loosely), group 2 the dispatch-call cell, which is free
 	// text because the "no dispatchable agent" row is prose rather than a call.
@@ -310,6 +310,55 @@ func harnessNamePairedWithID(doc, harness, wantID string) bool {
 		}
 	}
 	return false
+}
+
+// idFormRe matches a backticked per-role agent-id FORM — the `<something>-<role>` spellings the
+// substitution rule is written in, e.g. `step-<role>`, `pf-<role>`, `polyforge:step-<role>`.
+// Anchored on the literal "<role>" placeholder so it cannot match a concrete id like
+// `polyforge:step-executor`, which the ROLE_AGENT dict spells out legitimately.
+var idFormRe = regexp.MustCompile("`([a-z][a-z0-9:_-]*-<role>)`")
+
+// staleIDFormsOnLine returns every id form on ln that is not the AgentIDFormat of ANY harness in
+// the table.
+//
+// WHY THIS EXISTS, and it was measured rather than reasoned (aihub#682). The pairing check above
+// is satisfied by a line that carries the RIGHT id anywhere on it, alongside any number of wrong
+// ones. engine.native.md's substitution rule used to read
+//
+//	id `pf-<role>` (pi) / `step-<role>` (codex, opencode)
+//
+// and after aihub#682 renamed pi to step-<role>, that stale line STILL PAIRED "pi" with
+// `step-<role>` — because codex's and opencode's id sat on the same line. Reverting only that
+// line, with internal/roles/dispatch.go left correct, was measured GREEN across this whole
+// package. The resident payload would have gone on telling every pi reader to dispatch
+// `pf-<role>`, an agent no installer generates, with CI passing.
+//
+// So the pairing rule needed its complement: not just "your id is here" but "no id that belongs
+// to nobody is here". Derived from the Go table, never from a list of retired spellings — a
+// hardcoded "pf-" tombstone would go stale at the next rename, which is the failure this whole
+// file exists to stop.
+func staleIDFormsOnLine(ln string, table []roles.HarnessDispatch) []string {
+	valid := map[string]bool{}
+	for _, d := range table {
+		valid[fmt.Sprintf(d.AgentIDFormat, "<role>")] = true
+	}
+	var stale []string
+	for _, m := range idFormRe.FindAllStringSubmatch(ln, -1) {
+		if !valid[m[1]] {
+			stale = append(stale, m[1])
+		}
+	}
+	return stale
+}
+
+// validIDForms is the same set as a sorted slice, for error messages.
+func validIDForms(table []roles.HarnessDispatch) []string {
+	out := make([]string, 0, len(table))
+	for _, d := range table {
+		out = append(out, fmt.Sprintf(d.AgentIDFormat, "<role>"))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func readAgentDoc(t *testing.T, pluginRoot, rel string) string {
@@ -703,6 +752,22 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 					"heard of.", dispatchEngineDoc, d.Harness, wantID)
 			}
 		}
+
+		// ...and the complement, without which the rule above is half a rule. See
+		// staleIDFormsOnLine: a line carrying the right id AND a retired one pairs fine and still
+		// misdirects every reader of the retired half. Checked over the WHOLE document rather than
+		// only the paired line, because an id form that belongs to no harness has no correct home
+		// in this file at all.
+		table := roles.Dispatches()
+		for i, ln := range strings.Split(engineDoc, "\n") {
+			if stale := staleIDFormsOnLine(ln, table); len(stale) > 0 {
+				t.Errorf("%s:%d states agent id form(s) %v, which internal/roles/dispatch.go's "+
+					"AgentIDFormat renders for NO harness (it renders %v). A reader told to "+
+					"substitute one of those dispatches an agent no renderer in that package "+
+					"generates. Line: %q",
+					dispatchEngineDoc, i+1, stale, validIDForms(table), ln)
+			}
+		}
 	})
 
 	// NOT ASSERTED, and measured rather than assumed: that agentIdPrefix/agentNamePrefix above
@@ -749,17 +814,50 @@ func TestEngineNativeDispatchSelectsAgentNotModel(t *testing.T) {
 		// Name and id in the same DOCUMENT but on different lines must not satisfy the pairing.
 		// This is the fixture that goes red if the live check is relaxed to whole-document.
 		if harnessNamePairedWithID(
-			"# pi is one of the four harnesses.\n# unrelated\n# the id is `pf-<role>`.",
-			"pi", "pf-<role>") {
+			"# pi is one of the four harnesses.\n# unrelated\n# the id is `step-<role>`.",
+			"pi", "step-<role>") {
 			t.Error("harnessNamePairedWithID accepted a name and an id on DIFFERENT lines — a " +
 				"reader of that text still cannot tell which id is theirs, which is the whole " +
 				"question the rule exists to answer")
 		}
 		// ...and the positive control, so "nothing paired" cannot mean "the matcher is dead".
-		if !harnessNamePairedWithID("# off cc: id `pf-<role>` (pi) / `step-<role>`.",
-			"pi", "pf-<role>") {
+		if !harnessNamePairedWithID("# off cc: id `step-<role>` (pi, codex, opencode).",
+			"pi", "step-<role>") {
 			t.Error("harnessNamePairedWithID rejected a correctly paired line; every pairing " +
 				"assertion above would then pass for the wrong reason")
+		}
+
+		// aihub#682: the mutant that ESCAPED the pairing check on its own, kept as a fixture
+		// because the reason it escaped is invisible from reading the assertion. This is the
+		// PRE-aihub#682 substitution rule verbatim. It pairs "pi" with `step-<role>` — codex's and
+		// opencode's id, sitting on the same line — so harnessNamePairedWithID says yes while the
+		// line tells every pi reader to dispatch `pf-<role>`. Reverting only this line was measured
+		// green across the whole package before staleIDFormsOnLine existed.
+		escaped := "# Off cc your row is in §0f: id `pf-<role>` (pi) / `step-<role>` (codex, opencode), call differs."
+		liveTable := roles.Dispatches()
+		if !harnessNamePairedWithID(escaped, "pi", "step-<role>") {
+			t.Error("the escaped-mutant fixture no longer pairs pi with `step-<role>`, so it can " +
+				"no longer demonstrate why the pairing check needed a complement")
+		}
+		if stale := staleIDFormsOnLine(escaped, liveTable); len(stale) != 1 || stale[0] != "pf-<role>" {
+			t.Errorf("staleIDFormsOnLine on the escaped mutant = %v, want exactly [pf-<role>]. That "+
+				"line is the one defect this check exists for; if it is not flagged, reverting the "+
+				"resident loop's substitution rule goes green again.", stale)
+		}
+		// Negative direction: a correct line must be flagged by NOTHING, or every document goes red
+		// for the wrong reason.
+		if stale := staleIDFormsOnLine(
+			"# Off cc your row is in §0f: id `step-<role>` (pi, codex, opencode), call differs.",
+			liveTable); len(stale) != 0 {
+			t.Errorf("staleIDFormsOnLine flagged %v on the CURRENT substitution rule — the check "+
+				"rejects a line it must accept", stale)
+		}
+		// ...and a concrete id from the ROLE_AGENT dict is not an id FORM, so it must not be
+		// mistaken for one.
+		if stale := staleIDFormsOnLine(
+			`ROLE_AGENT = {"executor": "polyforge:step-executor"}`, liveTable); len(stale) != 0 {
+			t.Errorf("staleIDFormsOnLine flagged %v inside the ROLE_AGENT dict — it is matching "+
+				"concrete ids rather than the `<role>`-placeholder forms it is scoped to", stale)
 		}
 
 		noAgent := "Agent(\n  prompt: \"\"\"\nbody\n\"\"\"\n)"

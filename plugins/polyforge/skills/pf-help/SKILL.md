@@ -36,10 +36,14 @@ This skill is short on purpose. The calling agent (you, when the user invokes
    ```
    pf-crystallize  pf-doctor    pf-execute
    pf-init         pf-plan     pf-project   pf-release
-   pf-retro        pf-spec     pf-status    pf-stop
-   pf-sync         pf-user     pf-work      pf-help
+   pf-retro        pf-revise   pf-spec      pf-status    pf-stop
+   pf-sync         pf-update   pf-user      pf-work      pf-help
    using-polyforge
    ```
+
+   (This listing is a convenience, not the source of truth - step 1 says to list the
+   directories. `pf-revise` was missing from it until aihub#683 added `pf-update`
+   beside it, which is exactly the drift a hand-maintained copy accumulates.)
 
 2. For each sibling, read `<sibling>/SKILL.md` and extract the `## Usage` block -
    specifically the `**Purpose**:` and `**Pattern**:` lines. Skip any skill whose

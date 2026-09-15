@@ -230,6 +230,15 @@ var clampsOutsideTheConvention = map[string]ScopeNote{
 			"offsets — this is CI tooling reading files in the repo, and it serves no request",
 	},
 
+	"internal/cli/roles_install.go:installOne:r.unchanged": {
+		Origin: "the count of generated agent files left alone because their bytes already " +
+			"matched, computed as len(plannedFileNames(harness)) - len(written) — two counts " +
+			"this process derived from internal/roles' own renderers moments earlier, on a " +
+			"LOCAL CLI/serve-startup path that serves no request and has no caller to disclose " +
+			"to. Floored at 0 because the subtraction is only sound while the generator writes " +
+			"a subset of what the renderer plans; it does today, and the floor is what keeps a " +
+			"future divergence printing a confusing 0 rather than an impossible -2",
+	},
 	"internal/domain/conflicts.go:lastActiveAgeSeconds:age": {
 		Origin: "the age of a run_attempts.last_active_at reading, computed here from two " +
 			"different clocks. It is REPORTED to a caller (last_active_age_seconds) and was never " +

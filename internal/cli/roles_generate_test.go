@@ -110,7 +110,7 @@ func TestResolveModel(t *testing.T) {
 // TestGenerateRoles_PiWritesAllFiles exercises the full pipeline end to end
 // for pi: LoadRoles -> ResolveModel (fake probe standing in for pi's live
 // `pi --list-models` catalog check) -> RenderPiAgentFiles -> write to disk.
-// Asserts all 5 pf-<role>.md files land, one resolved model makes it into
+// Asserts all 5 step-<role>.md files land, one resolved model makes it into
 // frontmatter verbatim, and the read-only/write-capable split still holds
 // post-generation (explorer/reviewer carry `tools:`, the rest do not).
 //
@@ -136,7 +136,7 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
-	for _, name := range []string{"pf-executor.md", "pf-operator.md", "pf-explorer.md", "pf-reviewer.md", "pf-designer.md"} {
+	for _, name := range []string{"step-executor.md", "step-operator.md", "step-explorer.md", "step-reviewer.md", "step-designer.md"} {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -144,20 +144,20 @@ func TestGenerateRoles_PiWritesAllFiles(t *testing.T) {
 			continue
 		}
 		content := string(data)
-		if name == "pf-executor.md" {
+		if name == "step-executor.md" {
 			if !strings.Contains(content, "model: anthropic/claude-sonnet-4-5") {
-				t.Errorf("pf-executor.md: expected resolved model in frontmatter, got:\n%s", content)
+				t.Errorf("step-executor.md: expected resolved model in frontmatter, got:\n%s", content)
 			}
 		}
 	}
 
-	explorer, _ := os.ReadFile(filepath.Join(dir, "pf-explorer.md"))
+	explorer, _ := os.ReadFile(filepath.Join(dir, "step-explorer.md"))
 	if !strings.Contains(string(explorer), "tools:") {
-		t.Errorf("pf-explorer.md (read_only role) should carry a tools: allowlist")
+		t.Errorf("step-explorer.md (read_only role) should carry a tools: allowlist")
 	}
-	operator, _ := os.ReadFile(filepath.Join(dir, "pf-operator.md"))
+	operator, _ := os.ReadFile(filepath.Join(dir, "step-operator.md"))
 	if strings.Contains(string(operator), "tools:") {
-		t.Errorf("pf-operator.md (write-capable role) should NOT carry a tools: line")
+		t.Errorf("step-operator.md (write-capable role) should NOT carry a tools: line")
 	}
 }
 
@@ -195,7 +195,7 @@ func TestGenerateRoles_CodexValidatesAgainstProbe(t *testing.T) {
 // generation now validates every candidate against a live catalog probe too
 // (aihub#642 code_review escalation) rather than writing whatever model ID
 // was configured unconditionally. A candidate the probe does not report as
-// present must NOT be written into the rendered pf-<role>.md's frontmatter.
+// present must NOT be written into the rendered step-<role>.md's frontmatter.
 func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 	dir := t.TempDir()
 	mc := &config.MachineConfig{
@@ -211,12 +211,12 @@ func TestGenerateRoles_PiValidatesAgainstProbe(t *testing.T) {
 		t.Fatalf("generateRoles(pi) error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "pf-executor.md"))
+	data, err := os.ReadFile(filepath.Join(dir, "step-executor.md"))
 	if err != nil {
-		t.Fatalf("pf-executor.md not written: %v", err)
+		t.Fatalf("step-executor.md not written: %v", err)
 	}
 	if strings.Contains(string(data), "model:") {
-		t.Errorf("pf-executor.md: candidate not in the probe's catalog must NOT be emitted, got:\n%s", data)
+		t.Errorf("step-executor.md: candidate not in the probe's catalog must NOT be emitted, got:\n%s", data)
 	}
 }
 
@@ -384,7 +384,7 @@ func TestGenerateRoles_UnresolvableCandidateFallback(t *testing.T) {
 			var modelMarker string
 			switch harness {
 			case "pi":
-				fileName, modelMarker = "pf-executor.md", "model:"
+				fileName, modelMarker = "step-executor.md", "model:"
 			case "codex":
 				fileName, modelMarker = "step-executor.toml", "model ="
 			case "opencode":
@@ -877,8 +877,8 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 	mc := &config.MachineConfig{}
 	probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
 
-	orphan := filepath.Join(dir, "pf-zombie.md")
-	if err := os.WriteFile(orphan, []byte("---\nname: pf-zombie\n---\n"), 0o644); err != nil {
+	orphan := filepath.Join(dir, "step-zombie.md")
+	if err := os.WriteFile(orphan, []byte("---\nname: step-zombie\n---\n"), 0o644); err != nil {
 		t.Fatalf("seed orphan: %v", err)
 	}
 	// Same directory, not this generator's naming: must be left alone AND
@@ -894,12 +894,12 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(stderr, "pf-zombie.md") {
-		t.Errorf("stderr does not name the orphan pf-zombie.md; a deleted role's agent file stays "+
+	if !strings.Contains(stderr, "step-zombie.md") {
+		t.Errorf("stderr does not name the orphan step-zombie.md; a deleted role's agent file stays "+
 			"dispatchable and nothing says so. got:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "no longer exists") {
-		t.Errorf("stderr does not say WHY pf-zombie.md is a problem; got:\n%s", stderr)
+		t.Errorf("stderr does not say WHY step-zombie.md is a problem; got:\n%s", stderr)
 	}
 	// Warned, never removed.
 	if _, err := os.Stat(orphan); err != nil {
@@ -907,7 +907,7 @@ func TestGenerateRoles_WarnsAboutOrphanAgentFiles(t *testing.T) {
 			"generator must not remove files it did not write", err)
 	}
 	// Files it DID just write are not orphans.
-	if strings.Contains(stderr, "pf-executor.md looks like") {
+	if strings.Contains(stderr, "step-executor.md looks like") {
 		t.Errorf("a file generated by this very run was reported as an orphan; got:\n%s", stderr)
 	}
 	// A file that does not match the naming this generator owns is not its business.
@@ -955,16 +955,132 @@ func TestGenerateRoles_WarnsBareModelIDAndUnknownHarness(t *testing.T) {
 	// A generator that warns twice and then emits the id anyway would leave the
 	// operator with a file that reads as configured and does not dispatch --
 	// exactly what aihub#642 AC7 exists to prevent (aihub#676 review B1).
-	executor, readErr := os.ReadFile(filepath.Join(dir, "pf-executor.md"))
+	executor, readErr := os.ReadFile(filepath.Join(dir, "step-executor.md"))
 	if readErr != nil {
-		t.Fatalf("pf-executor.md not written: %v", readErr)
+		t.Fatalf("step-executor.md not written: %v", readErr)
 	}
 	if strings.Contains(string(executor), "model:") {
-		t.Errorf("pf-executor.md declares a model despite the candidate being a refused bare id:\n%s", executor)
+		t.Errorf("step-executor.md declares a model despite the candidate being a refused bare id:\n%s", executor)
 	}
 	// And the provenance is attached, so an operator with several tables knows
 	// which one to edit.
 	if !strings.Contains(stderr, "[roles.tiers]") {
 		t.Errorf("stderr does not name the tier table the problem is in; got:\n%s", stderr)
+	}
+}
+
+// TestGenerateRoles_WarnsAboutRetiredAgentNames is aihub#683's regression test
+// for a defect aihub#682 introduced in this very function, handed over as
+// aihub#683.attrs.rider2_from_aihub_682_orphan_warning_narrowed.
+//
+// 🔴 THE RENAME DISARMED THE WARNING THAT EXISTS TO CATCH RENAMES.
+// warnOrphanAgentFiles derives its scan prefix from the names it JUST RENDERED.
+// aihub#682 moved pi's agents from pf-<role>.md to step-<role>.md, so in the same
+// commit the orphan scan moved from prefix `pf-` to prefix `step-` and stopped
+// seeing the entire generation it had just retired.
+//
+// Reproduced on the merged tree before the fix, with the binary rather than in
+// Go: a directory seeded with all seven historical pi names plus a step-zombie.md
+// produced exactly ONE warning — about step-zombie.md — while all seven pf-*.md
+// went unmentioned, exit 0.
+//
+// The consequence is not a missing log line. pi loads every *.md in its agents
+// directory, so an operator who upgrades through the rename via `polyforge roles
+// generate pi --out …` (which plugins/polyforge/pi/install.sh itself prints as
+// the manual remedy in two of its warnings, bypassing the installer's own retire
+// loop) is left with TWO dispatchable definitions for each of the five roles, and
+// the tool whose job is to say so says nothing.
+//
+// MUTANT (applied, compiled, red): delete the `retiredPrefixOf(harness, name) !=
+// ""` case from warnOrphanAgentFiles' switch. Result: every assertion below on a
+// pf-* name fails, exactly reproducing the measured pre-fix output.
+func TestGenerateRoles_WarnsAboutRetiredAgentNames(t *testing.T) {
+	dir := t.TempDir()
+	mc := &config.MachineConfig{}
+	probe := CatalogProbe(&fakeProbe{available: map[string]bool{}})
+
+	// The two generations of retired pi naming, exactly as
+	// plugins/polyforge/pi/install.sh's retire loop lists them.
+	preRoleLayer := []string{"pf-execute.md", "pf-explore.md"}
+	retiredPerRole := []string{
+		"pf-executor.md", "pf-explorer.md", "pf-operator.md",
+		"pf-reviewer.md", "pf-designer.md",
+	}
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("stale\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	stderr := captureStderr(t, func() {
+		if _, err := generateRolesInto(mc, "pi", dir, probe, "", true); err != nil {
+			t.Fatalf("generateRolesInto(pi): %v", err)
+		}
+	})
+
+	// Every retired name must be named. Silence about any one of them is a role
+	// with two live definitions.
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if !strings.Contains(stderr, name) {
+			t.Errorf("nothing was said about %s, a retired pi agent file sitting beside the "+
+				"newly written ones. pi loads every *.md in this directory.\n--- stderr ---\n%s",
+				name, stderr)
+		}
+	}
+
+	// 🔴 The five that SHADOW a current role get the stronger sentence, because
+	// theirs is a different problem with a different remedy: not a dead file, a
+	// second live definition. A single generic message for both would be a
+	// regression in meaning even while every name above appeared.
+	for _, name := range retiredPerRole {
+		idx := strings.Index(stderr, name)
+		if idx < 0 {
+			continue // already reported above
+		}
+		line := stderr[idx:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if !strings.Contains(line, "two dispatchable definitions") {
+			t.Errorf("%s shadows a role that was just written, but its warning does not say "+
+				"the role now has two dispatchable definitions:\n  %s", name, line)
+		}
+	}
+
+	// And the pre-role-layer pair, which shadow NOTHING, must not claim they do.
+	for _, name := range preRoleLayer {
+		idx := strings.Index(stderr, name)
+		if idx < 0 {
+			continue
+		}
+		line := stderr[idx:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if strings.Contains(line, "two dispatchable definitions") {
+			t.Errorf("%s has no current counterpart (there is no \"execute\"/\"explore\" role), "+
+				"so claiming a duplicate definition is false:\n  %s", name, line)
+		}
+	}
+
+	// 🔴 NEGATIVE CONTROL, and it is what stops the fix from being "warn about
+	// everything". The files this run just wrote must never be reported.
+	rendered, err := plannedFileNames("pi")
+	if err != nil {
+		t.Fatalf("plannedFileNames: %v", err)
+	}
+	if len(rendered) == 0 {
+		t.Fatal("no rendered names; the control below would be vacuous")
+	}
+	for _, name := range rendered {
+		if strings.Contains(stderr, "WARNING: "+filepath.Join(dir, name)) {
+			t.Errorf("%s was just written by this very call and was reported as an orphan", name)
+		}
+	}
+	// Nothing was deleted: this directory belongs to the operator.
+	for _, name := range append(append([]string{}, preRoleLayer...), retiredPerRole...) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was removed; this generator warns, it does not delete: %v", name, err)
+		}
 	}
 }

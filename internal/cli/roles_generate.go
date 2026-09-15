@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,10 +12,114 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
 	"github.com/GMISWE/ieops-aihub/internal/roles"
 )
+
+// catalogProbeTimeout bounds EVERY harness model-catalog subprocess this package
+// runs: `codex debug models`, `pi --list-models`, `opencode models`.
+//
+// 🔴 HANGING IS NOT AN ERROR, which is the whole defect this constant exists for
+// (aihub#679). Every call site treats a probe failure as a warning and carries
+// on, so every FAILURE mode of these commands is harmless -- but a CLI that
+// neither succeeds nor fails (an auth prompt waiting on a tty it does not have, a
+// network read with no deadline) returns from neither branch, and exec.Command
+// has no deadline of its own.
+//
+// 🔴 IT IS ONE CONSTANT FOR ALL THREE BECAUSE ALL THREE ARE NOW REACHABLE FROM
+// THE SERVE PATH. Before aihub#683 only the codex probe was, and only it was
+// bounded -- pi's and opencode's ran unbounded, which was survivable only because
+// nothing but an install script ever invoked them. Putting pi and opencode on the
+// startup-sync path without this would have reintroduced aihub#679's outage
+// through two new doors.
+//
+// THE VALUE, and why it is much larger than the 5s it replaces. Measured on this
+// machine 2026-09-15, wall clock, three warm runs after one cold one:
+//
+//	codex debug models    cold 176ms   warm ~176ms
+//	pi --list-models      cold 1.6s    warm ~0.91s
+//	opencode models       cold 8.2s    warm ~3.4s
+//
+// opencode's cold path alone blows straight through the old 5s ceiling, and a
+// probe that expires is not a slow success: every candidate is then reported
+// unavailable, so generation omits the model field and writes files that inherit
+// the caller's model, loudly, on a machine where nothing is actually wrong. A
+// ceiling BELOW the measured healthy latency does not bound a hang, it disables
+// the feature.
+//
+// Raising it is affordable now only because aihub#683 moved this work OFF the
+// pre-serve critical path (cmd/polyforge/main.go runs SyncRolesOnStartup in a
+// goroutine). The ceiling therefore no longer measures "delay before an agent can
+// talk to polyforge at all" -- it measures how long a wedged CLI keeps one
+// background goroutine, whose worst case is that this boot skips regeneration and
+// the next one redoes it.
+const catalogProbeTimeout = 30 * time.Second
+
+// catalogProbeWaitDelay is the grace period after cancellation, and WITHOUT IT
+// THE TIMEOUT ABOVE DOES NOT ACTUALLY BOUND ANYTHING.
+//
+// 🔴 MEASURED DURING aihub#679, and the reason the bound is two constants rather
+// than one. exec.CommandContext cancels by killing the process it started -- and
+// only that process. Output() does not return when the child dies; it returns
+// when the stdout pipe reaches EOF, which happens when the LAST holder of the
+// write end closes it. A child that forked before hanging leaves a grandchild
+// holding that pipe, so Wait blocks on the pipe long after the child is dead and
+// the deadline has passed. Against a `/bin/sh` wrapper that exec'd `sleep 600` --
+// the exact shape of a wrapper script, which is how several package managers
+// install these CLIs -- the probe did not return at all.
+//
+// ⚠️ WHAT THIS DOES NOT DO: the grandchild is not reaped, so a hung CLI that
+// forked stays hung, detached. That is strictly better than blocking on it, but
+// it is not a process-group kill; if orphaned probe processes ever show up in
+// anger the fix is SysProcAttr{Setpgid: true} plus a cmd.Cancel that signals
+// -pgid, not a longer delay here.
+const catalogProbeWaitDelay = 1 * time.Second
+
+// boundedProbe is the shared deadline machinery the three catalog probes embed.
+// It exists so the bound cannot be present on one harness and missing on another,
+// which is exactly the state aihub#683 found the package in.
+type boundedProbe struct {
+	// timeout overrides catalogProbeTimeout, and exists so the test that proves
+	// the deadline works does not have to spend the production one waiting for
+	// it. Zero means the shipped default, so every non-test construction -- all
+	// of which use the zero value -- gets catalogProbeTimeout without naming it.
+	timeout time.Duration
+}
+
+// effectiveTimeout is catalogProbeTimeout unless this probe was built with one.
+func (b boundedProbe) effectiveTimeout() time.Duration {
+	if b.timeout > 0 {
+		return b.timeout
+	}
+	return catalogProbeTimeout
+}
+
+// run executes a harness's catalog command under the deadline and reports a
+// timeout AS ITSELF. context.DeadlineExceeded reaches the caller as "signal:
+// killed" from Output() alone, which reads like an operator killed the CLI rather
+// than like polyforge gave up on it, and that is the one distinction whoever is
+// debugging a slow or silent boot needs.
+func (b boundedProbe) run(name string, args ...string) ([]byte, error) {
+	timeout := b.effectiveTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	// See catalogProbeWaitDelay: the context alone kills the child and then
+	// blocks on a pipe a grandchild still holds. Both lines are the fix.
+	cmd.WaitDelay = catalogProbeWaitDelay
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil
+	}
+	display := strings.Join(append([]string{name}, args...), " ")
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%s: gave up after %s (%w); role generation is skipped "+
+			"for this harness", display, timeout, ctx.Err())
+	}
+	return nil, fmt.Errorf("%s: %w", display, err)
+}
 
 // CatalogProbe reports whether a model is known to be available in a
 // harness's local model catalog. nil means "no live check" -- ResolveModel
@@ -39,6 +144,7 @@ type CatalogProbe interface {
 // CLI is missing, not authenticated, or the command fails for any reason,
 // every model is conservatively treated as unavailable: never guess.
 type codexCatalogProbe struct {
+	boundedProbe
 	once   sync.Once
 	models map[string]bool
 	err    error
@@ -46,9 +152,9 @@ type codexCatalogProbe struct {
 
 func (p *codexCatalogProbe) load() {
 	p.once.Do(func() {
-		out, err := exec.Command("codex", "debug", "models").Output()
+		out, err := p.run("codex", "debug", "models")
 		if err != nil {
-			p.err = fmt.Errorf("codex debug models: %w", err)
+			p.err = err
 			return
 		}
 		models, err := parseCodexModelCatalog(out)
@@ -112,6 +218,7 @@ func parseCodexModelCatalog(data []byte) (map[string]bool, error) {
 // a configured model ID straight into the rendered agent file with no
 // validation at all, unlike codex.
 type piCatalogProbe struct {
+	boundedProbe
 	once    sync.Once
 	catalog piModelCatalog
 	err     error
@@ -122,9 +229,9 @@ type piCatalogProbe struct {
 
 func (p *piCatalogProbe) load() {
 	p.once.Do(func() {
-		out, err := exec.Command("pi", "--list-models").Output()
+		out, err := p.run("pi", "--list-models")
 		if err != nil {
-			p.err = fmt.Errorf("pi --list-models: %w", err)
+			p.err = err
 			return
 		}
 		p.catalog = parsePiModelCatalog(out)
@@ -291,6 +398,7 @@ func parsePiModelCatalog(out []byte) piModelCatalog {
 // missing, not authenticated, or the command fails for any reason, every
 // model is conservatively treated as unavailable: never guess.
 type opencodeCatalogProbe struct {
+	boundedProbe
 	once   sync.Once
 	models map[string]bool
 	err    error
@@ -298,9 +406,9 @@ type opencodeCatalogProbe struct {
 
 func (p *opencodeCatalogProbe) load() {
 	p.once.Do(func() {
-		out, err := exec.Command("opencode", "models").Output()
+		out, err := p.run("opencode", "models")
 		if err != nil {
-			p.err = fmt.Errorf("opencode models: %w", err)
+			p.err = err
 			return
 		}
 		p.models = parseOpencodeModelCatalog(out)
@@ -471,11 +579,16 @@ func UnresolvedModelWarning(harness, tier, role, tierSource string, why ResolveF
 // GenerateRoles renders and writes one harness's ("pi", "codex", or
 // "opencode") agent files into outDir, resolving each role's tier against mc.Roles.Tiers
 // (aihub#642 design decision #5). It returns an error rather than exiting the
-// process on any failure -- this is deliberately reusable from a context that
-// must never crash the host (cmd/polyforge/main.go's serve startup path,
-// which calls this after config.EnsureMachineConfig() and only logs a
-// warning on error; see RunRolesGenerate below for the CLI-exits-on-error
-// wrapper used by `polyforge roles generate`).
+// process on any failure -- deliberately reusable from a context that must never
+// crash the host; see RunRolesGenerate below for the CLI-exits-on-error wrapper
+// used by `polyforge roles generate`.
+//
+// ⚠️ IT NO LONGER HAS A PRODUCTION CALLER. This comment used to say the serve
+// startup path "calls this after config.EnsureMachineConfig()"; since aihub#683
+// that path goes through SyncRolesOnStartup -> generateRolesInto, which is this
+// function's body plus the written-paths list and the once-per-process preflight
+// switch. Kept as the stable exported spelling (and used by tests); prefer
+// generateRolesInto inside this package.
 //
 // A tier with no resolvable candidate for this harness is not an error: the
 // generated file for that role simply has no model field, and a loud,
@@ -497,14 +610,53 @@ func GenerateRolesWithPreset(mc *config.MachineConfig, harness, outDir, preset s
 	return generateRoles(mc, harness, outDir, probeForHarness(harness), preset)
 }
 
+// machineConfigPreflight emits the two warnings that describe the machine's
+// CONFIG rather than any one harness: a typo'd harness key or a bare pi/opencode
+// model id (aihub#676 finding 6 -- `harness = "claude"` used to be invisible,
+// surfacing only as the generic no-resolvable-candidate warning that points the
+// operator at the model rather than at the typo), and the notice that
+// ~/.polyforge/roles/ is never read (finding 2).
+//
+// 🔴 IT IS A SEPARATE FUNCTION BECAUSE IT MUST RUN EXACTLY ONCE PER PROCESS.
+// aihub#681 hoisted these out of the per-harness generators into cmd/polyforge's
+// main() for precisely that reason: with a copy inside each generator, a machine
+// running two harnesses got two copies of every tier-table problem and two copies
+// of the six-line roles-override notice on every serve boot (measured). The
+// startup sync path must therefore NOT call this -- main() already has -- while
+// the standalone CLI verbs, which main() does not run, must.
+func machineConfigPreflight(w io.Writer, tiers map[string][]config.RoleCandidate, tierSource string) {
+	for _, problem := range config.ValidateCandidates(tiers) {
+		_, _ = fmt.Fprintf(w, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
+	}
+	if path, present := config.UnreadRolesOverrideDir(); present {
+		_, _ = fmt.Fprint(w, config.RolesOverrideIgnoredWarning(path))
+	}
+}
+
 func generateRoles(mc *config.MachineConfig, harness, outDir string, probe CatalogProbe, preset string) error {
+	_, err := generateRolesInto(mc, harness, outDir, probe, preset, true)
+	return err
+}
+
+// generateRolesInto is generateRoles plus the two things aihub#683 needs from it
+// and the `roles generate` verb does not: the list of files it actually wrote
+// (absolute paths, so `/pf-update` can name them rather than claiming "done"),
+// and a switch for the once-per-process preflight above.
+//
+// It also no longer rewrites a file whose bytes already match. That is not an
+// optimisation here, it is what makes the startup sync path silent and
+// mtime-stable on the steady state -- the same property aihub#681 made a
+// correctness requirement for Claude Code, now that three more harnesses
+// regenerate on every boot. `polyforge roles generate` keeps reporting success
+// either way, so no install script's contract changes.
+func generateRolesInto(mc *config.MachineConfig, harness, outDir string, probe CatalogProbe, preset string, preflight bool) ([]string, error) {
 	if harness != "pi" && harness != "codex" && harness != "opencode" {
-		return fmt.Errorf("unsupported harness %q for roles generate (must be \"pi\", \"codex\", or \"opencode\")", harness)
+		return nil, fmt.Errorf("unsupported harness %q for roles generate (must be \"pi\", \"codex\", or \"opencode\")", harness)
 	}
 
 	roleList, err := roles.LoadRoles()
 	if err != nil {
-		return fmt.Errorf("load roles: %w", err)
+		return nil, fmt.Errorf("load roles: %w", err)
 	}
 
 	// 🔴 Resolved, never read straight off mc.Roles.Tiers. Before aihub#673 this
@@ -513,26 +665,21 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 	// config.MachineConfig.ResolveTiers for why one resolver is the whole point.
 	tiers, tierSource, err := mc.ResolveTiers(preset)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Provenance on stderr, not stdout: stdout carries the subcommand's own
 	// success line, and an operator comparing two machines needs to see WHICH
 	// table produced these files, not merely that some table did.
-	fmt.Fprintf(os.Stderr, "polyforge: roles generate %s: tier table from %s\n", harness, tierSource)
-
-	// A typo'd harness string used to be invisible: nothing in the repo
-	// validated it, so `harness = "claude"` or a stray trailing space simply
-	// never matched any candidate and surfaced as the generic
-	// no-resolvable-candidate warning below, pointing the operator at the model
-	// rather than at the typo (aihub#676 finding 6).
-	for _, problem := range config.ValidateCandidates(tiers) {
-		fmt.Fprintf(os.Stderr, "polyforge: WARNING: %s (%s)\n", problem, tierSource)
-	}
-
-	// aihub#676 finding 2: say out loud that ~/.polyforge/roles/ is not read,
-	// rather than letting an operator's edits there have no effect forever.
-	if path, present := config.UnreadRolesOverrideDir(); present {
-		fmt.Fprint(os.Stderr, config.RolesOverrideIgnoredWarning(path))
+	//
+	// ⚠️ Tied to `preflight`, which is the "a human typed a command" flag. This
+	// line was unconditional until aihub#683's review, and this function is now on
+	// the every-boot path for pi and opencode — so a machine configuring both
+	// printed two `roles generate ...` lines per MCP session, naming a subcommand
+	// nobody invoked, on a boot that in the steady state changes nothing. See
+	// SyncRolesOnStartup: a boot that changed nothing says nothing.
+	if preflight {
+		fmt.Fprintf(os.Stderr, "polyforge: roles generate %s: tier table from %s\n", harness, tierSource)
+		machineConfigPreflight(os.Stderr, tiers, tierSource)
 	}
 
 	resolved := make(map[string]string, len(roleList))
@@ -557,25 +704,24 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 		rendered, err = roles.RenderOpencodeAgentFiles(roleList, resolved)
 	}
 	if err != nil {
-		return fmt.Errorf("render %s agent files: %w", harness, err)
+		return nil, fmt.Errorf("render %s agent files: %w", harness, err)
 	}
 
+	// Decided BEFORE mkdir, which is changedFiles' documented contract and which
+	// generateCCAgents and generateCodexProfiles both honour. Benign here today
+	// (the startup gate guarantees the directory exists on that path, and the
+	// explicit path wants it created either way), but a comment two callers obey
+	// and a third quietly does not is a comment that will mislead.
+	changed := changedFiles(outDir, rendered)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", outDir, err)
+		return nil, fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
-	names := make([]string, 0, len(rendered))
-	for name := range rendered {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		path := filepath.Join(outDir, name)
-		if err := os.WriteFile(path, []byte(rendered[name]), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", path, err)
-		}
+	written, err := writeGeneratedFiles(outDir, rendered, changed, agentFilePerm)
+	if err != nil {
+		return written, err
 	}
 	warnOrphanAgentFiles(os.Stderr, outDir, harness, rendered)
-	return nil
+	return written, nil
 }
 
 // warnOrphanAgentFiles names files in outDir that this generator would have
@@ -589,6 +735,38 @@ func generateRoles(mc *config.MachineConfig, harness, outDir string, probe Catal
 // stays dispatchable. The equivalent on the Claude Code side is a HARD failure
 // instead (those files are committed, so a gate can assert on them) -- see
 // internal/roles.TestCCStalenessGateRejectsOrphans.
+// retiredAgentNamePrefixes lists, per harness, the filename prefixes this
+// generator USED to write and no longer does.
+//
+// 🔴 IT EXISTS BECAUSE DERIVING THE SCAN PREFIX FROM THE CURRENT RENDER MADE THE
+// SCAN FOLLOW THE RENAME AND LEAVE THE PAST BEHIND. aihub#682 renamed pi's agent
+// files pf-<role>.md -> step-<role>.md; because the prefix above is cut from a
+// rendered name, pi's orphan scan moved from `pf-` to `step-` in the same commit,
+// and stopped warning about ANY pf-*.md. Measured on the merged tree before this
+// fix: a directory seeded with all seven historical pi names plus a step-zombie.md
+// produced exactly one warning, about step-zombie.md, while all seven pf-*.md
+// survived unmentioned and exit was 0.
+//
+// That is worse than a missed warning. pi loads every *.md in its agents
+// directory, so the operator is left with TWO dispatchable definitions for each of
+// the five roles and nothing anywhere says so — the exact duplicate-definition
+// hazard aihub#682 set out to remove, reached through the other door.
+// plugins/polyforge/pi/install.sh retires these names on the INSTALLER path, but
+// it prints `polyforge roles generate pi --out ...` as the manual remedy in two of
+// its own warnings, and that path bypasses the installer entirely.
+//
+// The derivation is kept for the CURRENT generation (that is what makes a future
+// rename self-maintaining) and this list covers the past. A new entry is needed
+// only when a harness's agent filenames change again — the same moment
+// install.sh's retire loop needs one, which is why both are worth changing
+// together.
+var retiredAgentNamePrefixes = map[string][]string{
+	// pi, before aihub#682. Covers both generations of the old naming: the
+	// pre-aihub#642 pf-execute/pf-explore and the pf-<role> set that replaced
+	// them, since the prefix is common to both.
+	"pi": {"pf-"},
+}
+
 func warnOrphanAgentFiles(w io.Writer, outDir, harness string, rendered map[string]string) {
 	// The naming rule this generator owns, per harness: same stem shape as the
 	// files it just wrote. Derived from the rendered names themselves rather
@@ -613,25 +791,124 @@ func warnOrphanAgentFiles(w io.Writer, outDir, harness string, rendered map[stri
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		if e.IsDir() || !strings.HasSuffix(name, suffix) {
 			continue
 		}
 		if _, current := rendered[name]; current {
 			continue
 		}
-		_, _ = fmt.Fprintf(w,
-			"polyforge: WARNING: %s looks like a %s agent file for a role that no longer exists. "+
-				"It was NOT removed (this directory is yours, not this generator's), but nothing "+
-				"can dispatch to it and it may still be loaded by %s. Delete it if you renamed or "+
-				"removed a role.\n",
-			filepath.Join(outDir, name), harness, harness)
+
+		switch {
+		case strings.HasPrefix(name, prefix):
+			_, _ = fmt.Fprintf(w,
+				"polyforge: WARNING: %s looks like a %s agent file for a role that no longer exists. "+
+					"It was NOT removed (this directory is yours, not this generator's), but nothing "+
+					"can dispatch to it and it may still be loaded by %s. Delete it if you renamed or "+
+					"removed a role.\n",
+				filepath.Join(outDir, name), harness, harness)
+
+		case retiredPrefixOf(harness, name) != "":
+			// A DIFFERENT problem from the one above, and it gets its own
+			// sentence: this file is not dead, it is a SECOND live definition of a
+			// role that also has a current one, which is worse and has a different
+			// remedy.
+			retired := retiredPrefixOf(harness, name)
+			stem := strings.TrimSuffix(strings.TrimPrefix(name, retired), suffix)
+			if _, dup := rendered[prefix+stem+suffix]; dup {
+				_, _ = fmt.Fprintf(w,
+					"polyforge: WARNING: %s is a %s agent file under a RETIRED name, and %s%s%s "+
+						"for the same role was just written beside it. %s loads both, so the role "+
+						"now has two dispatchable definitions and which one answers is not "+
+						"something this generator controls. It was NOT removed (this directory is "+
+						"yours); delete it, or re-run the installer, which retires it for you.\n",
+					filepath.Join(outDir, name), harness, prefix, stem, suffix, harness)
+				continue
+			}
+			_, _ = fmt.Fprintf(w,
+				"polyforge: WARNING: %s is a %s agent file under a RETIRED name (%s… was replaced "+
+					"by %s…). Nothing can dispatch to it. It was NOT removed (this directory is "+
+					"yours); delete it, or re-run the installer, which retires it for you.\n",
+				filepath.Join(outDir, name), harness, retired, prefix)
+		}
 	}
 }
 
-// ccAgentFilePerm is the mode the CC agent files are written with. It matches
-// what internal/roles/gen commits them as, so a regenerated file is
-// indistinguishable from the shipped one in everything but content.
-const ccAgentFilePerm = 0o644
+// retiredPrefixOf returns the retired prefix name carries for this harness, or ""
+// when it carries none. A name matching the CURRENT prefix is never reported as
+// retired, so a harness that re-adopts an old prefix cannot warn about its own
+// output.
+func retiredPrefixOf(harness, name string) string {
+	for _, retired := range retiredAgentNamePrefixes[harness] {
+		if strings.HasPrefix(name, retired) {
+			return retired
+		}
+	}
+	return ""
+}
+
+// agentFilePerm is the mode every generated agent/profile file is written with.
+// It matches what internal/roles/gen commits the Claude Code files as, so a
+// regenerated file is indistinguishable from the shipped one in everything but
+// content, and it is what os.WriteFile(…, 0o644) gave the other three harnesses
+// before aihub#683 routed them through writeFileAtomic.
+const agentFilePerm = 0o644
+
+// changedFiles returns, in sorted order, the names in rendered whose bytes differ
+// from what dir already holds.
+//
+// 🔴 DECIDING THIS BEFORE mkdir AND BEFORE ANY ANNOUNCEMENT is the point. The
+// steady state on a configured machine is "every boot renders exactly what is
+// already on disk", and without this every session on the machine would rename
+// N files and log a line, forever, to change nothing. aihub#681 made that a
+// correctness property for Claude Code (a plugin cache directory is shared and
+// version-keyed); aihub#683 extends it to the other three because they are now on
+// the same per-boot path.
+//
+// A read error is NOT an error here: it means "cannot prove it matches", so the
+// file is rewritten, which is the safe direction.
+func changedFiles(dir string, rendered map[string]string) []string {
+	names := make([]string, 0, len(rendered))
+	for name := range rendered {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	changed := make([]string, 0, len(names))
+	for _, name := range names {
+		current, readErr := os.ReadFile(filepath.Join(dir, name))
+		if readErr != nil || string(current) != rendered[name] {
+			changed = append(changed, name)
+		}
+	}
+	return changed
+}
+
+// writeGeneratedFiles writes the named entries of rendered into dir and returns
+// the absolute paths it wrote, in the order it wrote them.
+//
+// Every write goes through writeFileAtomic (temp file + rename), never
+// os.WriteFile, and the difference is observable rather than theoretical: these
+// directories are SCANNED BY A LIVE HARNESS. pi watches ~/.pi/agent/agents/ and
+// Claude Code reads its plugin's agents/ at session start, so an in-place
+// truncation is a window in which a real reader loads a half-written agent
+// definition -- a file whose YAML frontmatter is cut mid-key parses as a
+// different agent, or as none.
+//
+// On failure it returns the paths written SO FAR together with the error, and
+// that pairing is deliberate: the caller's job is to report what actually
+// happened, and a partial install that claims nothing was written is the same
+// class of lie as one that claims everything was.
+func writeGeneratedFiles(dir string, rendered map[string]string, names []string, perm os.FileMode) ([]string, error) {
+	written := make([]string, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if err := writeFileAtomic(path, []byte(rendered[name]), perm); err != nil {
+			return written, fmt.Errorf("write %s: %w", path, err)
+		}
+		written = append(written, path)
+	}
+	return written, nil
+}
 
 // GenerateCCAgents regenerates the plugin's five step-<role>.md Claude Code
 // agent files in outDir from THIS MACHINE's tier table, and reports whether it
@@ -706,12 +983,26 @@ const ccAgentFilePerm = 0o644
 // Errors are the caller's to log, not to die on: this runs on the MCP server's
 // boot path.
 func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err error) {
+	written, err := generateCCAgents(mc, outDir)
+	return len(written) > 0, err
+}
+
+// generateCCAgents is GenerateCCAgents returning the absolute paths it wrote
+// rather than merely whether it wrote anything. aihub#683's `roles install` has
+// to NAME them (AC5: "said it finished" and "actually finished" must be
+// distinguishable by reading the output).
+//
+// The boolean wrapper above is kept rather than the signature changed because
+// aihub#681's twenty-odd test call sites all branch on the boolean and rewriting
+// them would bury this change's real diff. Note it has no PRODUCTION caller any
+// more: cmd/polyforge/main.go now reaches this through SyncRolesOnStartup.
+func generateCCAgents(mc *config.MachineConfig, outDir string) ([]string, error) {
 	tiers, tierSource, err := mc.ResolveTiers("")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if !hasCCCandidate(tiers) {
-		return false, nil
+		return nil, nil
 	}
 
 	// Checked HERE, after the cc gate, and not while resolving the directory:
@@ -728,16 +1019,16 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 				"defaults, edit internal/roles/definitions/cc_aliases.yaml and run "+
 				"`go generate ./internal/roles/...`.\n",
 			outDir, config.MachineConfigPath())
-		return false, nil
+		return nil, nil
 	}
 
 	roleList, err := roles.LoadRoles()
 	if err != nil {
-		return false, fmt.Errorf("load roles: %w", err)
+		return nil, fmt.Errorf("load roles: %w", err)
 	}
 	aliases, err := roles.LoadCCAliases()
 	if err != nil {
-		return false, fmt.Errorf("load cc_aliases.yaml: %w", err)
+		return nil, fmt.Errorf("load cc_aliases.yaml: %w", err)
 	}
 
 	resolved := make(map[string]string, len(roleList))
@@ -771,54 +1062,29 @@ func GenerateCCAgents(mc *config.MachineConfig, outDir string) (wrote bool, err 
 
 	rendered, err := roles.RenderCCAgentFilesWithModels(roleList, resolved)
 	if err != nil {
-		return false, fmt.Errorf("render cc agent files: %w", err)
+		return nil, fmt.Errorf("render cc agent files: %w", err)
 	}
 
-	names := make([]string, 0, len(rendered))
-	for name := range rendered {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	// 🔴 SKIP THE WRITE WHEN THE BYTES ALREADY MATCH, and decide that BEFORE
-	// mkdir or the announcement. The steady state on a configured machine is
-	// "every boot renders exactly what is already on disk", and without this
-	// every Claude Code session on the machine would rename five files in a
-	// shared, version-keyed plugin cache directory and log a line, forever, to
-	// change nothing. It also gives the configured machine the same mtime
-	// stability AC1 makes a correctness property for the unconfigured one.
-	//
-	// A read error is NOT an error here: it means "cannot prove it matches", so
-	// the file is rewritten, which is the safe direction.
-	changed := make([]string, 0, len(names))
-	for _, name := range names {
-		current, readErr := os.ReadFile(filepath.Join(outDir, name))
-		if readErr != nil || string(current) != rendered[name] {
-			changed = append(changed, name)
-		}
-	}
+	// See changedFiles: the skip-when-identical decision is taken BEFORE mkdir
+	// and before the announcement, so an unchanged boot touches nothing and says
+	// nothing.
+	changed := changedFiles(outDir, rendered)
 	if len(changed) == 0 {
-		return false, nil
+		return nil, nil
 	}
 
 	fmt.Fprintf(os.Stderr, "polyforge: cc agents: regenerating %v in %s from %s\n",
 		changed, outDir, tierSource)
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", outDir, err)
-	}
-	for _, name := range changed {
-		path := filepath.Join(outDir, name)
-		if err := writeFileAtomic(path, []byte(rendered[name]), ccAgentFilePerm); err != nil {
-			return false, err
-		}
+		return nil, fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 	// No warnOrphanAgentFiles call: outDir here is the plugin's own agents
 	// directory, whose orphans are a HARD failure in the repo instead
 	// (internal/roles.TestCCStalenessGate's orphan scan), and a stale file in a
 	// released plugin's cache directory is not something this machine's operator
 	// put there or can act on.
-	return true, nil
+	return writeGeneratedFiles(outDir, rendered, changed, agentFilePerm)
 }
 
 // hasCCCandidate reports whether any tier in the table names harness "cc". It
@@ -925,10 +1191,12 @@ func unwritableCCModelWarning(tier, role, tierSource string, rejected []string) 
 //   - the server's cwd is the SESSION's working directory, NOT the plugin root,
 //     even though .claude-plugin/plugin.json sets `"cwd": "${CLAUDE_PLUGIN_ROOT}"`.
 //
-// ⚠️ That second measurement contradicts DefaultCodexAgentsDir's doc comment
-// below, which asserts the opposite; see the correction recorded there. A cwd
-// fallback here would therefore not be a safety net, it would aim this
-// generator at whatever directory the user happened to open Claude Code in.
+// ⚠️ That second measurement contradicts DefaultCodexAgentsDir's doc comment at
+// the bottom of this file, which asserts the opposite; see the correction
+// recorded there, and note that that function is superseded by
+// roles_install.go's codexTarget and has no production caller. A cwd fallback
+// here would therefore not be a safety net, it would aim this generator at
+// whatever directory the user happened to open Claude Code in.
 //
 // The existence check is on .claude-plugin/plugin.json rather than on agents/:
 // the manifest is what makes a directory a CC plugin root, and requiring
@@ -971,24 +1239,61 @@ func DefaultCCAgentsDir() (string, bool) {
 // "/", so it passed through ~/.claude and $HOME -- and versioning your dotfiles
 // in git is common. Any such user would have silently lost the whole feature,
 // with a NOTE telling them to run `go generate`, advice that means nothing to
-// someone who is not a contributor. The stop condition is the install layout
-// itself: <claude-config>/plugins/cache/<marketplace>/<plugin>/<version> is
-// materialised by the plugin manager and is a checkout by no path, so reaching
-// a directory named "cache" whose parent is named "plugins" ends the walk. The
-// marketplace SOURCE tree (…/plugins/marketplaces/<name>/…) hits its own .git
-// long before that, so the true positive is unaffected.
+// someone who is not a contributor.
+//
+// There are TWO stop conditions, and the second was added by aihub#683 when this
+// guard stopped being Claude Code's alone:
+//
+//  1. The plugin manager's install layout.
+//     <claude-config>/plugins/cache/<marketplace>/<plugin>/<version> is
+//     materialised by the plugin manager and is a checkout by no path, so
+//     reaching a directory named "cache" whose parent is named "plugins" ends the
+//     walk. The marketplace SOURCE tree (…/plugins/marketplaces/<name>/…) hits
+//     its own .git long before that, so the true positive is unaffected.
+//
+//  2. $HOME itself.
+//     🔴 WITHOUT THIS, EXTENDING THE GUARD TO THE OTHER THREE HARNESSES WOULD
+//     HAVE SILENTLY DISABLED THEM FOR DOTFILE USERS -- the exact bug (1) was
+//     added to fix, reintroduced through a different door. Every non-cc target is
+//     $HOME-relative by default (~/.pi/agent/agents, ~/.codex,
+//     ~/.config/opencode/agent), so on a machine whose $HOME is itself a git work
+//     tree the walk would find $HOME/.git from every one of them and refuse to
+//     write anything, forever, while telling the operator to run `go generate` on
+//     a repo they have never cloned.
+//     $HOME being versioned does not make ~/.pi/agent/agents "a contributor's
+//     checkout of THIS repo", which is the only thing this guard is entitled to
+//     recognise. A repository cloned BELOW $HOME -- including this one -- still
+//     hits its own .git first and is still refused.
+//     The check is ordered before the .git probe so that $HOME is never itself
+//     the match.
 //
 // Symlinks are resolved first: filepath.Dir is lexical, so a $CLAUDE_PLUGIN_ROOT
 // symlinked into a checkout would otherwise walk the wrong ancestors, miss the
 // repo's .git, and write through the link into tracked files -- the exact false
-// negative this guard exists to prevent.
+// negative this guard exists to prevent. $HOME is resolved the same way so the
+// comparison cannot miss on a symlinked home directory.
 func inGitWorkTree(dir string) bool {
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
+	home := ""
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		// Clean first: the comparison below is string equality, and a trailing
+		// slash in $HOME ("/root/") would make it never match, silently disabling
+		// stop condition (2). EvalSymlinks already cleans, but it fails on a home
+		// directory that does not exist, and that branch must not be the one that
+		// leaves a dirty path behind.
+		home = filepath.Clean(h)
+		if resolved, err := filepath.EvalSymlinks(home); err == nil {
+			home = resolved
+		}
+	}
 	for {
 		if filepath.Base(dir) == "cache" && filepath.Base(filepath.Dir(dir)) == "plugins" {
 			return false // inside the plugin manager's install cache
+		}
+		if home != "" && dir == home {
+			return false // stop condition (2) above
 		}
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return true
@@ -1009,14 +1314,18 @@ func inGitWorkTree(dir string) bool {
 // invoking this directly wants a non-zero exit code on failure, not a
 // silently-degraded install.
 //
-// opencode generation is deliberately install-script-invoked ONLY: unlike
-// codex (see DefaultCodexAgentsDir below), there is no auto-regeneration hook
-// for opencode in cmd/polyforge/main.go's serve startup path -- that call
-// site is aihub#654's locked territory, and opencode's install script
-// (plugins/polyforge/opencode/install.sh) computes its own --out target
-// directly in shell rather than through a Go-side Default*Dir helper, so no
-// such helper is added here. Wiring an auto-regen hook into serve startup, if
-// ever wanted, is left to a follow-up work item.
+// ⚠️ THE PARAGRAPH THAT WAS HERE IS NOW FALSE, and it is worth saying so rather
+// than deleting it. It read: "opencode generation is deliberately
+// install-script-invoked ONLY ... there is no auto-regeneration hook for opencode
+// in cmd/polyforge/main.go's serve startup path ... Wiring an auto-regen hook
+// into serve startup, if ever wanted, is left to a follow-up work item."
+// aihub#683 IS that follow-up. opencode's target directory is now a row in
+// internal/cli/roles_install.go's table (opencodeTarget, mirroring the same
+// three-level expansion its install script computes in shell), and
+// SyncRolesOnStartup regenerates it on every serve boot -- subject to the two
+// gates there, so a machine that never installed opencode still gets nothing.
+// This verb remains the install script's entry point and still takes an
+// explicit --out.
 func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 	usage := "usage: polyforge roles generate <pi|codex|opencode> --out <dir> [--preset=<name>]"
 	if len(args) < 1 || args[0] != "generate" {
@@ -1044,6 +1353,9 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 					"  A `harness = \"cc\"` candidate in %s IS honoured -- `polyforge serve` regenerates\n"+
 					"  the plugin's agents/step-<role>.md files from it at startup, and the new value\n"+
 					"  takes effect in your NEXT Claude Code session.\n"+
+					"  To apply it right now without waiting for that, run `polyforge roles install`\n"+
+					"  (or `/pf-update`) from inside a Claude Code session, where $CLAUDE_PLUGIN_ROOT\n"+
+					"  names the plugin to write into.\n"+
 					"  To change the committed team-wide defaults instead, edit\n"+
 					"  internal/roles/definitions/cc_aliases.yaml and run `go generate ./internal/roles/...`.\n",
 				harness, config.MachineConfigPath())
@@ -1089,6 +1401,14 @@ func RunRolesGenerate(mc *config.MachineConfig, args []string) {
 	_, _ = fmt.Fprintf(os.Stdout, "roles generate: wrote %s agent files to %s\n", harness, *outDir)
 }
 
+// ⚠️ SUPERSEDED BY internal/cli/roles_install.go's codexTarget, AND KEPT ONLY
+// BECAUSE DELETING IT WOULD HAVE COLLIDED WITH A WORK ITEM EDITING THIS FILE'S
+// TEST (aihub#682, holding internal/cli/roles_generate_test.go while aihub#683
+// was written). It has had no production caller since aihub#655 moved codex
+// generation to $CODEX_HOME, and the directory it names is one codex never scans,
+// so a reader looking for "where do codex's files go" must use codexTarget --
+// $CODEX_HOME, the location codex actually reads. Deleting this function and its
+// two tests is left as a follow-up.
 // DefaultCodexAgentsDir returns plugins/polyforge/.codex-plugin/agents,
 // resolved from the CURRENT WORKING DIRECTORY -- deliberately NOT from this
 // binary's own executable location (aihub#642 design decision #3 / C7): the

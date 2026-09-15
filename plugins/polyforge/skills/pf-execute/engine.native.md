@@ -22,7 +22,7 @@ Prior-step context = `pf_get_step` -> `completed_steps`; nothing writes a worktr
 # is the ONE place that decides it - never restate the predicate here.
 # Models live ONLY in the agent files (agents/*.md); this loop just maps role -> agent id.
 # HARNESS (aihub#670): the `Agent`/`subagent_type`/`polyforge:` spellings below are CLAUDE CODE's.
-# Off cc your row is in §0f: id `pf-<role>` (pi) / `step-<role>` (codex, opencode), call differs.
+# Off cc your row is in §0f: id `step-<role>` (pi, codex, opencode), call differs.
 ROLE_AGENT = {"executor": "polyforge:step-executor", "operator": "polyforge:step-operator",
     "explorer": "polyforge:step-explorer", "reviewer": "polyforge:step-reviewer",
     "designer": "polyforge:step-designer"}

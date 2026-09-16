@@ -90,3 +90,48 @@ because their scenario step graphs start with code-side steps, not a spec discus
 
 The `rhs=false` path emits no three-segment output, so this table does not apply to it.
 `fragments/post-claim-dispatch.md` (resident) is authoritative for that branch.
+
+### Claiming always walks the step graph - `rhs` decides who drives, not whether (aihub#685)
+
+A claim on any wi means walking its scenario step graph. `requires_human_session` (`rhs`)
+picks the driver, nothing else:
+
+- `rhs=false` - claim auto-dispatches `/pf-execute` (`fragments/post-claim-dispatch.md`,
+  resident - that fragment carries the short, actionable form of this whole rule; this
+  section is the full argument and the measured numbers behind it).
+- `rhs=true` - a human paces `/pf-execute` step by step, in this session. Same step graph,
+  same steps, same recorded `artifact_summary` per step - only who advances it differs.
+
+Every `wi_type` backed by a project scenario file has one to walk - the scenario repo ships
+17 step-graph files, even `deploy` (`check_status -> await_image -> deploy_prod`). The one
+exception is the built-in `default` fallback (`steps=[]`, used when nothing matches a
+scenario) - there is nothing to walk there, which is not the rule failing to apply, just
+having no graph to apply it to. Measured 2026-09-15 on the 25 most recently
+wrapped wi's: 16 walked the step graph (`wi_step_state.version` 6-18); the other 9
+(`version=0`) were, every one, dispatched with a hand-written path instead of an outcome -
+see the next section. Skipping the graph is not a smaller version of doing the work: it
+means no `spec`/`plan`, no mandatory clean-context reviewer, and no traceable
+`artifact_summary` per step. `aihub#673`'s `code_review` step returned a BLOCKER that exact
+way - a reviewer with no memory of writing the fix caught it where the author would not have.
+
+### Dispatching a wi is not claiming it - say WHAT you want, never HOW to get there
+
+The rule above binds the claimant. It has a mirror for whoever writes the prompt that hands
+a wi out, and that half had no home anywhere before this section: state the desired outcome
+and the acceptance criteria, and stop there. Do not write the execution path - not even a
+"helpful" sketch of one.
+
+Same dispatcher, same day, two phrasings, two different outcomes, measured:
+
+- *"Claim it, get it done, open a PR."* -> the receiver claims, then does what claiming a wi
+  means: `/pf-execute` runs the full step graph.
+- *"Implement per the design section, then `pf_commit`, push, open a PR."* -> the receiver
+  follows that literally. Zero step records. The instruction was not wrong, it was simply
+  more specific than "walk the graph" and a more specific instruction wins.
+
+The fix is not "remember to mention `/pf-execute`" - it is to never author a path in the
+first place. A dispatcher who only ever states outcome + acceptance criteria cannot produce
+this failure, because there is no path in the prompt to follow instead of the graph. This is
+also not conditional on the wi looking simple: see the paragraph above - no `wi_type` in this
+scenario repo lacks a graph, so there is no size or kind of change for which prescribing the
+path is the cheaper-but-still-correct option.

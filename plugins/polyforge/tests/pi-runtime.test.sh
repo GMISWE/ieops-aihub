@@ -1282,5 +1282,414 @@ else
   trap - EXIT
 fi
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "== the model-facing tool surface a GLM session sends is the advertised one (aihub#694) =="
+# aihub#694 was filed as "GLM 5.3 rejects the Pi polyforge MCP tool surface". Re-measured
+# with a capture server, the surface turned out to be ACCEPTED byte-for-byte: the full
+# 50-tool request (~140KB, 45 of them polyforge_pf_*), the bash,read-restricted request,
+# and even the cold-cache request that still carries the mcp proxy tool all replay to the
+# real sub2api-glm gateway with HTTP 200, and a live GLM 5.3 session completed a full
+# polyforge_pf_* tool-call round trip from a task worktree. The 400s that motivated the wi
+# were a TRANSIENT GATEWAY WINDOW, and the recorded evidence is decisive: in the same pi
+# session (2026-09-16T07:30, sessions/--root-code-aicoding-gmi-ws--) the IDENTICAL request
+# "你是谁" failed with the wi's exact 400 at 09:25:33 and SUCCEEDED at 09:25:53 and 09:26:38,
+# while the same error signature hit gpt-6-astra, gpt-5.6-sol and grok-4.6 through the same
+# gateway in the same hours, and aihub#694's own executor drew 503s from it minutes later.
+# The one DETERMINISTIC GLM 400 the sweep found is reasoning_effort:"off" (GLM 5.3 is
+# reasoning-only) — which pi never sends: with --thinking off pi OMITS the parameter
+# entirely (captured, and the live run against GLM answered), and every other level passes.
+#
+# So the configuration pi/mcp.json ships — directTools:true, disableProxyTool:true,
+# scriptMode:false — IS the minimal compatible surface: all 45 lifecycle tools, no proxy,
+# no script tool, and schemas containing no anyOf/oneOf/not/$ref/patternProperties and no
+# additionalProperties:true anywhere (the jsonb-object params stay open by OMITTING the
+# keyword, which is both semantically required — they accept arbitrary JSON objects — and
+# the only shape permissive and strict backends agree on). aihub#694 therefore changes
+# nothing in the template; what was missing is a gate holding that shape in place. This
+# section is that gate, in two halves:
+#
+#   serve-advertised arm (runs on CI, needs only go+python3): drive `polyforge serve`
+#       over stdio with a throwaway HOME and assert the advertised surface itself — count,
+#       naming, and strict-backend schema hygiene. serve boots with a DUMMY api key and an
+#       unreachable server URL (tool registration is static; the health check only warns —
+#       measured), so this arm needs no aihub, no credentials, no network.
+#
+#   pi-capture arms (opportunistic, like the MCP probe arms above: need pi, a real
+#       pi-mcp-adapter to symlink, node, and the built CLI — SKIP where absent): compose the
+#       ACTUAL request pi sends, by pointing a fake openai-completions provider at a local
+#       capture server, from two cwds — the project dir (main session) and a bare dir with
+#       no .mcp.json of its own (the spawned step-role child, aihub#689's case) — and assert
+#       the wire surface equals the advertised one, with neither bypass door visible.
+#       LLM-free like every probe in this suite: the "model" is a local node server that
+#       records the request and answers "OK", so no API key, no tokens, no network beyond
+#       loopback.
+#
+# The pi arms are not redundant with the "cwd-independent MCP config" section above: that
+# one pins "1 server enabled" — REGISTRATION — while this one pins the TOOLS the model is
+# actually offered. aihub#689's defect was a registration failure invisible to a tools-list
+# assertion, but the reverse gap is just as real: a config change that registers the server
+# yet drops, proxies or rewrites the direct tools would keep every line of that section
+# green.
+glm_sandbox="$(mktemp -d 2>/dev/null || true)"
+glm_node_pid=""
+if [ -z "$glm_sandbox" ] || [ ! -d "$glm_sandbox" ]; then
+  bad "GLM-compat surface: could not create a temp dir for the surface arms"
+else
+  trap 'rm -rf "$glm_sandbox"; if [ -n "$glm_node_pid" ]; then kill "$glm_node_pid" 2>/dev/null || true; fi; trap - EXIT' EXIT
+  mkdir -p "$glm_sandbox/home/.polyforge" "$glm_sandbox/proj" "$glm_sandbox/elsewhere"
+  # serve refuses to boot without an api key (measured: "API key not set", exit) — any
+  # value works for tool LISTING, which is static; the unreachable [server] url costs one
+  # WARNING on stderr and nothing else (measured). CI has no aihub and no credentials, so
+  # the dummy key is what makes this arm CI-runnable at all.
+  cat > "$glm_sandbox/home/.polyforge/config.toml" <<'TOML'
+machine_id = "pi-runtime-surface-arm"
+
+[auth]
+api_key = "dummy-key-listing-only"
+
+[server]
+url = "http://127.0.0.1:1"
+TOML
+
+  # --- serve-advertised arm: the surface itself. Needs the CLI this suite builds earlier
+  # and nothing else (no pi, no adapter, no node) — so this half runs on CI.
+  if [ -z "${polyforge_bin:-}" ] || [ ! -x "${polyforge_bin:-}" ]; then
+    skip "GLM-compat surface: no polyforge CLI built earlier in this suite — advertised surface not probed"
+  else
+    verdicts <<< "$(python3 - "$polyforge_bin" "$glm_sandbox" <<'PY'
+import json, os, subprocess, sys, time
+
+bin_path, sandbox = sys.argv[1], sys.argv[2]
+env = dict(os.environ)
+env["HOME"] = os.path.join(sandbox, "home")
+
+proc = subprocess.Popen([bin_path, "serve"], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+                        text=True, bufsize=1)
+
+def send(obj):
+    proc.stdin.write(json.dumps(obj) + "\n")
+    proc.stdin.flush()
+
+def fail(msg):
+    print("FAIL|GLM-compat surface: " + msg)
+
+try:
+    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                     "clientInfo": {"name": "pi-runtime-surface-arm", "version": "0"}}})
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    deadline = time.time() + 45
+    tools = None
+    while time.time() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("id") == 2 and "result" in obj:
+            tools = obj["result"].get("tools") or []
+            break
+    if tools is None:
+        fail("serve never answered tools/list over stdio — the advertised-surface arm "
+             "did not run, so nothing below is verified")
+        raise SystemExit
+
+    names = [t.get("name") or "" for t in tools]
+    advertised = {(t.get("name") or ""): (t.get("inputSchema") or {}) for t in tools}
+    json.dump({"names": names, "schemas": advertised},
+              open(os.path.join(sandbox, "advertised.json"), "w"))
+
+    if len(tools) >= 45:
+        print("PASS|GLM-compat surface: serve advertised %d pf_* tools (floor 45)" % len(tools))
+    else:
+        fail("serve advertised only %d tools (floor 45) — lifecycle tools went missing "
+             "before any adapter is involved" % len(tools))
+    bad_names = [n for n in names if not n.startswith("pf_")]
+    if bad_names:
+        fail("tools not named pf_*: %s — the pi config prefixes them with the server name, "
+             "so an unprefixed name here lands as an unprefixed pi tool" % ", ".join(bad_names[:5]))
+    else:
+        print("PASS|GLM-compat surface: every advertised tool name starts with pf_")
+
+    # Strict-backend schema hygiene, the aihub#694 acceptance surface. anyOf/oneOf/not and
+    # $ref/patternProperties are the constructs strict OpenAI-compatible tool-schema
+    # validators reject, and additionalProperties:true is the shape strict mode refuses on
+    # every object; the jsonb-object params must instead stay open by OMITTING the keyword
+    # (setting it false would reject the arbitrary objects they exist to carry, aihub#486).
+    FORBIDDEN = ("anyOf", "oneOf", "not", "$ref", "patternProperties")
+
+    def walk(o, hits):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in FORBIDDEN:
+                    hits.add(k)
+                if k == "additionalProperties" and v is True:
+                    hits.add("additionalProperties:true")
+                walk(v, hits)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, hits)
+
+    union_alias = set()
+    open_objects = set()
+    for n, sch in advertised.items():
+        hits = set()
+        walk(sch, hits)
+        for h in hits:
+            if h == "additionalProperties:true":
+                open_objects.add(n)
+            else:
+                union_alias.add("%s (%s)" % (n, h))
+    if union_alias:
+        fail("advertised schemas use union/aliasing keywords a strict OpenAI-compat tool "
+             "validator rejects: %s" % ", ".join(sorted(union_alias)[:5]))
+    else:
+        print("PASS|GLM-compat surface: every advertised tool schema avoids anyOf, oneOf, "
+              "not, ref and patternProperties")
+    if open_objects:
+        fail("advertised schemas set additionalProperties to true: %s" % ", ".join(sorted(open_objects)[:5]))
+    else:
+        print("PASS|GLM-compat surface: no advertised tool schema sets additionalProperties "
+              "to true (jsonb-object params stay open by omission)")
+finally:
+    try:
+        proc.kill()
+    except Exception:
+        pass
+PY
+)"
+  fi
+
+  # --- pi-capture arms: the wire surface a model backend actually receives. -------------
+  if [ -z "$pi_bin" ]; then
+    skip "GLM-compat surface: pi not installed here — wire surface not probed"
+  elif [ -z "${polyforge_bin:-}" ] || [ ! -x "${polyforge_bin:-}" ]; then
+    skip "GLM-compat surface: no polyforge CLI built earlier in this suite — wire surface not probed"
+  elif [ -z "$adapter_modules" ]; then
+    skip "GLM-compat surface: no real pi-mcp-adapter to symlink — wire surface not probed"
+  elif ! command -v node >/dev/null 2>&1; then
+    skip "GLM-compat surface: node unavailable — no capture server, wire surface not probed"
+  elif ! command -v timeout >/dev/null 2>&1; then
+    skip "GLM-compat surface: coreutils timeout unavailable — not running pi unbounded"
+  elif [ ! -f "$glm_sandbox/advertised.json" ]; then
+    skip "GLM-compat surface: the serve-advertised arm did not produce the advertised list — wire surface not probed"
+  else
+    mkdir -p "$glm_sandbox/agent/npm" "$glm_sandbox/bin"
+    ln -s "$adapter_modules" "$glm_sandbox/agent/npm/node_modules"
+    printf '{"packages":["npm:pi-mcp-adapter"]}\n' > "$glm_sandbox/agent/settings.json"
+    # The config's command is a bare "polyforge" (resolved from PATH), so put THIS
+    # checkout's build where the spawned serve will find it — the same discipline the
+    # agent-retire arm uses for the generator.
+    cp -p "$polyforge_bin" "$glm_sandbox/bin/polyforge"
+    if env PI_AGENT_DIR="$glm_sandbox/agent" PATH="$glm_sandbox/bin:$PATH" \
+         bash "$root/pi/install.sh" "$glm_sandbox/proj" \
+         > "$glm_sandbox/install.log" 2>&1; then
+      ok "GLM-compat surface: install.sh ran into a throwaway PI_AGENT_DIR"
+    else
+      bad "GLM-compat surface: install.sh failed in a throwaway dir:"
+      sed 's/^/      /' "$glm_sandbox/install.log" >&2
+    fi
+
+    # A local openai-completions "backend" that records every request body and answers OK.
+    # This is the whole trick that makes the wire surface assertable WITHOUT an API key or
+    # a real model: pi composes the exact request it would send (same provider api, same
+    # shaping) and hands it to something that simply writes it down. ONE SERVER PER ARM,
+    # not one for the section: the file name comes from the SERVER's CAP_NAME env, so a
+    # shared server would have all three arms write one counter-named file while the
+    # assertions read per-arm names — measured as exactly that false red on the first run
+    # of this section.
+    cat > "$glm_sandbox/capture.cjs" <<'CAP'
+"use strict";
+const http = require("node:http");
+const fs = require("node:fs");
+const srv = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    fs.writeFileSync(process.env.CAP_OUT + "/" + process.env.CAP_NAME + ".json", body);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "chatcmpl-surface-arm", object: "chat.completion", created: 0, model: "glm-5.3",
+      choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }));
+  });
+});
+srv.listen(0, "127.0.0.1", () => console.log("PORT " + srv.address().port));
+CAP
+    # The fake provider mirrors the real sub2api-glm entry (same api, same compat flag,
+    # same model shape) so pi composes the identical request it would send to GLM 5.3 —
+    # only the baseUrl differs, and it is rewritten per arm below. pi refuses to run a
+    # provider with no auth entry (measured), so a dummy key stands in; nothing local ever
+    # validates it.
+    cat > "$glm_sandbox/agent/models.json" <<'MODELS'
+{"providers":{"capglm":{"baseUrl":"http://127.0.0.1:0/v1","api":"openai-completions","compat":{"supportsFinishReason":false},"models":[{"id":"glm-5.3","name":"Glm 5.3","reasoning":true,"contextWindow":1000000,"input":["text"]}]}}}
+MODELS
+    printf '{"capglm":{"type":"api_key","key":"dummy"}}\n' > "$glm_sandbox/agent/auth.json"
+
+    # $1 cwd, $2 capture name. -nc/-na keep the arms clear of this machine's CLAUDE.md
+    # and trust state: the only variables left are the cwd and the configs.
+    glm_capture_run() {
+      local cwd="$1" capname="$2" port="" pid="" _
+      rm -f "$glm_sandbox/$capname.json"
+      CAP_OUT="$glm_sandbox" CAP_NAME="$capname" node "$glm_sandbox/capture.cjs" \
+        > "$glm_sandbox/$capname.port.out" 2>&1 &
+      pid=$!
+      glm_node_pid=$pid
+      for _ in $(seq 1 40); do
+        port="$(sed -n 's/^PORT //p' "$glm_sandbox/$capname.port.out" 2>/dev/null | head -1)"
+        [ -n "$port" ] && break
+        sleep 0.25
+      done
+      if [ -z "$port" ]; then
+        bad "GLM-compat surface: the capture server never reported a port ($capname)"
+        sed 's/^/      /' "$glm_sandbox/$capname.port.out" >&2
+        kill "$pid" 2>/dev/null || true
+        return
+      fi
+      sed -i.bak "s|http://127.0.0.1:[0-9]*/v1|http://127.0.0.1:$port/v1|" \
+        "$glm_sandbox/agent/models.json"
+      ( cd "$cwd" \
+          && HOME="$glm_sandbox/home" PI_CODING_AGENT_DIR="$glm_sandbox/agent" \
+             PATH="$glm_sandbox/bin:$PATH" \
+             timeout 180 "$pi_bin" -p --no-session --model capglm/glm-5.3 -nc -na \
+             "Reply with the single word OK" </dev/null ) \
+        > "$glm_sandbox/$capname.run.out" 2> "$glm_sandbox/$capname.run.err" || true
+      kill "$pid" 2>/dev/null || true
+      [ "$glm_node_pid" = "$pid" ] && glm_node_pid=""
+    }
+
+    glm_capture_run "$glm_sandbox/proj"      capA
+    glm_capture_run "$glm_sandbox/elsewhere" capB
+    # 🔴 NEGATIVE CONTROL: same sandbox, same probe, one variable — both config copies
+    # deleted. Without it, "the capture carries the pf tools" is satisfiable by tools
+    # arriving from any other source (a stale metadata cache, a global config outside the
+    # sandbox), and the positive arms prove nothing about what install.sh wrote.
+    rm -f "$glm_sandbox/agent/mcp.json" "$glm_sandbox/proj/.mcp.json"
+    glm_capture_run "$glm_sandbox/elsewhere" capN
+
+    verdicts <<< "$(python3 - "$glm_sandbox" <<'PY'
+import json, os, sys
+
+sandbox = sys.argv[1]
+adv = json.load(open(os.path.join(sandbox, "advertised.json")))
+adv_names = set(adv["names"] or [])
+wire_expected = {"polyforge_" + n for n in adv_names}
+
+def emit(v, msg):
+    print("%s|GLM-compat surface: %s" % (v, msg))
+
+def load_cap(name):
+    path = os.path.join(sandbox, name + ".json")
+    if not os.path.exists(path):
+        return None, ("no capture at %s — pi never reached the capture server; stderr is in "
+                      "%s.run.err" % (path, os.path.join(sandbox, name)))
+    try:
+        return json.load(open(path)), None
+    except Exception as e:
+        return None, "capture at %s is not JSON: %s" % (path, e)
+
+for cap, label in (("capA", "main-session capture"), ("capB", "child-cwd capture")):
+    d, err = load_cap(cap)
+    if d is None:
+        emit("FAIL", "%s: %s" % (label, err))
+        continue
+    if not isinstance(d.get("messages"), list) or not isinstance(d.get("tools"), list):
+        emit("FAIL", "%s: not a real request (messages/tools absent) — the arm was vacuous" % label)
+        continue
+    wire_pf = {t["function"]["name"] for t in d["tools"]
+               if (t.get("function") or {}).get("name", "").startswith("polyforge_pf_")}
+    missing = wire_expected - wire_pf
+    extra = wire_pf - wire_expected
+    if missing:
+        emit("FAIL", "%s: carries %d/%d polyforge_pf_* tools — the adapter or config "
+             "dropped: %s" % (label, len(wire_pf), len(wire_expected),
+                              ", ".join(sorted(missing)[:5])))
+    elif label == "main-session capture":
+        emit("PASS", "%s: carries all %d polyforge_pf_* tools the server advertises"
+             % (label, len(wire_pf)))
+    else:
+        emit("PASS", "%s: carries all %d polyforge_pf_* tools from the global config alone"
+             % (label, len(wire_pf)))
+
+# Neither bypass door may be VISIBLE to the model, in either capture — the bridge denies
+# calling them (IR1), but the request surface is what a strict backend sees first.
+door_hits = []
+for cap in ("capA", "capB"):
+    d, err = load_cap(cap)
+    if d is None:
+        # A missing capture must FAIL this check too, not fall through to a green line:
+        # the first run of this section shipped exactly that false green.
+        door_hits.append("%s has no capture (%s)" % (cap, err))
+        continue
+    names = {(t.get("function") or {}).get("name") for t in d.get("tools", [])}
+    for door in ("mcp", "mcpScript"):
+        if door in names:
+            door_hits.append("%s lists %s" % (cap, door))
+if door_hits:
+    emit("FAIL", "neither capture lists mcp or mcpScript — violated: " + ", ".join(door_hits))
+else:
+    emit("PASS", "neither capture lists mcp or mcpScript")
+
+# The schemas pi sends must be the advertised ones, unmodified — a rewrites-them mutant
+# (an adapter "normalization" that, say, union-ifies a param) would keep every presence
+# check above green while quietly reintroducing the constructs the hygiene arm pins out.
+schema_drift = []
+for cap in ("capA", "capB"):
+    d, err = load_cap(cap)
+    if d is None:
+        schema_drift.append("%s has no capture (%s)" % (cap, err))
+        continue
+    for t in d.get("tools", []):
+        fn = t.get("function") or {}
+        n = fn.get("name", "")
+        if not n.startswith("polyforge_pf_"):
+            continue
+        want = adv["schemas"].get(n[len("polyforge_"):])
+        if json.dumps(fn.get("parameters"), sort_keys=True) != json.dumps(want, sort_keys=True):
+            schema_drift.append("%s:%s" % (cap, n))
+if schema_drift:
+    emit("FAIL", "pi sends the advertised schemas unmodified — drifted: %s"
+         % ", ".join(schema_drift[:5]))
+else:
+    emit("PASS", "pi sends the advertised schemas unmodified")
+
+# The negative control: with BOTH config copies deleted the same probe must come back with
+# ZERO pf tools — otherwise the positive arms were being fed from somewhere else.
+d, err = load_cap("capN")
+if d is None:
+    emit("FAIL", "negative control: %s" % err)
+else:
+    wire_pf = [t for t in d.get("tools", [])
+               if (t.get("function") or {}).get("name", "").startswith("polyforge_pf_")]
+    if wire_pf:
+        emit("FAIL", "negative control — both config copies deleted yet the capture still "
+             "carries %d polyforge_pf_* tool(s), so the positive arms were not fed by the "
+             "configs this section installs" % len(wire_pf))
+    elif not isinstance(d.get("messages"), list):
+        emit("FAIL", "negative control — the run produced no real request, so its silence "
+             "about pf tools is not evidence")
+    else:
+        emit("PASS", "negative control — both config copies deleted leaves the capture "
+             "with zero polyforge_pf_* tools")
+PY
+)"
+    if [ -n "$glm_node_pid" ]; then
+      kill "$glm_node_pid" 2>/dev/null || true
+      glm_node_pid=""
+    fi
+  fi
+  rm -rf "$glm_sandbox"
+  trap - EXIT
+fi
+
 echo ""
 [ "$fails" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED" >&2; exit 1; }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -138,7 +139,7 @@ func parseDoctorArgs(args []string) (doctorOpts, error) {
 	return opts, nil
 }
 
-// RunDoctor runs 8 diagnostic checks and reports their status.
+// RunDoctor runs 9 diagnostic checks and reports their status.
 // With --fix: attempts to auto-repair fixable issues.
 //
 // Checks (§12.1):
@@ -150,6 +151,7 @@ func parseDoctorArgs(args []string) (doctorOpts, error) {
 //  6. version         – GET /v1/version; compare min_client_version vs local binary
 //  7. claude_md       – CLAUDE.md managed block format + .polyforge/repo-map/ presence
 //  8. usage_md        – .polyforge/usage.md still carrying rules using-polyforge owns
+//  9. pi_integration  – direct Git bootstrap + copied bridge root agree with current install
 //
 // ⚠️ --fix does NOT act on check 5. Its FixCmd is a command for a human to run
 // per worktree; see checkBranchUpstreams for why a sweep is the wrong shape.
@@ -190,6 +192,13 @@ func RunDoctor(ctx context.Context, c *client.Client, cfg *config.Config, wsRoot
 		func() checkResult { return checkVersion(ctx, c) },
 		func() checkResult { return checkClaudeMd(wsRoot) },
 		func() checkResult { return checkUsageMd(wsRoot) },
+		func() checkResult {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return checkResult{Name: "pi_integration", Status: "warning", Message: "cannot locate the home directory: " + err.Error()}
+			}
+			return checkPiIntegration(home, wsRoot)
+		},
 	}
 
 	allOk := true
@@ -228,6 +237,148 @@ func checkWorkspace(wsRoot string, cfg *config.Config) checkResult {
 		Status:  "ok",
 		Message: ".polyforge.yaml found",
 	}
+}
+
+// piGitBootstrap finds the installer in a Git package configured in either Pi scope.
+// Pi clones under the directory holding settings.json; a project-local install
+// does not share ~/.pi/agent/git with a global install. Only offer a command
+// when the checkout and installer actually exist.
+func piGitBootstrap(home, wsRoot string) (configured bool, installerPath string) {
+	for _, dir := range []string{filepath.Join(wsRoot, ".pi"), filepath.Join(home, ".pi", "agent")} {
+		data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Packages []any `json:"packages"`
+		}
+		if json.Unmarshal(data, &doc) != nil {
+			continue
+		}
+		for _, item := range doc.Packages {
+			var source string
+			switch v := item.(type) {
+			case string:
+				source = v
+			case map[string]any:
+				source, _ = v["source"].(string)
+			}
+			// Pi accepts git: shorthand, SSH and HTTPS URLs. Normalize the SSH
+			// colon before matching the exact repository (not an arbitrary path
+			// containing its name), then use the scope's actual Git clone.
+			source = strings.TrimPrefix(source, "git:")
+			source = strings.Replace(source, "git@github.com:", "github.com/", 1)
+			source = strings.TrimPrefix(source, "https://")
+			source = strings.TrimPrefix(source, "ssh://git@")
+			source = strings.TrimSuffix(strings.Split(source, "@")[0], ".git")
+			if !strings.EqualFold(source, "github.com/GMISWE/ieops-aihub") {
+				continue
+			}
+			configured = true
+			installer := filepath.Join(dir, "git", "github.com", "GMISWE", "ieops-aihub", "plugins", "polyforge", "pi", "install.sh")
+			if info, err := os.Stat(installer); err == nil && info.Mode().IsRegular() {
+				return true, installer
+			}
+		}
+	}
+	return configured, ""
+}
+
+func currentClaudePolyforgeRoot(home, configuredRoot string) string {
+	cacheRoot := filepath.Join(home, ".claude", "plugins", "cache")
+	rel, err := filepath.Rel(cacheRoot, configuredRoot)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	expectedKey := parts[1] + "@" + parts[0]
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+			InstalledAt string `json:"installedAt"`
+			LastUpdated string `json:"lastUpdated"`
+		} `json:"plugins"`
+	}
+	if json.Unmarshal(data, &doc) != nil {
+		return ""
+	}
+	type candidate struct{ path, updated string }
+	var candidates []candidate
+	for key, entries := range doc.Plugins {
+		if key != expectedKey {
+			continue
+		}
+		for _, entry := range entries {
+			if _, err := os.Stat(filepath.Join(entry.InstallPath, "pi-hooks.json")); err == nil {
+				updated := entry.LastUpdated
+				if updated == "" {
+					updated = entry.InstalledAt
+				}
+				candidates = append(candidates, candidate{entry.InstallPath, updated})
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].updated > candidates[j].updated })
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0].path
+}
+
+// checkPiIntegration diagnoses the split that Pi itself cannot reconcile: `pi install`
+// discovers package resources, but deliberately does not execute Polyforge's shell installer.
+// The installer merges MCP config and copies the bridge; this check makes an omitted bootstrap
+// or a versioned Claude-cache pointer that fell behind visible instead of silently losing IR1.
+func checkPiIntegration(home, wsRoot string) checkResult {
+	const name = "pi_integration"
+	agentDir := filepath.Join(home, ".pi", "agent")
+	configPath := filepath.Join(agentDir, "extensions", "polyforge", "polyforge-pi.json")
+	configured, bootstrap := piGitBootstrap(home, wsRoot)
+	fix := ""
+	if bootstrap != "" {
+		fix = fmt.Sprintf("bash %q %q", bootstrap, wsRoot)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		if configured {
+			message := "Pi has the ieops-aihub Git package, but Polyforge bootstrap has not installed its bridge/MCP integration; Pi intentionally does not run package shell scripts"
+			if bootstrap == "" {
+				message += "; Git checkout installer is unavailable in the configured scope; restore the Pi package before bootstrapping"
+			}
+			return checkResult{Name: name, Status: "warning", Message: message, FixCmd: fix}
+		}
+		return checkResult{Name: name, Status: "ok", Message: "Pi Polyforge integration not configured"}
+	}
+	if err != nil {
+		return checkResult{Name: name, Status: "warning", Message: "cannot read " + configPath + ": " + err.Error(), FixCmd: fix}
+	}
+	var cfg struct {
+		PluginRoot string `json:"pluginRoot"`
+	}
+	if json.Unmarshal(data, &cfg) != nil || cfg.PluginRoot == "" {
+		return checkResult{Name: name, Status: "warning", Message: configPath + " is not a valid bridge root record", FixCmd: fix}
+	}
+	if _, err := os.Stat(filepath.Join(cfg.PluginRoot, "pi-hooks.json")); err != nil {
+		return checkResult{Name: name, Status: "warning", Message: "Pi bridge points at an unavailable Polyforge root: " + cfg.PluginRoot, FixCmd: fix}
+	}
+
+	cacheMarker := filepath.Join(".claude", "plugins", "cache") + string(filepath.Separator)
+	if strings.Contains(cfg.PluginRoot, cacheMarker) {
+		if current := currentClaudePolyforgeRoot(home, cfg.PluginRoot); current != "" && filepath.Clean(current) != filepath.Clean(cfg.PluginRoot) {
+			return checkResult{Name: name, Status: "warning",
+				Message: fmt.Sprintf("Pi bridge root is stale: recorded %s, current Claude plugin is %s", cfg.PluginRoot, current),
+				FixCmd:  fmt.Sprintf("bash %q %q", filepath.Join(current, "pi", "install.sh"), wsRoot)}
+		}
+	}
+	return checkResult{Name: name, Status: "ok", Message: "Pi bridge root is available: " + cfg.PluginRoot}
 }
 
 // checkConfig verifies aihub reachability via GET /v1/health — and, since

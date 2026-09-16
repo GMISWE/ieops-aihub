@@ -44,6 +44,55 @@ const CONFIG_BASENAME = "polyforge-pi.json";
 const HOOKS_BASENAME = "pi-hooks.json";
 const STATUS_KEY = "polyforge";
 
+function validPluginRoot(root) {
+	return typeof root === "string" && fs.existsSync(path.join(root, HOOKS_BASENAME));
+}
+
+function readPluginRoot(configPath) {
+	try {
+		const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+		return cfg && typeof cfg.pluginRoot === "string" ? cfg.pluginRoot : null;
+	} catch {
+		return null;
+	}
+}
+
+function findInPlacePluginRoot(start) {
+	let cur = start;
+	for (let i = 0; i < 8; i++) {
+		if (fs.existsSync(path.join(cur, HOOKS_BASENAME)) && fs.existsSync(path.join(cur, "plugin.json"))) return cur;
+		const parent = path.dirname(cur);
+		if (parent === cur) break;
+		cur = parent;
+	}
+	return null;
+}
+
+/**
+ * A bridge installed from Claude's versioned cache must follow that cache's authoritative
+ * installed_plugins.json record. The adjacent config is intentionally retained as a
+ * fallback (and for non-Claude checkouts), but it must not pin Pi to an old sibling forever.
+ */
+function currentClaudePluginRoot(configuredRoot) {
+	const cacheMarker = `${path.sep}.claude${path.sep}plugins${path.sep}cache${path.sep}`;
+	if (!configuredRoot || !configuredRoot.includes(cacheMarker)) return null;
+	const tail = configuredRoot.slice(configuredRoot.indexOf(cacheMarker) + cacheMarker.length).split(path.sep);
+	if (tail.length < 3 || !tail[0] || !tail[1]) return null;
+	const expectedKey = `${tail[1]}@${tail[0]}`;
+	const home = process.env.HOME || require("node:os").homedir();
+	try {
+		const doc = JSON.parse(fs.readFileSync(path.join(home, ".claude/plugins/installed_plugins.json"), "utf-8"));
+		const entries = Object.entries((doc && doc.plugins) || {})
+			.filter(([key]) => key === expectedKey)
+			.flatMap(([, value]) => (Array.isArray(value) ? value : []))
+			.filter((entry) => entry && validPluginRoot(entry.installPath))
+			.sort((a, b) => String(b.lastUpdated || b.installedAt || "").localeCompare(String(a.lastUpdated || a.installedAt || "")));
+		return entries.length ? entries[0].installPath : null;
+	} catch {
+		return null;
+	}
+}
+
 // ─────────────────────────── discovery ───────────────────────────
 
 /**
@@ -56,27 +105,16 @@ const STATUS_KEY = "polyforge";
  */
 function resolvePluginRoot() {
 	const fromEnv = process.env.POLYFORGE_PLUGIN_ROOT;
-	if (fromEnv && fs.existsSync(path.join(fromEnv, HOOKS_BASENAME))) return fromEnv;
+	if (validPluginRoot(fromEnv)) return fromEnv;
 
 	// install.sh writes this next to the copied extension, recording where it came from.
-	try {
-		const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, CONFIG_BASENAME), "utf-8"));
-		if (cfg && typeof cfg.pluginRoot === "string" && fs.existsSync(path.join(cfg.pluginRoot, HOOKS_BASENAME))) {
-			return cfg.pluginRoot;
-		}
-	} catch {
-		/* absent or unreadable -> fall through */
-	}
+	const configured = readPluginRoot(path.join(__dirname, CONFIG_BASENAME));
+	const currentClaude = currentClaudePluginRoot(configured);
+	if (currentClaude) return currentClaude;
+	if (validPluginRoot(configured)) return configured;
 
 	// Running in place from the checkout (pi -e plugins/polyforge/pi/extensions/polyforge).
-	let cur = __dirname;
-	for (let i = 0; i < 8; i++) {
-		if (fs.existsSync(path.join(cur, HOOKS_BASENAME)) && fs.existsSync(path.join(cur, "plugin.json"))) return cur;
-		const parent = path.dirname(cur);
-		if (parent === cur) break;
-		cur = parent;
-	}
-	return null;
+	return findInPlacePluginRoot(__dirname);
 }
 
 /** Nearest ancestor of `start` holding .polyforge.yaml. */
@@ -388,6 +426,34 @@ function createBridge(pi, opts) {
 // ─────────────────────────── entry point ───────────────────────────
 
 function extension(pi) {
+	// package.json deliberately exposes this file as the ONE resource a direct Pi Git
+	// install can load. Pi packages have no reviewed mechanism for running install.sh, and
+	// silently doing that from npm lifecycle hooks would violate Pi's trust boundary. When
+	// loaded in place, therefore, this instance is a bootstrap sentinel only. A completed
+	// install has a separate copied bridge + config; an incomplete one fails loudly with the
+	// exact explicit command. Returning also prevents duplicate handlers after bootstrap.
+	const inPlaceRoot = findInPlacePluginRoot(__dirname);
+	if (inPlaceRoot && !fs.existsSync(path.join(__dirname, CONFIG_BASENAME))) {
+		const agentDir = process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR ||
+			path.join(process.env.HOME || require("node:os").homedir(), ".pi/agent");
+		const installedRoot = readPluginRoot(path.join(agentDir, "extensions/polyforge", CONFIG_BASENAME));
+		if (!validPluginRoot(installedRoot)) {
+			console.error(
+				"[polyforge] Pi Git package needs explicit bootstrap; no scripts were run automatically. " +
+				`Review and run: bash ${path.join(inPlaceRoot, "pi/install.sh")} \"$PWD\"`,
+			);
+			return;
+		}
+		const currentClaude = currentClaudePluginRoot(installedRoot);
+		if (currentClaude && path.resolve(currentClaude) !== path.resolve(installedRoot)) {
+			console.error(
+				`[polyforge] Pi bridge root is stale (${installedRoot}); current plugin is ${currentClaude}. ` +
+				`Review and run: bash ${path.join(currentClaude, "pi/install.sh")} \"$PWD\"`,
+			);
+		}
+		return;
+	}
+
 	// Going inert is the right answer for a convenience hook and the WORST one for a write
 	// gate: everything looks normal and IR1 is simply gone. So the two ways that happens are
 	// announced rather than swallowed. Reachable in practice — the extension is a COPY in
@@ -423,6 +489,8 @@ module.exports.createBridge = createBridge;
 module.exports.loadHookConfig = loadHookConfig;
 module.exports.findWorkspaceRoot = findWorkspaceRoot;
 module.exports.resolvePluginRoot = resolvePluginRoot;
+module.exports.currentClaudePluginRoot = currentClaudePluginRoot;
+module.exports.findInPlacePluginRoot = findInPlacePluginRoot;
 module.exports.extractContext = extractContext;
 module.exports.extractDeny = extractDeny;
 module.exports.parseJSON = parseJSON;

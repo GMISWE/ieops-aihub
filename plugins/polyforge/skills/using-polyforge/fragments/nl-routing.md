@@ -1,10 +1,10 @@
 ## NL Routing
 
-This table **indexes** non-obvious intent -> operation mappings; it is **not** an exhaustive
-keyword classifier. Infer the user's intent and route to the nearest match - if nothing fits
-or intent is ambiguous, **ask rather than guess**. Each `/pf-*` skill's own `NL Triggers`
-section is authoritative for its triggers (this index may lag). NL Routing decides *what
-operation*; **Repo Routing** (below) decides *which repo*.
+This table **indexes** non-obvious intent -> operation mappings, not an exhaustive keyword
+classifier. Infer intent and route to the nearest match; if nothing fits or it's ambiguous,
+**ask rather than guess**. Each `/pf-*` skill's own `NL Triggers` section is authoritative
+(this index may lag). NL Routing decides *what operation*; **Repo Routing** (below) decides
+*which repo*.
 
 | intent | operation |
 |---|---|
@@ -26,14 +26,14 @@ operation*; **Repo Routing** (below) decides *which repo*.
 
 ### Disambiguation (context-dependent intents)
 
-Some words route differently by context - check **(a)** is there a slug? **(b)** is there a
-running/claimed wi this session? **(c)** are we mid-step inside a skill flow?
+Some words route by context - is there **(a)** a slug, **(b)** a running/claimed wi this
+session, **(c)** a skill flow mid-step?
 
-- **continue / go on / next** - if a skill flow or step is in progress -> *proceed within
-  it* (advance to the next step), **not** resume. Only "resume `<slug>`" for a
-  **paused** wi routes to `/pf-work <slug> --resume`.
-- **done / finished** - mid-step ("this step is done") -> continue the flow; whole-wi
-  ("wrap up / this wi is finished / wrap") -> `/pf-stop --wrap`.
+- **continue / go on / next** - mid-flow or mid-step -> proceed to the next step,
+  **not** resume. Only "resume `<slug>`" on a **paused** wi routes to
+  `/pf-work <slug> --resume`.
+- **done / finished** - mid-step -> continue the flow; whole-wi ("wrap up" / "finished" /
+  "wrap") -> `/pf-stop --wrap`.
 - **begin / start** - with a slug -> claim it (Mode B); without -> new wi (Mode A).
 - **status** - inside a claimed wi -> that wi's detail; otherwise -> project ready queue.
 

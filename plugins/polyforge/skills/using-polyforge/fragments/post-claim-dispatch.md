@@ -1,9 +1,13 @@
-## Post-claim Dispatch (`requires_human_session=false`)
+## Post-claim Dispatch
 
-On a successful claim with `requires_human_session=false`: do **not** emit three-segment
-output - dispatch `/pf-execute` as a write-capable general-purpose subagent (cc
-`Agent`, pi `subagent`, opencode `task`); it reports its own progress. Claiming and
-then stopping to report is the failure here, not the safe default.
+Claim with `requires_human_session=false`: do **not** emit three-segment output -
+dispatch `/pf-execute` as a write-capable subagent (cc `Agent`, pi `subagent`, opencode
+`task`); it reports its own progress. **This skill is asking**, satisfying the harness
+precondition for dispatching a subagent.
 
-**This skill is asking**, which is what the harness rule "do not dispatch a subagent
-unless the user, a CLAUDE.md file, or a skill asks for it" requires before dispatching.
+**A claim always walks the step graph** - `rhs` only picks the driver (`false` dispatches
+as above; `true` paces it in-session, step by step) - never whether the graph runs.
+
+**Dispatching a wi is not claiming it: say only the outcome and acceptance criteria,
+never the execution path.** `claim -> pf_commit -> push -> PR` in a prompt gets followed
+literally and skips the graph - see `fragments/post-claim-routing.md`.

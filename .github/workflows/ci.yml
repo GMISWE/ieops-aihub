@@ -4978,6 +4978,10 @@ jobs:
                       "PASS: degraded global write: negative control — the same install with nothing sabotaged exits 0" \
                       "PASS: degraded global write: negative control — the unsabotaged install prints no such banner" \
                       "PASS: degraded global write: negative control — and it DID write the global mcp.json, so the sabotage is what suppressed it" \
+                      "PASS: GLM-compat surface: serve advertised " \
+                      "PASS: GLM-compat surface: every advertised tool name starts with pf_" \
+                      "PASS: GLM-compat surface: every advertised tool schema avoids anyOf, oneOf, not, ref and patternProperties" \
+                      "PASS: GLM-compat surface: no advertised tool schema sets additionalProperties to true (jsonb-object params stay open by omission)" \
                       "ALL PASS"; do
             grep -qF -- "$want" pi_runtime.log \
               || { echo "::error::pi-runtime.test.sh did not report '$want' — the pi IR1 configuration is not actually gated"; exit 1; }
@@ -5046,9 +5050,29 @@ jobs:
           # installer that fails unconditionally.
           # 67 = 56 + 11, one line of slack below the twelve added, same as every previous
           # raise. Measured with pi forced absent: 85 PASS before, 97 after, 3 SKIP -> 3.
+          #
+          # Floor raised 67 -> 70 by aihub#694, which added the GLM-compat surface section:
+          # FOUR PASS lines that need neither pi nor the adapter — the serve-advertised arm
+          # drives `polyforge serve` (the binary this suite builds earlier, so it still
+          # needs go, which this runner has) over stdio and asserts the surface a model
+          # backend receives: the count (floor 45), the pf_* naming, strict-backend schema
+          # hygiene (no anyOf/oneOf/not/ref/patternProperties, no additionalProperties:true).
+          # The pi-capture arms (main session + child cwd + negative control, six more PASS
+          # lines) need pi AND a real adapter AND node, so they SKIP on this runner and are
+          # excluded from the floor and the named checks — on a dev box with pi installed
+          # they are the half that pins the WIRE surface (all 45 polyforge_pf_* tools present
+          # in both cwds, neither mcp nor mcpScript visible, schemas byte-identical to what
+          # serve advertises). Mutant-measured before shipping: directTools:false reddens
+          # both carry checks (0/45 tools) plus the door check; disableProxyTool:false
+          # reddens the door check alone; the hygiene walker was shown red on synthetic
+          # anyOf/oneOf/not/$ref/patternProperties/additionalProperties:true schemas and
+          # green on the three false-positive shapes ("not" inside a description,
+          # additionalProperties:false, keyword omitted).
+          # 70 = 67 + 3, one line of slack below the four added, same as every previous
+          # raise.
           n=$(grep -c '^  PASS: ' pi_runtime.log || true)
-          [ "${n:-0}" -ge 67 ] \
-            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 67 — checks have gone missing"; exit 1; }
+          [ "${n:-0}" -ge 70 ] \
+            || { echo "::error::only $n PASS lines from pi-runtime.test.sh, floor is 70 — checks have gone missing"; exit 1; }
           echo "pi runtime gate: $n checks passed"
 
       # aihub#421 (layer 3 of the MCP stability programme): the top abnormal

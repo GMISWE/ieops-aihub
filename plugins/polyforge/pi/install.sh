@@ -472,6 +472,19 @@ step "MCP config -> $PROJECT_DIR/.mcp.json"
 # NOT sufficient — on a cold metadata cache the adapter registers the proxy tool anyway,
 # which is why the bridge extension also denies `mcp`/`mcpScript` outright.
 #
+# aihub#694 measured (2026-09-16) that the surface this template produces is the MINIMAL
+# GLM-compatible one, and pinned it: all 45 polyforge_pf_* direct tools (~60KB of schemas)
+# with neither bypass door visible replay to the real sub2api-glm/glm-5.3 gateway
+# byte-for-byte with HTTP 200 — the 400s that motivated the wi were a transient gateway
+# window (the identical request failed at 09:25:33 and succeeded at 09:25:53 in the same
+# session, and the same signature hit gpt-6-astra/gpt-5.6-sol/grok-4.6 in the same hours).
+# The one deterministic GLM 400 found, reasoning_effort:"off" (GLM 5.3 is reasoning-only),
+# is unreachable from pi: with --thinking off pi OMITS the parameter. directTools:true is
+# therefore NOT a tuning knob to revisit for any one backend — dropping it removes the
+# lifecycle tools entirely (0/45, mutant-measured), and tests/pi-runtime.test.sh's
+# "model-facing tool surface" section reddens on exactly that and on every strict-backend
+# schema construct (anyOf/oneOf/not/$ref/patternProperties, additionalProperties:true).
+#
 # MERGED, not replaced — see merge_mcp() for why, and note it applies to the global copy
 # above just as much as to this one.
 #
@@ -621,6 +634,19 @@ verify
   NOTE the \`sleep 5\`, and do not drop it: the MCP status line arrives ASYNCHRONOUSLY, after
   the request has been answered, so a probe that closes stdin immediately exits BEFORE it and
   prints nothing on a perfectly good install. Measured 1 marker in 6 runs without it.
+
+  The exact request surface a model backend receives, with NO API key and NO tokens - the
+  aihub#694 check, and the thing to run FIRST when a backend answers 400:
+  bash $PLUGIN_ROOT/tests/pi-runtime.test.sh
+  Its "model-facing tool surface" section drives pi against a local capture server and
+  asserts what GLM 5.3 (and any strict OpenAI-compat backend) must accept: all 45
+  polyforge_pf_* tools in BOTH the main session and a cwd with no .mcp.json of its own,
+  NEITHER mcp NOR mcpScript visible, and schemas byte-identical to what polyforge serve
+  advertises. Measured 2026-09-16: that surface is accepted by glm-5.3 verbatim (HTTP 200
+  on replay). A 400 "Backend request failed" from the sub2api gateway has repeatedly been
+  a TRANSIENT upstream window - the same request failed and succeeded 20 seconds apart in
+  one recorded session, and the same signature hit other models in the same hours - so
+  re-run before changing this configuration.
 
   The skills, without needing an API key — this counts what pi LOADED, not what was copied:
   cd "$PROJECT_DIR" && printf '{"id":1,"type":"get_commands"}' \\

@@ -257,15 +257,21 @@ rm -f "$PI_DIR/extensions/polyforge/index.ts"
 # Written with a real JSON encoder, not printf: a checkout path containing a quote or a
 # backslash would produce invalid JSON, and the extension swallows the parse error and goes
 # INERT — i.e. pi would run with no IR1 gate and no message saying so.
+BRIDGE_CONFIG_TMP="$PI_DIR/extensions/polyforge/polyforge-pi.json.tmp-$STAMP"
 if command -v python3 >/dev/null 2>&1; then
   python3 -c 'import json,sys; print(json.dumps({"pluginRoot": sys.argv[1]}, indent=2))' \
-    "$PLUGIN_ROOT" > "$PI_DIR/extensions/polyforge/polyforge-pi.json"
+    "$PLUGIN_ROOT" > "$BRIDGE_CONFIG_TMP"
 else
   case "$PLUGIN_ROOT" in
     *'"'*|*'\'*) die "checkout path contains a quote or backslash and python3 is unavailable to encode it safely: $PLUGIN_ROOT" ;;
   esac
-  printf '{\n  "pluginRoot": "%s"\n}\n' "$PLUGIN_ROOT" > "$PI_DIR/extensions/polyforge/polyforge-pi.json"
+  printf '{\n  "pluginRoot": "%s"\n}\n' "$PLUGIN_ROOT" > "$BRIDGE_CONFIG_TMP"
 fi
+# The root pointer is the one file whose stale value caused aihub#692. Preserve the old
+# pointer just like the bridge itself, then replace it only after a complete JSON document
+# has been written beside it.
+place "$BRIDGE_CONFIG_TMP" "$PI_DIR/extensions/polyforge/polyforge-pi.json"
+rm -f "$BRIDGE_CONFIG_TMP"
 say "recorded pluginRoot=$PLUGIN_ROOT"
 
 step "agent definitions -> $PI_DIR/agents/"

@@ -269,6 +269,87 @@ test('the nested hookSpecificOutput shape is accepted as well as the flat one', 
   assert.strictEqual((await handlers.before_agent_start({}, { cwd: ROOT })).message.content, 'nested-only');
 });
 
+// ── pure helpers and direct-package bootstrap ─────────────────────────────────
+
+test('direct Pi Git package fails loud with an explicit, non-automatic bootstrap', () => {
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pf-pi-package-'));
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  const messages = [];
+  const oldError = console.error;
+  process.env.PI_CODING_AGENT_DIR = tmp;
+  console.error = (message) => messages.push(String(message));
+  try {
+    const handlers = {};
+    bridge({ on: (name, fn) => { handlers[name] = fn; } });
+    assert.deepStrictEqual(handlers, {}, 'package sentinel must not partially register hooks before bootstrap');
+    assert.strictEqual(messages.length, 1);
+    assert.match(messages[0], /needs explicit bootstrap/);
+    assert.match(messages[0], /plugins[/\\]polyforge[/\\]pi[/\\]install\.sh/);
+  } finally {
+    console.error = oldError;
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('direct Pi Git package stays inert after bootstrap so copied bridge is not duplicated', () => {
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pf-pi-installed-'));
+  const cfgDir = path.join(tmp, 'extensions/polyforge');
+  fs.mkdirSync(cfgDir, { recursive: true });
+  fs.writeFileSync(path.join(cfgDir, 'polyforge-pi.json'), JSON.stringify({ pluginRoot: ROOT }));
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  const messages = [];
+  const oldError = console.error;
+  process.env.PI_CODING_AGENT_DIR = tmp;
+  console.error = (message) => messages.push(String(message));
+  try {
+    const handlers = {};
+    bridge({ on: (name, fn) => { handlers[name] = fn; } });
+    assert.deepStrictEqual(handlers, {});
+    assert.deepStrictEqual(messages, []);
+  } finally {
+    console.error = oldError;
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('currentClaudePluginRoot follows installed_plugins.json past a stale cache sibling', () => {
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pf-pi-root-'));
+  const oldRoot = path.join(tmp, '.claude/plugins/cache/ieops-aihub/polyforge/1.1.53');
+  const newRoot = path.join(tmp, '.claude/plugins/cache/ieops-aihub/polyforge/1.1.59');
+  for (const root of [oldRoot, newRoot]) {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'pi-hooks.json'), '{}\n');
+  }
+  const registry = path.join(tmp, '.claude/plugins/installed_plugins.json');
+  fs.mkdirSync(path.dirname(registry), { recursive: true });
+  fs.writeFileSync(registry, JSON.stringify({ plugins: {
+    'polyforge@ieops-aihub': [{ installPath: newRoot, lastUpdated: '2026-09-16T02:00:00Z' }],
+  }}));
+  const prev = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+  process.env.HOME = tmp;
+  process.env.PI_CODING_AGENT_DIR = path.join(tmp, 'agent');
+  fs.mkdirSync(path.join(tmp, 'agent/extensions/polyforge'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'agent/extensions/polyforge/polyforge-pi.json'), JSON.stringify({ pluginRoot: oldRoot }));
+  const messages = [];
+  const oldError = console.error;
+  console.error = (message) => messages.push(String(message));
+  try {
+    assert.strictEqual(bridge.currentClaudePluginRoot(oldRoot), newRoot);
+    bridge({ on: () => assert.fail('stale package sentinel must not register partial hooks') });
+    assert.strictEqual(messages.length, 1);
+    assert.match(messages[0], /bridge root is stale/);
+    assert.match(messages[0], /1\.1\.59[/\\]pi[/\\]install\.sh/);
+  } finally {
+    console.error = oldError;
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
 test('extractDeny reads both shapes the guard emits, and nothing else', () => {

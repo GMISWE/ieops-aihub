@@ -321,6 +321,25 @@ fi
 
 [ -x "$root/pi/install.sh" ] && ok "pi/install.sh is executable" || bad "pi/install.sh is not executable"
 
+repo_root="$(cd "$root/../.." && pwd)"
+package_out="$(python3 - "$repo_root/package.json" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("FAIL|root package.json is unreadable: %s" % e); raise SystemExit
+pi = doc.get("pi") or {}
+exts = pi.get("extensions") or []
+want = "./plugins/polyforge/pi/extensions/polyforge/index.js"
+print(("PASS|direct Pi Git install discovers the bootstrap sentinel" if exts == [want]
+       else "FAIL|root package.json must expose only %s, got %r" % (want, exts)))
+print(("PASS|Pi package has no lifecycle scripts, preserving explicit review before bootstrap"
+       if not doc.get("scripts")
+       else "FAIL|Pi package must not run lifecycle scripts automatically: %r" % doc.get("scripts")))
+PY
+)"
+verdicts <<< "$package_out"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "== read-only roles carry a pi tools: allowlist; write-capable roles do not =="
@@ -548,7 +567,12 @@ skill_scope_arm() {
     return
   fi
   trap 'rm -rf "$sandbox"' EXIT
-  mkdir -p "$sandbox/agent/npm/node_modules/pi-mcp-adapter" "$sandbox/proj"
+  mkdir -p "$sandbox/agent/npm/node_modules/pi-mcp-adapter" "$sandbox/proj" \
+    "$sandbox/agent/extensions/polyforge"
+  # Seed a stale root record. The installer must repair it without destroying the only
+  # evidence of where this machine was previously bound.
+  printf '{"pluginRoot":"/stale/polyforge/1.1.53"}\n' \
+    > "$sandbox/agent/extensions/polyforge/polyforge-pi.json"
   # Stub the adapter so install.sh takes its "already installed" branch. Without this the
   # test would run `pi install npm:pi-mcp-adapter` — a network fetch, in a test.
   printf '{"name":"pi-mcp-adapter","version":"0.0.0-test-stub"}\n' \
@@ -569,6 +593,20 @@ skill_scope_arm() {
     bad "$label: install.sh exited $rc in a throwaway dir:"
     sed 's/^/      /' "$sandbox/install.log" >&2
     rm -rf "$sandbox"; trap - EXIT; return
+  fi
+
+  if grep -q '"pluginRoot": ".*plugins/polyforge"' \
+      "$sandbox/agent/extensions/polyforge/polyforge-pi.json" 2>/dev/null; then
+    ok "$label: installer repaired the persisted bridge root"
+  else
+    bad "$label: installer did not record its current plugin root"
+  fi
+  bridge_backup="$(find "$sandbox/agent/extensions/polyforge" -maxdepth 1 \
+      -name 'polyforge-pi.json.bak-*' -print -quit)"
+  if [ -n "$bridge_backup" ] && grep -q '/stale/polyforge/1.1.53' "$bridge_backup"; then
+    ok "$label: stale bridge root was preserved in a backup"
+  else
+    bad "$label: stale bridge root was replaced without a readable backup"
   fi
 
   # --- what landed on disk. No pi needed, so this half runs in CI too. -------------------

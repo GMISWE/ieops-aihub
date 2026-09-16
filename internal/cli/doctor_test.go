@@ -198,3 +198,142 @@ func TestManagedBlockProjects(t *testing.T) {
 		t.Errorf("managedBlockProjects found %d headings in a block with none", n)
 	}
 }
+
+func writeJSONFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fakePluginRoot(t *testing.T, root string) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pi-hooks.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func fakePiGitInstaller(t *testing.T, scopeDir string) string {
+	t.Helper()
+	installer := filepath.Join(scopeDir, "git", "github.com", "GMISWE", "ieops-aihub", "plugins", "polyforge", "pi", "install.sh")
+	writeJSONFile(t, installer, "#!/bin/sh\n")
+	return installer
+}
+
+func TestCheckPiIntegrationRequiresExplicitGitBootstrap(t *testing.T) {
+	home := t.TempDir()
+	settings := filepath.Join(home, ".pi", "agent", "settings.json")
+	writeJSONFile(t, settings, `{"packages":["npm:pi-mcp-adapter","git:git@github.com:GMISWE/ieops-aihub.git"]}`)
+	installer := fakePiGitInstaller(t, filepath.Dir(settings))
+
+	got := checkPiIntegration(home, "/workspace")
+	if got.Status != "warning" || !strings.Contains(got.Message, "does not run package shell scripts") {
+		t.Fatalf("checkPiIntegration = %+v, want explicit-bootstrap warning", got)
+	}
+	if got.FixCmd != fmt.Sprintf("bash %q %q", installer, "/workspace") {
+		t.Fatalf("fix = %q, want installer at configured global checkout", got.FixCmd)
+	}
+}
+
+func TestCheckPiIntegrationProjectGitBootstrap(t *testing.T) {
+	for _, tc := range []struct {
+		name, source string
+	}{
+		{"shorthand object", `{"source":"git:github.com/GMISWE/ieops-aihub@v1.1.59"}`},
+		{"HTTPS", `"https://github.com/GMISWE/ieops-aihub.git"`},
+		{"SSH URL", `"ssh://git@github.com/GMISWE/ieops-aihub"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, ws := t.TempDir(), t.TempDir()
+			settings := filepath.Join(ws, ".pi", "settings.json")
+			writeJSONFile(t, settings, `{"packages":[`+tc.source+`]}`)
+			installer := fakePiGitInstaller(t, filepath.Dir(settings))
+			got := checkPiIntegration(home, ws)
+			if got.Status != "warning" || got.FixCmd != fmt.Sprintf("bash %q %q", installer, ws) {
+				t.Fatalf("checkPiIntegration = %+v, want project checkout bootstrap %q", got, installer)
+			}
+		})
+	}
+}
+
+func TestCheckPiIntegrationPrefersAvailableProjectCheckout(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	global := filepath.Join(home, ".pi", "agent")
+	project := filepath.Join(ws, ".pi")
+	writeJSONFile(t, filepath.Join(global, "settings.json"), `{"packages":["git:github.com/GMISWE/ieops-aihub"]}`)
+	writeJSONFile(t, filepath.Join(project, "settings.json"), `{"packages":["git:github.com/GMISWE/ieops-aihub"]}`)
+	fakePiGitInstaller(t, global)
+	installer := fakePiGitInstaller(t, project)
+	got := checkPiIntegration(home, ws)
+	if got.FixCmd != fmt.Sprintf("bash %q %q", installer, ws) {
+		t.Fatalf("fix = %q, want project checkout %q", got.FixCmd, installer)
+	}
+}
+
+func TestCheckPiIntegrationMissingCheckoutDoesNotInventFix(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	writeJSONFile(t, filepath.Join(ws, ".pi", "settings.json"), `{"packages":["git:github.com/GMISWE/ieops-aihub"]}`)
+	got := checkPiIntegration(home, ws)
+	if got.Status != "warning" || got.FixCmd != "" || !strings.Contains(got.Message, "checkout installer is unavailable") {
+		t.Fatalf("checkPiIntegration = %+v, want warning without a fictitious installer", got)
+	}
+}
+
+func TestCheckPiIntegrationRepairsInvalidBridgeFromProjectCheckout(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	writeJSONFile(t, filepath.Join(ws, ".pi", "settings.json"), `{"packages":["git:github.com/GMISWE/ieops-aihub"]}`)
+	installer := fakePiGitInstaller(t, filepath.Join(ws, ".pi"))
+	writeJSONFile(t, filepath.Join(home, ".pi", "agent", "extensions", "polyforge", "polyforge-pi.json"), `{"pluginRoot":""}`)
+	got := checkPiIntegration(home, ws)
+	if got.Status != "warning" || got.FixCmd != fmt.Sprintf("bash %q %q", installer, ws) {
+		t.Fatalf("checkPiIntegration = %+v, want project checkout to repair invalid bridge", got)
+	}
+}
+
+func TestCheckPiIntegrationReportsUnavailableBridgeWithProjectFix(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	writeJSONFile(t, filepath.Join(ws, ".pi", "settings.json"), `{"packages":["git:github.com/GMISWE/ieops-aihub"]}`)
+	installer := fakePiGitInstaller(t, filepath.Join(ws, ".pi"))
+	writeJSONFile(t, filepath.Join(home, ".pi", "agent", "extensions", "polyforge", "polyforge-pi.json"), `{"pluginRoot":"/missing/hooks"}`)
+	got := checkPiIntegration(home, ws)
+	if got.Status != "warning" || !strings.Contains(got.Message, "unavailable") || got.FixCmd != fmt.Sprintf("bash %q %q", installer, ws) {
+		t.Fatalf("checkPiIntegration = %+v, want unavailable-root warning and scoped repair", got)
+	}
+}
+
+func TestCheckPiIntegrationReportsStaleClaudeCacheRoot(t *testing.T) {
+	home := t.TempDir()
+	oldRoot := fakePluginRoot(t, filepath.Join(home, ".claude", "plugins", "cache", "ieops-aihub", "polyforge", "1.1.53"))
+	newRoot := fakePluginRoot(t, filepath.Join(home, ".claude", "plugins", "cache", "ieops-aihub", "polyforge", "1.1.59"))
+	writeJSONFile(t, filepath.Join(home, ".pi", "agent", "extensions", "polyforge", "polyforge-pi.json"),
+		fmt.Sprintf(`{"pluginRoot":%q}`, oldRoot))
+	writeJSONFile(t, filepath.Join(home, ".claude", "plugins", "installed_plugins.json"),
+		fmt.Sprintf(`{"plugins":{"polyforge@ieops-aihub":[{"installPath":%q,"version":"1.1.59","lastUpdated":"2026-09-16T02:00:00Z"}]}}`, newRoot))
+
+	got := checkPiIntegration(home, "/workspace")
+	if got.Status != "warning" || !strings.Contains(got.Message, "stale") || !strings.Contains(got.Message, "1.1.59") {
+		t.Fatalf("checkPiIntegration = %+v, want stale-root warning naming current version", got)
+	}
+	if !strings.Contains(got.FixCmd, newRoot) {
+		t.Fatalf("fix = %q, want current installer root %q", got.FixCmd, newRoot)
+	}
+}
+
+func TestCheckPiIntegrationAcceptsStableCheckoutRoot(t *testing.T) {
+	home := t.TempDir()
+	root := fakePluginRoot(t, filepath.Join(home, ".pi", "agent", "git", "github.com", "GMISWE", "ieops-aihub", "plugins", "polyforge"))
+	writeJSONFile(t, filepath.Join(home, ".pi", "agent", "extensions", "polyforge", "polyforge-pi.json"),
+		fmt.Sprintf(`{"pluginRoot":%q}`, root))
+
+	got := checkPiIntegration(home, "/workspace")
+	if got.Status != "ok" || !strings.Contains(got.Message, root) {
+		t.Fatalf("checkPiIntegration = %+v, want stable checkout root accepted", got)
+	}
+}

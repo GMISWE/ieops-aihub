@@ -1883,6 +1883,17 @@ func handlerReaderSet(t *testing.T, handler string, structs map[string][]string,
 // supplies — the /ui pages POST to some of these routes too — and (b) a header
 // or an idempotency key this process derives rather than exposing.
 var serverNamesNoToolCanReach = map[string]string{
+	// aihub#708 Batch 2A: POST /v1/work_items optionally carries `steps`
+	// (create-with-workflow), and the published create path deliberately does
+	// not expose it yet — the workflow engine that would drive a step-bearing
+	// create (Batch 2B) does not exist, so a caller publishing `steps` there
+	// would be advertising a shape nothing can execute. The published route to
+	// a pinned flow is pf_update_workflow (PUT /v1/work_items/:id/workflow),
+	// which publishes its own steps parameter on its own route. Raw HTTP
+	// callers and the domain tests reach the field; when 2B wires the engine,
+	// publish `steps` on the create tool and delete this entry in the same
+	// change.
+	"handleCreateWorkItem.steps": "create-with-steps is deliberately unpublished until the workflow engine (aihub#708 Batch 2B) can execute it; pf_update_workflow is the published path",
 	// ⚠️ `handleClaimWorkItem.task_branches` was the first entry here until
 	// aihub#416, and it was removed rather than re-worded: the git_branch
 	// derivation it existed for is retired, so the handler binds no such field

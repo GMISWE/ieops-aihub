@@ -70,6 +70,24 @@ var detailsWriterCensus = map[string]detailsWriter{
 		Shapes:  []string{"{current_members_version,expected_members_version}"},
 		Verdict: "two ints",
 	},
+	"skill_registry.go:PublishSkillVersion": {
+		Shapes:  []string{"{current_latest,expected_latest}"},
+		Verdict: "two ints — the caller's expected_latest and the locked row's latest_version, both read under the publication FOR UPDATE lock",
+	},
+
+	// ── aihub#708 Batch 2A: the workflow details writers ──────────────────
+	"workflow_run.go:UpdateWorkItemWorkflow": {
+		Shapes:  []string{"{current_steps_version,expected_steps_version}"},
+		Verdict: "two ints — the caller's expected_steps_version and the locked row's steps_version, mirroring the publication CAS entry above",
+	},
+	"workflow_run.go:RecordWorkflowResult": {
+		Shapes:  []string{"{current_steps_version,result_flow_version}"},
+		Verdict: "two ints — the result envelope's flow_version and the current generation",
+	},
+	"workflow_run.go:ApproveWorkflowStep": {
+		Shapes:  []string{"{approval_steps_version,current_steps_version}", "{latest_artifact,submitted_artifact}"},
+		Verdict: "two ints for the generation mismatch; two workflow.ArtifactRef values for the artifact mismatch, each an id string, an int and a sha256 the server already validated",
+	},
 	"memory.go:verifyAttemptCredentialSimple": {
 		Shapes:  []string{"{current_epoch}"},
 		Verdict: "one int",

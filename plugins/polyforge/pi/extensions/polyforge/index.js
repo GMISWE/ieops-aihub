@@ -411,10 +411,19 @@ function createBridge(pi, opts) {
 			// ctx.cwd (typically a pf.<slug>/<repo>/ worktree) makes it read a directory that
 			// does not exist, return null, and exit 0 having written nothing.
 			if (!ws || !entry.bash) continue;
+			// Forward the ACTUAL result, not a synthesized verdict: pi's ToolResultEvent
+			// carries `content: (TextContent|ImageContent)[]` (the same item shape the MCP
+		// result uses) and `isError: boolean`. A bare `{isError:false}` loses the result and
+			// the chain hook correctly refuses it as unconfirmed, so the chain would never
+			// advance; an error result must keep its error status so a failed call cannot
+			// advance the cache either.
 			const payload = JSON.stringify({
 				tool_name: toolName,
 				tool_input: (event && event.input) || {},
-				tool_response: { isError: Boolean(event && event.isError) },
+				tool_response: {
+					content: Array.isArray(event && event.content) ? event.content : [],
+					isError: Boolean(event && event.isError),
+				},
 				cwd: ws,
 			});
 			await exec(entry.bash, payload, hookEnv(ws), entry.timeoutSec || 10);

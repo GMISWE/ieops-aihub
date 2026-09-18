@@ -169,6 +169,37 @@ test('tool_result payload passes the WORKSPACE ROOT as cwd, not the worktree', a
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+test('tool_result forwards the ACTUAL result and the error status, and the hook confirms/rejects them', async () => {
+  // A bare `{isError:false}` used to be the whole tool_response: the real result was
+  // dropped, and the chain hook (rightly) refuses such an unconfirmed shape — so on pi the
+  // chain could never advance. The forward must carry event.content (pi's ToolResultEvent
+  // is `content: (TextContent|ImageContent)[]`, the same item shape an MCP result uses)
+  // plus event.isError, and the shared hook must confirm the success and refuse the error.
+  // Driving the REAL hook's own predicate keeps the bridge and hook contracts tied.
+  const hook = require(path.join(ROOT, 'bin/pf-chain-hook.cjs'));
+  const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pf-bridge-res-'));
+  fs.writeFileSync(path.join(tmp, '.polyforge.yaml'), 'version: 1\n');
+  const seen = [];
+  const handlers = mount({
+    hooks: { tool_result: [{ matcher: '^polyforge_pf_update_step$', match: 'toolName', bash: 'true' }] },
+    exec: async (cmd, payload) => { seen.push(JSON.parse(payload)); return { stdout: '', stderr: '', failed: false }; },
+  });
+  const okContent = [{ type: 'text', text: '{"current_step":"write_spec","version":2}' }];
+  await handlers.tool_result(
+    { toolName: 'polyforge_pf_update_step', input: { step_id: 's', status: 'completed' }, content: okContent, isError: false },
+    { cwd: tmp },
+  );
+  await handlers.tool_result(
+    { toolName: 'polyforge_pf_update_step', input: { step_id: 's', status: 'completed' }, content: [{ type: 'text', text: '409 CAS failed' }], isError: true },
+    { cwd: tmp },
+  );
+  assert.deepStrictEqual(seen[0].tool_response, { content: okContent, isError: false });
+  assert.strictEqual(seen[1].tool_response.isError, true);
+  assert.strictEqual(hook.successfulResponse(seen[0].tool_response), true, 'forwarded success must be confirmed by the hook');
+  assert.strictEqual(hook.successfulResponse(seen[1].tool_response), false, 'forwarded error must be refused by the hook');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 test('the hook environment does not announce pi as Codex or Cursor', async () => {
   // These must be SET in the ambient environment first, or the assertions below pass
   // whether or not the bridge unsets them — the runner simply does not define them, and

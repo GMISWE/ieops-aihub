@@ -301,9 +301,10 @@ if mode == "step-body":
 
     header = (
         f"[polyforge router] `/{base}` step `{step_id}` — engine: {engine_label}. The SKILL.md is a "
-        "stub; the text below is the step body, assembled and injected at the call site, and it takes "
-        "precedence. Fragments marked 📄 are NOT injected — this payload has a hard 10,000-character "
-        "limit and `Read` is how you get the rest (aihub#304)."
+        "stub; the text below is the step body and takes precedence. A pinned DB workflow "
+        "(`pf_get_workflow` -> `steps_version > 0`) WINS: follow the stored flow "
+        "(using-polyforge fragments/workflow-v2.md). Fragments marked 📄 are NOT injected — 10,000-char "
+        "limit; `Read` the rest (aihub#304)."
     )
 
     # List order is EMISSION order. drop_rank orders DEGRADATION only, lowest dropped first:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,16 +13,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/controller"
 	"github.com/GMISWE/ieops-aihub/internal/engine"
 	"github.com/GMISWE/ieops-aihub/internal/roles"
+	"github.com/GMISWE/ieops-aihub/internal/workflow"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // RunEngine dispatches `polyforge engine <verb> [flags...]`. Every verb here is local-only (no
 // aihub API client, no network call) and prints one JSON object to stdout on success — these are
 // the CLI-layer wrapping of internal/engine's pieces (a)-(e) for a future headless orchestrator
 // (aihub#654); today's LLM-driven pf-execute loop keeps calling those MCP tools directly.
+// ONE exception, aihub#708: `engine workflow` is the DB-workflow adapter. It
+// exposes a real three-mode protocol: drain owns unattended runs; --continue
+// drives automatic steps through controller.RunStep; --prepare/--submit hand
+// an exact fenced invocation to the main human session. It never claims or
+// fabricates approval, and workflow-bearing work never falls back to scenarios.
 func RunEngine(ctx context.Context, args []string) {
-	const usage = "usage: polyforge engine <startup|resolve-role|parse-review|bracket-plan|cleanup-worktrees> [flags...]"
+	const usage = "usage: polyforge engine <startup|resolve-role|parse-review|bracket-plan|cleanup-worktrees|workflow> [flags...]"
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(1)
@@ -44,11 +54,45 @@ func RunEngine(ctx context.Context, args []string) {
 		out, err = runEngineBracketPlan(rest)
 	case "cleanup-worktrees":
 		out, err = runEngineCleanupWorktrees(ctx, rest)
+	case "workflow":
+		out, err = runEngineWorkflow(ctx, rest)
 	default:
 		fmt.Fprintf(os.Stderr, "engine: unknown verb %q\n%s\n", verb, usage)
 		os.Exit(1)
 	}
 	if err != nil {
+		// Typed controller holds are RESULTS as well as errors: keep the nonzero
+		// exit, but expose stable JSON so a caller can route rather than parsing
+		// prose or (worse) treating the gate as locally executable.
+		var sessionHold *controller.SessionWorkerRequiredError
+		if errors.As(err, &sessionHold) {
+			if b, merr := json.MarshalIndent(map[string]any{
+				"work_item_id": sessionHold.WorkItemID,
+				"step_id":      sessionHold.StepID,
+				"status":       "hold",
+				"reason":       sessionHold.Reason,
+				"detail":       sessionHold.Detail,
+			}, "", "  "); merr == nil {
+				fmt.Println(string(b))
+			}
+		}
+		// A typed unsupported dispatch is a RESULT, not prose: print the
+		// machine-readable form on stdout (with the stable reason token) so
+		// callers can branch on it, and still exit 1 — unsupported is a
+		// failure, and the typed JSON exists so nobody "solves" it by falling
+		// back to the legacy scenario path.
+		var uns *controller.UnsupportedDispatchError
+		if errors.As(err, &uns) {
+			if b, merr := json.MarshalIndent(map[string]any{
+				"work_item_id": uns.WorkItemID,
+				"step_id":      uns.StepID,
+				"status":       "unsupported",
+				"reason":       uns.Reason,
+				"detail":       uns.Detail,
+			}, "", "  "); merr == nil {
+				fmt.Println(string(b))
+			}
+		}
 		fmt.Fprintf(os.Stderr, "engine %s: %v\n", verb, err)
 		os.Exit(1)
 	}
@@ -374,4 +418,463 @@ func runEngineCleanupWorktrees(ctx context.Context, args []string) (*engineClean
 		out.Errors["(parent)"] = parentErr.Error()
 	}
 	return out, nil
+}
+
+// --- engine workflow (aihub#708 Batch 2B: low-level DB-workflow adapter) ----------------------
+
+// workflowClient is the client surface `engine workflow` needs: the shared
+// controller API (workflow read, server-minted start, structured result
+// record, pinned skill fetch) plus the explicit reconcile transition. The
+// concrete *client.Client satisfies it; tests substitute a fake so the verb's
+// state machine is exercised without a server.
+type workflowClient interface {
+	controller.SessionAPI
+}
+
+// engineWorkflowOutput is `engine workflow`'s stdout shape. Status is the
+// shared controller's ActionKind vocabulary (run, open_invocation,
+// repair_required, revision_required, approval_required, complete), plus "legacy" for a no-flow
+// work item, "executed"'s follow-up state after --execute, and "reconciled"
+// after --reconcile. A human gate is ALWAYS reported as data here — the verb
+// never waits on stdin and never blocks the caller.
+type engineWorkflowOutput struct {
+	WorkItemID   string                          `json:"work_item_id"`
+	Legacy       bool                            `json:"legacy"`
+	StepsVersion int                             `json:"steps_version,omitempty"`
+	Status       string                          `json:"status"`
+	StepID       string                          `json:"step_id,omitempty"`
+	RHS          bool                            `json:"rhs,omitempty"`
+	Detail       string                          `json:"detail,omitempty"`
+	Preparation  *controller.SessionPreparation  `json:"preparation,omitempty"`
+	Submission   *controller.SessionSubmitResult `json:"submission,omitempty"`
+	Approval     *engineWorkflowApproval         `json:"approval,omitempty"`
+	Result       *engineWorkflowStepResult       `json:"result,omitempty"`
+	Reconciled   map[string]any                  `json:"reconciled,omitempty"`
+	WorkerTail   string                          `json:"worker_output_tail,omitempty"`
+}
+
+// engineWorkflowStepResult summarizes the recorded worker result of one
+// --execute run. It is a projection of the structured workflow.StepResult the
+// server already accepted — the full envelope lives on the work item's
+// timeline, not in this output.
+type engineWorkflowStepResult struct {
+	Status        string `json:"status"`
+	ReviewVerdict string `json:"review_verdict,omitempty"`
+	StepAttemptID string `json:"step_attempt_id"`
+	ArtifactID    string `json:"artifact_id,omitempty"`
+	ArtifactHash  string `json:"artifact_hash,omitempty"`
+}
+
+type engineWorkflowApproval struct {
+	StepsVersion int                  `json:"steps_version"`
+	StepID       string               `json:"step_id"`
+	Artifact     workflow.ArtifactRef `json:"artifact"`
+	Instruction  string               `json:"instruction"`
+}
+
+// workerTailLimit bounds the worker output echoed into the verb's JSON: the
+// full bytes belong in --log-file (or the work item timeline), not in a
+// status report.
+const workerTailLimit = 4096
+
+// runEngineWorkflow implements `engine workflow`:
+//
+//	polyforge engine workflow --work-item=<id> --continue           # classify/drive the next action
+//	polyforge engine workflow --work-item=<id> --prepare            # open a fenced main-session invocation
+//	polyforge engine workflow --work-item=<id> --submit=<file>      # save artifact + record exact result
+//	polyforge engine workflow --work-item=<id> --execute            # compatibility: run ONE automatic step
+//	polyforge engine workflow --work-item=<id> --reconcile=<ra_...> # fence a dead attempt's open invocations
+//
+// --continue uses the shared controller for automatic steps and returns
+// prepare_required for interactive/effective-RHS steps. --prepare returns the
+// pinned immutable skill and concrete predecessor values; --submit validates
+// and records the main session's authored output. Human approval remains a
+// separate authenticated action and is always rendered with its exact artifact
+// tuple; this verb never manufactures it.
+func runEngineWorkflow(ctx context.Context, args []string) (*engineWorkflowOutput, error) {
+	wiID, _ := flagValue(args, "work-item")
+	if wiID == "" {
+		return nil, fmt.Errorf("--work-item is required")
+	}
+	reconcileAttempt, hasReconcile := flagValue(args, "reconcile")
+	submitFile, hasSubmit := flagValue(args, "submit")
+	logFile, _ := flagValue(args, "log-file")
+	workDir, _ := flagValue(args, "work-dir")
+
+	c, err := workflowAihubClient()
+	if err != nil {
+		return nil, err
+	}
+	return engineWorkflowDrive(ctx, c, wiID, engineWorkflowOptions{
+		Execute:          hasFlag(args, "execute"),
+		Prepare:          hasFlag(args, "prepare"),
+		Continue:         hasFlag(args, "continue"),
+		SubmitFile:       submitFile,
+		HasSubmit:        hasSubmit,
+		ReconcileAttempt: reconcileAttempt,
+		HasReconcile:     hasReconcile,
+		LogFile:          logFile,
+		WorkDir:          workDir,
+	})
+}
+
+// engineWorkflowOptions carries `engine workflow`'s flags.
+type engineWorkflowOptions struct {
+	Execute          bool
+	Prepare          bool
+	Continue         bool
+	SubmitFile       string
+	HasSubmit        bool
+	ReconcileAttempt string
+	HasReconcile     bool
+	LogFile          string
+	WorkDir          string
+}
+
+// runWorkflowStep is the one-step dispatch seam engineWorkflowDrive runs
+// `--execute` through. Production is the shared controller.RunStep (the
+// SAME function the drain path uses — one execution policy across modes);
+// tests substitute so the verb's state machine is exercised without a
+// machine model catalog or a live harness.
+var runWorkflowStep = controller.RunStep
+
+// engineWorkflowDrive is the verb's testable core: everything after client
+// construction. fail-closed throughout — a workflow read error is returned,
+// never interpreted as "no workflow".
+func engineWorkflowDrive(ctx context.Context, c workflowClient, wiID string, opts engineWorkflowOptions) (*engineWorkflowOutput, error) {
+	out := &engineWorkflowOutput{WorkItemID: wiID}
+	modes := 0
+	for _, set := range []bool{opts.Execute, opts.Prepare, opts.Continue, opts.HasSubmit, opts.HasReconcile} {
+		if set {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return out, fmt.Errorf("choose exactly one of --execute, --prepare, --submit, --continue, or --reconcile")
+	}
+
+	if opts.HasReconcile {
+		cred, err := workflowCredentials(wiID)
+		if err != nil {
+			return out, err
+		}
+		resp, err := c.ReconcileWorkflowInvocations(ctx, wiID, map[string]any{
+			"attempt_id":           cred.AttemptID,
+			"claim_epoch":          cred.ClaimEpoch,
+			"session_secret":       cred.SessionSecret,
+			"supersede_attempt_id": opts.ReconcileAttempt,
+		})
+		if err != nil {
+			return out, fmt.Errorf("reconcile workflow invocations: %w", err)
+		}
+		out.Reconciled = resp
+		out.Status = "reconciled"
+		return out, nil
+	}
+
+	if opts.HasSubmit {
+		cred, err := workflowCredentials(wiID)
+		if err != nil {
+			return out, err
+		}
+		data, err := os.ReadFile(opts.SubmitFile)
+		if err != nil {
+			return out, fmt.Errorf("read --submit file: %w", err)
+		}
+		var sub controller.SessionSubmission
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		if err := dec.Decode(&sub); err != nil {
+			return out, fmt.Errorf("decode --submit file: %w", err)
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return out, fmt.Errorf("decode --submit file: trailing JSON values are not allowed")
+			}
+			return out, fmt.Errorf("decode --submit file trailing data: %w", err)
+		}
+		result, err := controller.SubmitSession(ctx, c, wiID, cred, sub)
+		if err != nil {
+			return out, err
+		}
+		out.Submission = result
+		return finishWorkflowOutput(ctx, c, out, wiID)
+	}
+
+	state, err := controller.Select(ctx, c, wiID)
+	if err != nil {
+		return out, err
+	}
+	if state == nil {
+		// The server confirmed this work item has no pinned generation:
+		// legacy. The scenario engine path (startup / resolve-role / the
+		// pf-execute loop) is what drives it — this verb says so and stops.
+		out.Legacy = true
+		out.Status = "legacy"
+		out.Detail = "no pinned workflow generation; the legacy scenario engine path applies"
+		return out, nil
+	}
+	out.WorkItemID = state.WorkItemID
+	out.StepsVersion = state.StepsVersion
+
+	action := state.NextAction()
+	if opts.Prepare {
+		cred, err := workflowCredentials(wiID)
+		if err != nil {
+			return out, err
+		}
+		prep, err := controller.PrepareSession(ctx, c, state.WorkItemID, action.StepID, cred)
+		if err != nil {
+			return out, err
+		}
+		out.Status, out.StepID, out.RHS = "prepared", prep.StepID, prep.RHS
+		out.Detail = "server-fenced invocation prepared; discuss and submit the authored output object"
+		out.Preparation = prep
+		return out, nil
+	}
+	if opts.Continue {
+		switch action.Kind {
+		case controller.ActionApprovalRequired:
+			return renderWorkflowAction(out, state, action), nil
+		case controller.ActionRevisionRequired:
+			route, err := workflowStepRoute(ctx, c, state, action.StepID)
+			if err != nil {
+				return out, err
+			}
+			if !route.WorkerRequired {
+				renderWorkflowAction(out, state, action)
+				out.Detail += "; run polyforge engine workflow --work-item=" + wiID + " --prepare"
+				return out, nil
+			}
+			// A rejected independent gate is still not revised by its producer.
+			// Dispatch a fresh server-fenced worker invocation below.
+			opts.Execute = true
+		case controller.ActionRun:
+			route, err := workflowStepRoute(ctx, c, state, action.StepID)
+			if err != nil {
+				return out, err
+			}
+			if (action.RHS || route.Interactive) && !route.WorkerRequired {
+				out.Status, out.StepID, out.RHS, out.Detail = "prepare_required", action.StepID, action.RHS,
+					"this human-facing authoring step requires the main session; run polyforge engine workflow --work-item="+wiID+" --prepare"
+				return out, nil
+			}
+			// Gate, shipping, and automatic steps deliberately fall through to
+			// the SAME preflighted one-step controller used by drain. In
+			// particular, effective RHS never makes an independent producer local.
+			opts.Execute = true
+		default:
+			return renderWorkflowAction(out, state, action), nil
+		}
+	}
+	if !opts.Execute {
+		return renderWorkflowAction(out, state, action), nil
+	}
+	if action.Kind != controller.ActionRun && action.Kind != controller.ActionRevisionRequired {
+		return renderWorkflowAction(out, state, action), nil
+	}
+	route, err := workflowStepRoute(ctx, c, state, action.StepID)
+	if err != nil {
+		return out, err
+	}
+	if (action.RHS || route.Interactive) && !route.WorkerRequired {
+		out.Status, out.StepID, out.RHS, out.Detail = "prepare_required", action.StepID, action.RHS,
+			"this human-facing authoring step requires the main session; run polyforge engine workflow --work-item="+wiID+" --prepare"
+		return out, nil
+	}
+
+	cred, err := workflowCredentials(wiID)
+	if err != nil {
+		return out, err
+	}
+	workDir, err := workflowWorkDir(wiID, opts.WorkDir)
+	if err != nil {
+		return out, err
+	}
+
+	_, grants, err := controller.LoadValidatedFlow(ctx, c, state)
+	if err != nil {
+		return out, fmt.Errorf("bind pinned workflow: %w", err)
+	}
+	grant, ok := grants[action.StepID]
+	if !ok {
+		return out, fmt.Errorf("pinned workflow has no derived grant for step %s", action.StepID)
+	}
+
+	var log bytes.Buffer
+	stepOut, rerr := runWorkflowStep(ctx, c, state.WorkItemID, action.StepID, workDir, controller.StepOptions{
+		Credentials:          cred,
+		Log:                  &log,
+		ExpectedStepsVersion: state.StepsVersion,
+		ExpectedGrant:        &grant,
+	})
+	if log.Len() > 0 {
+		if opts.LogFile != "" {
+			if werr := os.MkdirAll(filepath.Dir(opts.LogFile), 0o700); werr == nil {
+				_ = os.WriteFile(opts.LogFile, log.Bytes(), 0o600)
+			}
+		}
+		tail := log.Bytes()
+		if len(tail) > workerTailLimit {
+			tail = tail[len(tail)-workerTailLimit:]
+			out.WorkerTail = "...(truncated)..." + string(tail)
+		} else {
+			out.WorkerTail = string(tail)
+		}
+	}
+	if rerr != nil {
+		return out, rerr
+	}
+	if !stepOut.Recorded {
+		return out, fmt.Errorf("workflow step returned without recording a result")
+	}
+	result := stepOut.Result
+	out.Result = &engineWorkflowStepResult{
+		Status:        string(result.Status),
+		ReviewVerdict: string(result.ReviewVerdict),
+		StepAttemptID: result.StepAttemptID,
+		ArtifactID:    result.Artifact.ID,
+		ArtifactHash:  result.Artifact.Hash,
+	}
+
+	return finishWorkflowOutput(ctx, c, out, state.WorkItemID)
+}
+
+func finishWorkflowOutput(ctx context.Context, c workflowClient, out *engineWorkflowOutput, wiID string) (*engineWorkflowOutput, error) {
+	next, err := controller.Select(ctx, c, wiID)
+	if err != nil {
+		return out, fmt.Errorf("result recorded, but re-reading the workflow failed: %w", err)
+	}
+	if next == nil {
+		return out, fmt.Errorf("result recorded, but the pinned workflow disappeared; refusing legacy fallback")
+	}
+	return renderWorkflowAction(out, next, next.NextAction()), nil
+}
+
+func renderWorkflowAction(out *engineWorkflowOutput, state *controller.State, action controller.NextAction) *engineWorkflowOutput {
+	out.WorkItemID, out.StepsVersion = state.WorkItemID, state.StepsVersion
+	out.Status, out.StepID, out.RHS, out.Detail = string(action.Kind), action.StepID, action.RHS, action.Detail
+	if action.Kind == controller.ActionApprovalRequired {
+		if p := workflowProgress(state, action.StepID); p != nil {
+			out.Approval = &engineWorkflowApproval{
+				StepsVersion: state.StepsVersion, StepID: action.StepID, Artifact: p.Artifact,
+				Instruction: fmt.Sprintf("Show artifact %s version %d (%s) to the human. Only after that human explicitly says approved or rejected may the authenticated human caller invoke pf_approve_workflow with this exact tuple; a model must not synthesize the decision.", p.Artifact.ID, p.Artifact.Version, p.Artifact.Hash),
+			}
+		}
+	}
+	return out
+}
+
+func workflowProgress(state *controller.State, stepID string) *controller.Progress {
+	for i := range state.Progress {
+		if state.Progress[i].StepID == stepID {
+			return &state.Progress[i]
+		}
+	}
+	return nil
+}
+
+type workflowStepExecutionRoute struct {
+	Interactive    bool
+	WorkerRequired bool
+}
+
+func workflowStepRoute(ctx context.Context, c workflowClient, state *controller.State, stepID string) (workflowStepExecutionRoute, error) {
+	flow, grants, err := controller.LoadValidatedFlow(ctx, c, state)
+	if err != nil {
+		return workflowStepExecutionRoute{}, fmt.Errorf("bind pinned workflow: %w", err)
+	}
+	for _, step := range flow.BoundSteps() {
+		if step.Step.ID == stepID {
+			grant, ok := grants[stepID]
+			if !ok {
+				return workflowStepExecutionRoute{}, fmt.Errorf("pinned workflow has no derived grant for step %s", stepID)
+			}
+			_, required := controller.SessionWorkerRequirement(step.Contract, grant)
+			return workflowStepExecutionRoute{
+				Interactive: step.Contract.Runtime.Interactive, WorkerRequired: required,
+			}, nil
+		}
+	}
+	return workflowStepExecutionRoute{}, fmt.Errorf("pinned workflow has no bound step %q", stepID)
+}
+
+// workflowCredentials loads this work item's attempt credentials from the
+// workspace state file — the same credential source every credentialed pf_*
+// call uses. The server re-verifies them on every start/record/reconcile, so
+// a stale file fails there, not here.
+func workflowCredentials(wiID string) (controller.Credentials, error) {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return controller.Credentials{}, config.StateFileMissingErr(wiID, err)
+	}
+	if sf.AttemptID == "" || sf.SessionSecret == "" || sf.ClaimEpoch <= 0 {
+		return controller.Credentials{}, fmt.Errorf(
+			"workflow credentials incomplete for %s (attempt_id/claim_epoch/session_secret); re-claim the work item", wiID)
+	}
+	return controller.Credentials{AttemptID: sf.AttemptID, ClaimEpoch: sf.ClaimEpoch, SessionSecret: sf.SessionSecret}, nil
+}
+
+// workflowWorkDir resolves the directory a dispatched step runs in: an
+// explicit --work-dir wins; otherwise the state file's single worktree; with
+// several worktrees the caller must choose; with none the step inherits this
+// process's cwd (a read-only or artifact-producing step needs no worktree).
+func workflowWorkDir(wiID, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	sf, err := config.ResolveStateFile(wiID)
+	if err == nil {
+		if dir, ok, selectErr := selectWorkflowWorkDir(sf.Worktrees, wiID); ok || selectErr != nil {
+			return dir, selectErr
+		}
+	}
+	return os.Getwd()
+}
+
+func selectWorkflowWorkDir(worktrees map[string]string, wiID string) (string, bool, error) {
+	switch len(worktrees) {
+	case 1:
+		for _, p := range worktrees {
+			return p, true, nil
+		}
+	case 0:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf(
+			"this work item has %d worktrees; pass --work-dir to choose the one the step runs in", len(worktrees))
+	}
+	return "", false, nil
+}
+
+// workflowAihubClient builds the aihub client `engine workflow` needs, with
+// the same precedence runCLI applies to every client-requiring subcommand:
+// the machine config's API key (auth.api_key / POLYFORGE_API_KEY), then the
+// workspace .polyforge.yaml's key env; the URL from POLYFORGE_AIHUB_URL >
+// config.toml [server] > .polyforge.yaml > the compiled-in default. RunEngine
+// takes no client parameter because every other engine verb is local-only;
+// duplicating the construction here keeps that signature — and main.go —
+// untouched.
+func workflowAihubClient() (*client.Client, error) {
+	mc, err := config.LoadMachineConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load machine config: %w", err)
+	}
+	apiKey := mc.ResolveAPIKey()
+	wsURL := ""
+	if cfg, cerr := config.Load(config.WorkspaceRoot()); cerr == nil && cfg != nil {
+		wsURL = cfg.AIHub.URL
+		if apiKey == "" && cfg.AIHub.APIKeyEnv != "" {
+			apiKey = os.Getenv(cfg.AIHub.APIKeyEnv)
+		}
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf(
+			"engine workflow: no API key. Put it in ~/.polyforge/config.toml under\n" +
+				"  [auth]\n  api_key = \"pf_k1_…\"\n" +
+				"or export POLYFORGE_API_KEY")
+	}
+	base, _ := config.EffectiveAihubURL(mc, wsURL)
+	return client.New(base, apiKey), nil
 }

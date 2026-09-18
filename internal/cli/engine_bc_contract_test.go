@@ -1922,6 +1922,7 @@ var bcEngineVerbs = map[string]string{
 	"parse-review":      "runEngineParseReview",
 	"bracket-plan":      "runEngineBracketPlan",
 	"cleanup-worktrees": "runEngineCleanupWorktrees",
+	"workflow":          "runEngineWorkflow",
 }
 
 var (

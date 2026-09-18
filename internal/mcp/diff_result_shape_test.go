@@ -305,9 +305,10 @@ func TestDiffWithoutTheClaimMapNeedsWorkspaceRootAndProjectAndSlug(t *testing.T)
 // values of `vs_base` against one repository holding two distinguishable
 // changes: one committed on the task branch, one uncommitted in the worktree.
 //
-// Both directions, because a single-sided arm passes against a tool that
-// ignores the flag: the default must show the uncommitted change and NOT the
-// committed one, and `vs_base=true` the other way round.
+// The default remains the narrow worktree-vs-HEAD view. `vs_base=true` is the
+// complete pending-work view: committed branch changes PLUS uncommitted and
+// untracked files relative to the explicit base. That prevents verification
+// from certifying a commit while silently omitting edits made after it.
 //
 // Mutants (2026-09-10):
 //
@@ -392,9 +393,8 @@ func TestDiffVsBaseComparesTheBaseBranchAndTheDefaultComparesHead(t *testing.T) 
 		t.Errorf("vs_base=true does not contain the commit this branch added, so it is not comparing "+
 			"against the base branch — which is what a \"what did this wi change\" question means:\n%s", base)
 	}
-	if strings.Contains(base, "uncommitted-edit") {
-		t.Errorf("vs_base=true contains an uncommitted edit. The two values would then answer the "+
-			"same question and a reviewer could not tell delivered work from work in progress:\n%s", base)
+	if !strings.Contains(base, "uncommitted-edit") {
+		t.Errorf("vs_base=true omits an uncommitted edit. Verification against an explicit base must inspect the complete pending work, not only committed history:\n%s", base)
 	}
 }
 

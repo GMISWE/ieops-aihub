@@ -236,7 +236,12 @@ func TestNonTransactionalExecSitesAnswerTheirErrors(t *testing.T) {
 	// Fewer: a site was removed, or it moved into a shape this scanner cannot
 	// see (if-init, blanked, bare call — all pinned below), which reads as
 	// compliant — check which before touching the number.
-	const wantSites = 16
+	//
+	// 16 -> 17 (2026-09-17, aihub#708 Batch 1A): CreateSkill's INSERT
+	// (skill_registry.go), answered through dbErrCause after its unique-
+	// violation 409 arm. The registry's three sharing writes are if-init
+	// Execs — pinned below.
+	const wantSites = 17
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d Exec sites in non-transactional functions, want %d — see the count-arm "+
 			"note above this assertion before touching the number", totalSites, wantSites)
@@ -318,6 +323,14 @@ func TestNonTxExecBlindSpotShapesArePinned(t *testing.T) {
 		"wi_embedding.go:refreshWorkItemEmbeddingBestEffort": 1,
 		"wi_watches.go:WatchWorkItem":                        1,
 		"wi_watches.go:UnwatchWorkItem":                      1,
+		// aihub#708 Batch 1A: the skill registry's three sharing writes are
+		// if-init by style (the guard IS the error branch). All classify via
+		// dbErrCause; the grant INSERT additionally carries its idempotency in
+		// ON CONFLICT DO NOTHING, so the only error path left IS the classified
+		// one. Adjudicated 2026-09-17.
+		"skill_registry_sharing.go:RevokeSkillVersionFromProject": 1,
+		"skill_registry_sharing.go:SetSkillVersionVisibility":     1,
+		"skill_registry_sharing.go:ShareSkillVersionWithProject":  1,
 	})
 	assertPinnedSet(t, "blank-assigned Exec", blanked, map[string]int{
 		"memory.go:CommitMemory":  1,

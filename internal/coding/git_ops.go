@@ -13,19 +13,50 @@ import (
 	"strings"
 )
 
-// GitDiff runs `git -C path diff HEAD` and returns the diff output.
+// GitDiff returns the complete pending change set against HEAD or the explicit
+// remote base. A three-dot comparison ends at HEAD and loses staged, unstaged
+// and untracked work; diffing the selected base directly against the worktree
+// includes the first two, and untracked files are appended separately.
 func GitDiff(ctx context.Context, worktreePath string, vsBase bool) (string, error) {
-	var args []string
+	base := "HEAD"
 	if vsBase {
-		args = []string{"-C", worktreePath, "diff", "origin/HEAD...HEAD"}
-	} else {
-		args = []string{"-C", worktreePath, "diff", "HEAD"}
+		out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+			"symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("resolve explicit origin base: %w\n%s", err, out)
+		}
+		base = strings.TrimSpace(string(out))
+		if base == "" {
+			return "", fmt.Errorf("resolve explicit origin base: empty origin/HEAD")
+		}
 	}
-	out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"diff", "--no-ext-diff", "--no-renames", base, "--").CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git diff: %w\n%s", err, out)
+		return "", fmt.Errorf("git diff %s: %w\n%s", base, err, out)
 	}
-	return string(out), nil
+	untracked, err := exec.CommandContext(ctx, "git", "-C", worktreePath,
+		"ls-files", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return "", fmt.Errorf("git ls-files --others: %w", err)
+	}
+	var diff strings.Builder
+	diff.Write(out)
+	for _, name := range strings.Split(string(untracked), "\x00") {
+		if name == "" {
+			continue
+		}
+		// --no-index returns 1 for a difference, 0 for identical files and
+		// anything else for a real failure. Use -- to protect path-like names.
+		fileDiff, diffErr := exec.CommandContext(ctx, "git", "-C", worktreePath,
+			"diff", "--no-index", "--no-ext-diff", "--", "/dev/null", name).CombinedOutput()
+		var exit *exec.ExitError
+		if diffErr != nil && (!errors.As(diffErr, &exit) || exit.ExitCode() != 1) {
+			return "", fmt.Errorf("git diff untracked %q: %w\n%s", name, diffErr, fileDiff)
+		}
+		diff.Write(fileDiff)
+	}
+	return diff.String(), nil
 }
 
 // GitStage writes the worktree changes into the index: only `paths` when it is

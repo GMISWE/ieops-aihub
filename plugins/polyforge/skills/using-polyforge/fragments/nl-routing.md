@@ -1,10 +1,9 @@
 ## NL Routing
 
-This table **indexes** non-obvious intent -> operation mappings, not an exhaustive keyword
+This table **indexes** non-obvious intent -> operation mappings, not an exhaustive
 classifier. Infer intent and route to the nearest match; if nothing fits or it's ambiguous,
 **ask rather than guess**. Each `/pf-*` skill's own `NL Triggers` section is authoritative
-(this index may lag). NL Routing decides *what operation*; **Repo Routing** (below) decides
-*which repo*.
+(this may lag). NL Routing decides *what operation*; **Repo Routing** decides *which repo*.
 
 | intent | operation |
 |---|---|
@@ -17,6 +16,7 @@ classifier. Infer intent and route to the nearest match; if nothing fits or it's
 | pause / done / wrap / finished / fail / abandon | `/pf-stop --pause` \| `--wrap` \| `--fail` |
 | design / spec / brainstorm | `/pf-spec` |
 | this bug / debug | `/pf-spec` (debug variant) |
+| pinned-flow / stored steps | `pf_get_workflow` -> `workflow-v2.md` |
 | note / log | `pf_emit_event(event_type="note", ...)` |
 | doctor / can't connect | `/pf-doctor` |
 | release / cut | `/pf-release` |
@@ -24,17 +24,16 @@ classifier. Infer intent and route to the nearest match; if nothing fits or it's
 | user management / whoami / issue key / list users | `/pf-user` |
 | revise spec/plan per annotations / resolve review comments | `/pf-revise` |
 
-### Disambiguation (context-dependent intents)
+### Disambiguation
 
-Some words route by context - is there **(a)** a slug, **(b)** a running/claimed wi this
-session, **(c)** a skill flow mid-step?
+Some words route by context - a slug? a running/claimed wi? a flow mid-step?
 
 - **continue / go on / next** - mid-flow or mid-step -> proceed to the next step,
   **not** resume. Only "resume `<slug>`" on a **paused** wi routes to
   `/pf-work <slug> --resume`.
-- **done / finished** - mid-step -> continue the flow; whole-wi ("wrap up" / "finished" /
-  "wrap") -> `/pf-stop --wrap`.
-- **begin / start** - with a slug -> claim it (Mode B); without -> new wi (Mode A).
-- **status** - inside a claimed wi -> that wi's detail; otherwise -> project ready queue.
+- **done / finished** - mid-step -> continue the flow; whole-wi ("wrap up" / "wrap") ->
+  `/pf-stop --wrap`.
+- **begin / start** - with a slug -> claim (Mode B); without -> new wi (Mode A).
+- **status** - inside a claimed wi -> its detail; else -> project ready queue.
 
-When still ambiguous, state your interpretation and confirm before acting.
+When still ambiguous, state your interpretation and confirm first.

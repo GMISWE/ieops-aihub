@@ -8,16 +8,43 @@ description: >
 
 # pf-spec - Spec & Debug Analysis
 
+## DB-aware compatibility (aihub#708 workflow v2)
+
+For a wi whose flow is a **pinned DB workflow** (`pf_get_workflow` -> `steps_version > 0`),
+spec authoring is driven by the stored pinned skill, not the legacy mechanics below. Read
+`using-polyforge/fragments/workflow-v2.md`, then run
+`polyforge engine workflow --work-item='<current>' --continue`. When it says
+`prepare_required`, use `--prepare`, discuss the returned exact instructions and concrete
+inputs with the human, and `--submit` only the schema-conforming authored output. Never
+synthesize the human's answers or approval; rejection returns this same step for revision.
+The remainder of this file is compatibility behavior for wis with no pinned flow.
+
 ## Usage
 
 **Purpose**: Write the spec artifact for the current wi - OpenSpec requirements + scenarios -
 or run root-cause analysis for a bug in the same grammar.
 
-**Pattern**: `/pf-spec`
+**Pattern**: `/pf-spec [--debug]`
 
-**Required**: a currently-claimed `feature` / `critical_bug` wi.
+**Required**: a currently-claimed wi. The routing expectations per `wi_type` (see
+`using-polyforge/fragments/post-claim-routing.md`, the authority for this table):
 
-**Flags**: none
+- `feature` - `/pf-spec` when scope is unclear (alternate; `/pf-execute` is primary)
+- `critical_bug` - `/pf-spec --debug` is the PRIMARY next step (root cause first)
+- `fix_bug` - `/pf-spec --debug` only when the root cause is unclear (alternate;
+  `/pf-execute` is primary)
+
+Any other `wi_type` with a `spec` phase in its scenario graph may use it too - read the
+wi's own step graph, don't assume.
+
+**Flags**:
+- `--debug` - the debug variant: root-cause analysis phrased as a violated Requirement
+  plus a fix Requirement (see Contract). It is the spelling the routing tables use; it
+  changes the CONTRACT emphasis only, not the mechanics below.
+
+**Step bracket honesty**: the examples below bracket `step_id="spec"`. If the wi's
+scenario graph names this phase differently (`pf_get_step` -> `current_step`), bracket
+THAT step id - a hardcoded id that is not the graph's is a silent no-op bracket.
 
 ## Contract
 
@@ -136,3 +163,5 @@ pf_remember(type=<ONE concrete type - e.g. experience.pitfall / fact.architectur
 - "write a spec" / "define requirements" / "scope this out"
 - "debug" / "what's going on with this bug" / "analyze this issue"
 - "root cause" / "why is this failing"
+
+(`--debug` is the variant those last four pick: same grammar, violated-Requirement first.)

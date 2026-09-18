@@ -109,12 +109,16 @@ the union of top-level keys real callers have been handed.
   (`TestRoleLevelIsTheDomainLadder`), which compares contents AND map identity, and the
   vocabulary half by `internal/domain/projects_test.go`
   (`TestRoleLevel_LadderIsExactlyTheValidatedVocabulary`).
-  The `Accessible` computation above is **one** of the ladder's **six** non-test
-  reader functions and reads it in **two** statements, one per direction of this
+  The `Accessible` computation above is **one** of the ladder's **seven**
+  non-test reader functions and reads it in **two** statements, one per direction of this
   response; `checkProjectAccess`'s member loop in `internal/domain/projects.go` is the
-  other `domain.RoleLevel` reader, and the remaining four are in `internal/server`,
+  second `domain.RoleLevel` reader, the skill registry's share gate
+  (`requireSkillShareProjectRight` in `internal/domain/skill_registry_sharing.go`, added
+  aihub#708 Batch 1A: a project-share target requires a RECOGNIZED member role, which the
+  ladder is the only vocabulary for) is the third, and the remaining four are in
+  `internal/server`,
   reading the same map value through the `roleLevel` alias (`checkProjectAccess`,
-  `hasProjectAccess`, `handleListWorkItems`, `checkProjectAccessSoft`) — 1 + 1 + 4 —
+  `hasProjectAccess`, `handleListWorkItems`, `checkProjectAccessSoft`) — 1 + 1 + 1 + 4 —
   where **this card said "three" until 2026-09-10 (`aihub#584`), counting
   domain-spelled STATEMENTS only**, a third of the blast radius of changing the
   ladder, and the set is now censused in both directions by

@@ -515,6 +515,135 @@ var dbCheckPolicies = map[string]dbCheckPolicy{
 			"what this policy asks for — so the guard is deliberately not the constraint.",
 	},
 
+	"skills.skills_name_check": {
+		Where:       "domain.skillNameRE (skill_registry.go), refused in CreateSkill with a 400 quoting the pattern",
+		Disposition: dispMirroredRegexp,
+		GoRegexp:    skillNameRE.String(),
+	},
+	"skills.skills_latest_version_check": {
+		Where:       "PublishSkillVersion (skill_registry.go): the column is only ever written as lockedLatest+1, computed under the publication FOR UPDATE row lock",
+		Disposition: dispServerWritten,
+		Reason: "the caller supplies expected_latest (validated >= 0 BEFORE the database is touched, a 400 on " +
+			"negative), and the value written is lockedLatest+1 — a literal computed from the locked row, never " +
+			"a request field.",
+	},
+	"skill_versions.skill_versions_version_check": {
+		Where:       "PublishSkillVersion (skill_registry.go): version is computed as lockedLatest+1 under the same row lock",
+		Disposition: dispServerWritten,
+		Reason: "version is never caller-supplied; the CAS design makes it the locked row's latest_version plus " +
+			"one, so a value < 1 is arithmetically unreachable (latest_version itself is server-written too, see " +
+			"skills.skills_latest_version_check).",
+	},
+	"skill_versions.skill_versions_digest_check": {
+		Where:       "PublishSkillVersion (skill_registry.go): digest is skillregistry.VersionDigest over the canonical bundle+contract, minted server-side",
+		Disposition: dispServerWritten,
+		Reason: "the sha256:<64 hex> string is computed by internal/skillregistry.VersionDigest and never read " +
+			"from the request; a caller-supplied content_digest is only COMPARED against it (a 400 on mismatch), " +
+			"never stored.",
+	},
+	"skill_versions.skill_versions_visibility_check": {
+		Where:       "domain.skillVisibilityValues / SkillVisibilityList (skill_registry.go), refused in SetSkillVersionVisibility with a 400 naming the value",
+		Disposition: dispMirroredEnum,
+		Column:      "visibility",
+		GoVocab:     SkillVisibilityList(),
+	},
+
+	// ── aihub#708 Batch 2A: the workflow tables (migration 0044) ────────────
+	"work_items.work_items_steps_version_check": {
+		Where:       "UpdateWorkItemWorkflow / pinFirstWorkflowGenerationInTx (workflow_run.go): the pointer is next = current+1, server-computed",
+		Disposition: dispServerWritten,
+		Reason: "steps_version is never caller-supplied; the only writer is the pinning transaction, which " +
+			"computes the next generation number from the locked row, so a value outside the CHECK cannot be written.",
+	},
+	"wi_workflow_generations.wi_workflow_generations_steps_version_check": {
+		Where:       "pinWorkflowGeneration (workflow.go): refuses stepsVersion < 1 before any write",
+		Disposition: dispGuarded,
+		Reason: "the generation number is server-computed AND guarded: pinWorkflowGeneration answers a 500-named " +
+			"refusal for any non-positive value before the caller's transaction can insert a generation row.",
+	},
+	"wi_workflow_generations.wi_workflow_generations_validation_digest_check": {
+		Where:       "workflowGenerationDigest (workflow.go): digest is sha256 over the canonical (steps, grants, step_meta) triple, minted server-side",
+		Disposition: dispServerWritten,
+		Reason: "the sha256:<64 hex> string is computed by workflowGenerationDigest and never read from any " +
+			"request; callers cannot reach the column.",
+	},
+	"wi_workflow_invocations.wi_workflow_invocations_steps_version_check": {
+		Where:       "StartWorkflowStep (workflow_run.go): steps_version is copied from the work item's current pointer, which is >= 1 on this path",
+		Disposition: dispServerWritten,
+		Reason: "the invocation's generation number is read from the work_items row inside the start " +
+			"transaction (the path refuses steps_version == 0 first), so no caller-supplied value reaches the column.",
+	},
+	"wi_workflow_invocations.wi_workflow_invocations_status_check": {
+		Where:       "StartWorkflowStep inserts 'open'; RecordWorkflowResult sets 'recorded'; no route accepts a status value",
+		Disposition: dispServerWritten,
+		Reason: "invocation status is a server-internal lifecycle: the INSERT names 'open' and the only " +
+			"transition is the result transaction's UPDATE, so no request field can carry a value to the column.",
+	},
+	"wi_workflow_results.wi_workflow_results_steps_version_check": {
+		Where:       "RecordWorkflowResult (workflow_run.go): the result's flow_version must equal the current generation (>= 1) or the whole result is refused 409",
+		Disposition: dispGuarded,
+		Reason: "a result naming any generation other than the current one is refused before the INSERT, and " +
+			"the current one is positive by the work_items pointer CHECK's own writer; no illegal value can land.",
+	},
+	"wi_workflow_results.wi_workflow_results_status_check": {
+		Where:       "validateWorkflowResultShape (workflow_run.go): refuses any status outside the five-value vocabulary with a 400 naming the step",
+		Disposition: dispGuarded,
+		Reason: "the worker-supplied status is validated against the same closed vocabulary (completed, " +
+			"incomplete, blocked, provider_error, invalid_result) before the INSERT; Go refuses exactly the CHECK's set.",
+	},
+	"wi_workflow_results.wi_workflow_results_review_verdict_check": {
+		Where:       "validateWorkflowResultShape (workflow_run.go): review steps must carry pass/warn/fail, non-review steps none, else 400",
+		Disposition: dispGuarded,
+		Reason: "the verdict is validated per the generation's frozen step metadata before the INSERT, so an " +
+			"out-of-vocabulary value never reaches the column.",
+	},
+	"wi_workflow_approvals.wi_workflow_approvals_steps_version_check": {
+		Where:       "ApproveWorkflowStep (workflow_run.go): the approval's generation must equal the current one or the request is refused 409",
+		Disposition: dispGuarded,
+		Reason: "same shape as wi_workflow_results_steps_version_check: the current generation is positive by " +
+			"its own writer and a mismatched generation never reaches the INSERT.",
+	},
+	"wi_workflow_approvals.wi_workflow_approvals_artifact_version_check": {
+		Where:       "ApproveWorkflowStep (workflow_run.go): the artifact triple must EQUAL the latest recorded result's, whose version was validated >= 1 at result time",
+		Disposition: dispGuarded,
+		Reason: "an approval can only bind the artifact of a result that already passed " +
+			"validateWorkflowResultShape (version >= 1), and the equality check refuses any other triple first.",
+	},
+	"wi_workflow_approvals.wi_workflow_approvals_artifact_hash_check": {
+		Where:       "ApproveWorkflowStep (workflow_run.go): the artifact triple must EQUAL the latest recorded result's sha256, validated at result time",
+		Disposition: dispGuarded,
+		Reason: "same shape as the version arm: the hash must equal a result-artifact hash that already passed " +
+			"the full-sha256 shape check, so a malformed hash cannot reach the INSERT.",
+	},
+	"wi_workflow_approvals.wi_workflow_approvals_decision_check": {
+		Where:       "ApproveWorkflowStep (workflow_run.go): refuses any decision but approved/rejected with a 400",
+		Disposition: dispGuarded,
+		Reason: "the two-value vocabulary is validated at the door of the approval transaction, mirroring " +
+			"internal/workflow's ApprovalDecision constants; Go refuses exactly the CHECK's set.",
+	},
+	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_kind_check": {
+		Where:       "AuthorizeWorkflowRepair (workflow_run.go): refuses any kind but retry/episode with a 400",
+		Disposition: dispGuarded,
+		Reason:      "the kind is validated before the transaction opens; Go refuses exactly the CHECK's set.",
+	},
+	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_reason_check": {
+		Where:       "AuthorizeWorkflowRepair (workflow_run.go): refuses a trimmed reason outside 10..2000 chars with a 400",
+		Disposition: dispGuarded,
+		Reason:      "the length bounds are validated in Go first, against the same 10..2000 window the CHECK enforces.",
+	},
+	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_failed_steps_version_check": {
+		Where:       "AuthorizeWorkflowRepair (workflow_run.go): the failed result's generation must equal the current one or the authorization is refused 409",
+		Disposition: dispGuarded,
+		Reason: "a failed result from any other generation is refused before the INSERT, and the current " +
+			"generation is positive by its own writer.",
+	},
+	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_status_check": {
+		Where:       "AuthorizeWorkflowRepair inserts 'open'; closeRepairEpisodeIfComplete sets 'closed'; no route accepts a status value",
+		Disposition: dispServerWritten,
+		Reason: "episode status is server-internal: the INSERT names 'open' and the only transition is the " +
+			"result transaction's close, so no request field can reach the column.",
+	},
+
 	"users.users_role_check": {
 		Where:       "domain.userGlobalRoles (user_fields.go), via ValidateUserGlobalRole",
 		Disposition: dispMirroredEnum,

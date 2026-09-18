@@ -115,6 +115,12 @@ func NewRouter(pool *pgxpool.Pool, uiCookieSecret []byte) *echo.Echo {
 	// Projects CRUD + identifier rotation + owner transfer
 	RegisterProjectRoutes(v1, pool)
 
+	// Versioned authenticated skill registry.
+	RegisterSkillRoutes(v1, pool)
+
+	// aihub#708 Batch 2A: WI-owned workflow persistence and control.
+	RegisterWorkflowRoutes(v1, pool)
+
 	// aihub#27 / IEBE-1694: spec/plan artifact HTML viewer
 	RegisterArtifactRoutes(v1, pool)
 
@@ -279,6 +285,11 @@ func handleCreateWorkItem(pool *pgxpool.Pool) echo.HandlerFunc {
 		// Roles travel with the call: blocked_by may name work items in other
 		// projects, and resolveBlockedByRef scopes that to what this caller can
 		// actually see (aihub#357 H1).
+		//
+		// aihub#708 Batch 2A: the registry caller view travels the same way, so
+		// an optional steps= workflow resolves skill refs under the caller's
+		// true scope — a scoped key pins only what its own project can read.
+		req.RegistryCaller = workflowCallerRecord(u)
 		wi, aihubErr := domain.CreateWorkItem(ctx, pool, &req, u.UserID, u.DisplayName, u.ProjectRoles, u.Role)
 		if aihubErr != nil {
 			return writeError(c, aihubErr)

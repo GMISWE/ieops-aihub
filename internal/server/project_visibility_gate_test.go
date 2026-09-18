@@ -180,6 +180,13 @@ var projectRoleReaders = map[string]string{
 
 	"middleware.go:visibleProjects": "bounds",
 
+	// aihub#708 Batch 2A: the workflow routes authorize through
+	// checkProjectAccess exactly like the work-item routes they sit beside;
+	// workflowCallerRecord only copies the caller's role/scope into the
+	// domain UserRecord shape — it decides nothing itself.
+	"routes_workflows.go:handlePutWorkflow":    "authorizes",
+	"routes_workflows.go:workflowCallerRecord": "populates",
+
 	"router.go:handleListWorkItems":             "authorizes",
 	"router.go:handleClaimWorkItem":             "authorizes",
 	"ui_handlers_wi.go:handleUIWIDetail":        "authorizes",

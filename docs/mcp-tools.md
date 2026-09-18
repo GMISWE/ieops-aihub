@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **45 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **52 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```
@@ -202,6 +202,23 @@ carry pipeline identity.
 |---|---|
 | `pf_get_step` | The authoritative step record: `current_step` / `current_step_status` / `version`, plus `completed_steps` — the step history oldest first, retries included, each entry carrying its own `status`, so only a `completed` entry means that step is done. No step graph here: the graph is a scenario template, pinned per work item by `scenario_ref`. |
 | `pf_update_step` | Update the current step (`in_progress`/`completed`/`failed`, heartbeat, artifact summary). `next_step` completes one step and starts its successor in one call. No version/CAS argument and no `pf_get_step` needed first — but **not because one predicate covers the endpoint**. `in_progress` is guarded by the idle predicate; `completed`/`failed` must name the step the server has open (a mismatch is 409 naming both); **neither checks step STATE**, so an idle step with a matching name can still be completed twice. This row said "concurrency is guarded by the server's idle-step predicate" until `aihub#493`: `aihub#398` corrected that sentence in the tool description because it over-promised — a caller reads it as "the server will stop me getting this wrong" — and corrected the description only, leaving this copy asserting the version the server never implemented. `heartbeat` refreshes `step_started_at` and nothing else; there is no lease, and the heartbeat branch returns early, so a `status`/`step_id` sent alongside it goes nowhere. |
+
+## Workflow (7) - `internal/mcp/tools_workflows.go`
+
+The WI-owned workflow surface (aihub#708 Batch 2A): a work item can carry its
+own pinned step flow instead of a scenario-graph template. Grants, invocation
+identities and ordering are derived server-side; the controller-facing tools
+inject attempt credentials from the state file exactly like `pf_update_step`.
+
+| tool | purpose |
+|---|---|
+| `pf_get_workflow` | Read the current pinned flow (exact skill_id + skill_version per step), the append-only generation history, per-step progress with the human-approval state for the latest artifact, and open repair authorizations. Never includes skill content — the bodies stay behind the registry's own access checks. |
+| `pf_update_workflow` | Revise or first pin a workflow generation atomically: latest-accessible refs are resolved to exact versions and the composition validated in one transaction; `expected_steps_version` is the CAS token and `requires_human_session` must be explicit. Refused while a worker is in progress. |
+| `pf_start_workflow_step` | Mint a step invocation for the current attempt. Registry access is re-checked and the flow re-validated at start time; `step_attempt_id` and `producer_id` are SERVER-generated — a worker cannot pre-guess the identity its result must echo. |
+| `pf_workflow_result` | Record one structured StepResult for an open invocation. A stale epoch/generation/attempt or a forged producer changes nothing; a review FAIL pauses the attempt (recoverable, never terminal). The envelope may not carry an approval. |
+| `pf_approve_workflow` | Record a HUMAN decision bound to the exact artifact triple of a step's latest result. Machine credentials are refused whatever role they hold, and there is no actor argument: the authenticated principal is the actor. |
+| `pf_repair_workflow` | Open an explicit recovery authorization (`retry` — one bounded retry of a provider_error; `episode` — repair producer + fresh verification + fresh independent review, open until every role records) binding the exact failed step attempt, under the current attempt's fencing. |
+| `pf_reconcile_workflow` | Fence a dead attempt's open invocations — the explicit controller-reconcile transition (aihub#708 B3). The named attempt is verified against its own row under the work item lock (must belong here, must not be running); superseded invocations refuse stale results and free their steps for replacements by the live attempt. |
 
 ## Dependencies (3) - `internal/mcp/tools_dependency.go`
 

@@ -23,6 +23,12 @@ var wiResolvers = map[string]bool{
 	"GetWorkItem":               true, // internal/domain/work_items.go -> *WorkItem
 	"ResolveVisibleWorkItemRef": true, // internal/domain/work_items.go -> *VisibleWorkItemRef
 	"getWorkItemFn":             true, // internal/server/ui_handlers_wi.go test seam over GetWorkItem
+	// aihub#708 Batch 2A: the workflow row loader, same resolution shape
+	// (`id = $1 OR slug = $1`) returning the WorkItem first, with the workflow
+	// pointer and the error after it. Every workflow route resolves through
+	// exactly these two, so the canonical-id obligation lives in one place.
+	"getWorkflowWIOnTx": true, // internal/domain/workflow_run.go -> *WorkItem (+ *workflowPointer, error)
+	"getWorkflowWI":     true, // internal/domain/workflow_run.go -> *WorkItem (pool twin)
 }
 
 // idResolvers resolve an id-or-slug reference and return the canonical id
@@ -67,6 +73,31 @@ type ParamContract struct {
 }
 
 var canonicalParams = []ParamContract{
+	// ── aihub#708 Batch 2A: the workflow helpers (internal/domain/workflow_run.go).
+	// Every caller resolves through getWorkflowWIOnTx/getWorkflowWI (registered
+	// wiResolvers above) and passes wi.ID; the repair/result/approval routes
+	// never see a slug past that first hop.
+	{File: "internal/domain/workflow_run.go", Func: "insertWorkflowEvent", Param: "wiID",
+		Reason: "every workflow write path calls it with wi.ID off a registered wiResolver row"},
+	{File: "internal/domain/workflow_run.go", Func: "latestWorkflowResults", Param: "wiID",
+		Reason: "checkWorkflowStartOrdering and the GET view pass wi.ID / wp-keyed ids off the same resolver"},
+	{File: "internal/domain/workflow_run.go", Func: "checkWorkflowStartOrdering", Param: "wiID",
+		Reason: "StartWorkflowStep passes w.ID from getWorkflowWIOnTx"},
+	{File: "internal/domain/workflow_run.go", Func: "checkWorkflowStartApprovals", Param: "wiID",
+		Reason: "called only by checkWorkflowStartOrdering, which passes the wiID StartWorkflowStep took from getWorkflowWIOnTx (aihub#708 B4 approval gate)"},
+	{File: "internal/domain/workflow_run.go", Func: "targetStepRejectsLatest", Param: "wiID",
+		Reason: "called only by checkWorkflowStartOrdering, which receives wi.ID from the registered getWorkflowWIOnTx id-or-slug resolver"},
+	{File: "internal/domain/workflow_run.go", Func: "episodeRoleSetComplete", Param: "wiID",
+		Reason: "closeRepairEpisodeIfComplete passes the work_item_id it scanned off the wi_workflow_repair_episodes row (row provenance), so the episode close check reads by canonical id"},
+	{File: "internal/domain/workflow_run.go", Func: "workflowStepMetaFor", Param: "wiID",
+		Reason: "RecordWorkflowResult and AuthorizeWorkflowRepair pass w.ID from getWorkflowWIOnTx"},
+	{File: "internal/domain/workflow_run.go", Func: "loadOpenInvocation", Param: "wiID",
+		Reason: "RecordWorkflowResult passes w.ID from getWorkflowWIOnTx; the invocation row is keyed by it and by the server-minted step_attempt_id"},
+	{File: "internal/domain/workflow_run.go", Func: "resolveRetryLineage", Param: "wiID",
+		Reason: "AuthorizeWorkflowRepair passes w.ID from getWorkflowWIOnTx; the lineage walk reads invocation and authorization rows keyed by it (aihub#708 Batch 2A re-review blocker mem_FHuxXIXI)"},
+	{File: "internal/domain/workflow_run.go", Func: "pinFirstWorkflowGenerationInTx", Param: "wiID",
+		Reason: "called only by CreateWorkItem with the wiID it minted inside the same transaction (NewID, a registered minter)"},
+
 	// ── dependency graph (the aihub#357 surface) ──────────────────────────
 	{File: "internal/domain/dependencies.go", Func: "ListDependencies", Param: "wiID",
 		Reason: "compares wiID to blocked_wi_id/blocking_wi_id; handleListDependencies resolves and passes wi.ID (aihub#357), the UI detail page passes wi.ID through listDependenciesFn"},

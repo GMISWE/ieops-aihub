@@ -30,6 +30,15 @@
 # MISSPELLED" hole; this closes "--target is not LISTED", which no message
 # inside the script could see. Re-apply on refresh, retargeting REQUIRED_ROOTS
 # to the consuming repo's own trees.
+# aihub#708 modification (2026-09-18): docs/workflow-v2 joined REQUIRED_ROOTS
+# the day the tree landed. Its files document the workflow tools published in
+# the same change and quote one (pf_get_workflow), so uncovered_pf_markdown
+# flagged them immediately as markdown nothing covered — the membership guard
+# doing exactly what it was built for, not a defect in it. The tree is
+# SCANNED, not exempted: no baseline entry and no UNSCANNED_PF_MARKDOWN entry
+# was added, because the tree's subject is the live contract, not design
+# history. Re-apply on refresh, retargeting REQUIRED_ROOTS to the consuming
+# repo's own trees.
 #
 # Rules
 # -----
@@ -595,7 +604,25 @@ def empty_scan_error(targets: list, files: list) -> Optional[str]:
 # it. Measured — deleting "tests/scenarios" here left the whole suite green at
 # 38 passing fixtures. A check that takes its subject from the thing being
 # mutated cannot see the mutation.
-REQUIRED_ROOTS = ("plugins", "tests/scenarios")
+#
+# aihub#708 (2026-09-18): docs/workflow-v2 is the first root added BY that
+# guard rather than ahead of it — uncovered_pf_markdown surfaced two of its
+# files (they quote pf_ calls, pf_get_workflow among them) the day the tree
+# landed, and the suite stayed red until the root existed. The tree documents
+# the workflow tools published in the same change, so unlike the docs/ entries
+# in UNSCANNED_PF_MARKDOWN its subject is the LIVE contract, and it is clean
+# against the fresh in-repo schema CI dumps: measured against the stale
+# pre-aihub#708 dump, the only thing the tree reports is the pf_get_workflow
+# call itself, a tool the fresh dump publishes by construction (it is
+# registered in internal/mcp/tools_workflows.go, shipped in the same PR). It
+# is scanned, not exempted — no baseline entry, no UNSCANNED_PF_MARKDOWN
+# entry. The sibling docs/workflow-v2-reliability.md stays outside the root on
+# purpose: no rule of this lint reports anything on it (no pf_xxx(...) call
+# fragment, no un-annotated `|| true` in a bash fence, no ready-queue segment
+# claim), so the membership guard demands nothing of it, and an
+# UNSCANNED_PF_MARKDOWN entry for it would be flagged stale by
+# stale_md_exceptions on arrival.
+REQUIRED_ROOTS = ("plugins", "tests/scenarios", "docs/workflow-v2")
 
 # Files this lint DOES report on and that are deliberately out of scope.
 #

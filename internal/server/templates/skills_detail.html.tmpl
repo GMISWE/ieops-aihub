@@ -1,0 +1,75 @@
+{{define "content"}}
+<section class="ph">
+  <h1>{{if .Skill}}{{.Skill.Name}}{{else}}Skill{{end}}</h1>
+  {{if .Skill}}<span class="sub">{{.Skill.ID}} · owned by {{.Skill.OwnerDisplay}}</span>{{end}}
+  <span style="flex:1"></span><a class="btn sm" href="/ui/skills">All skills</a>
+</section>
+
+{{if .Message}}<div class="empty" style="max-width:none">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="empty" style="max-width:none">{{.Error}}</div>{{end}}
+
+{{if .Skill}}
+<section class="card">
+  <h2>Versions</h2>
+  {{if not .Versions}}<p class="sub">No versions published.</p>{{else}}
+  <div class="event-list">
+    {{range .Versions}}
+    <div class="event-row">
+      <a href="/ui/skills/{{.SkillID}}/versions/{{.Version}}"><strong>v{{.Version}}</strong></a>
+      <span class="badge b-normal">{{.Visibility}}</span>
+      <span class="sub">{{truncate 20 .Digest}} · {{.CreatedAt.UTC.Format "2006-01-02 15:04 UTC"}}</span>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+
+{{if .Version}}
+<section class="card">
+  <h2>Version {{.Version.Version}}</h2>
+  <p class="sub">{{.Version.Visibility}} · digest {{.Version.Digest}} · author {{.Version.AuthorUserID}}</p>
+  <h3>Bundle</h3><pre>{{.Bundle}}</pre>
+  <h3>Runtime contract</h3><pre>{{.Contract}}</pre>
+</section>
+{{end}}
+
+{{if .CanManage}}
+<section class="card">
+  <h2>Publish a version</h2>
+  <p class="sub">Publishing is immutable and private by default. expected_latest is a compare-and-set guard.</p>
+  <form method="POST" action="/ui/skills/{{.Skill.ID}}/versions">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <label>Expected latest <input type="number" name="expected_latest" min="0" value="{{.Skill.LatestVersion}}" required></label>
+    <label>Bundle JSON<textarea name="bundle" rows="10" required placeholder='{"entry":"SKILL.md","files":[{"path":"SKILL.md","content":"..."}],"license":{"name":"MIT"}}'></textarea></label>
+    <label>Runtime contract JSON<textarea name="contract" rows="6" required placeholder='{"capabilities":["authoring"],"runtime":{"interactive":false}}'></textarea></label>
+    <label>Content digest (optional)<input type="text" name="content_digest"></label>
+    <button type="submit" class="btn">Publish private version</button>
+  </form>
+</section>
+
+{{if .Versions}}
+<section class="card">
+  <h2>Version access</h2>
+  <p class="sub">Actions apply only to the exact version selected; future versions inherit nothing.</p>
+  {{range .Versions}}
+  <div class="event-row">
+    <strong>v{{.Version}}</strong><span class="badge b-normal">{{.Visibility}}</span>
+    <form method="POST" action="/ui/skills/{{.SkillID}}/versions/{{.Version}}/shares">
+      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+      <input type="text" name="project" required placeholder="project name"><button type="submit" class="btn sm">Share</button>
+    </form>
+    <form method="POST" action="/ui/skills/{{.SkillID}}/versions/{{.Version}}/shares/revoke">
+      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+      <input type="text" name="project" required placeholder="project name"><button type="submit" class="btn sm">Revoke</button>
+    </form>
+    <form method="POST" action="/ui/skills/{{.SkillID}}/versions/{{.Version}}/visibility">
+      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+      {{if eq .Visibility "private"}}<input type="hidden" name="visibility" value="public"><button type="submit" class="btn sm">Make public</button>{{else}}<input type="hidden" name="visibility" value="private"><button type="submit" class="btn sm">Make private</button>{{end}}
+    </form>
+  </div>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+{{end}}
+{{end}}

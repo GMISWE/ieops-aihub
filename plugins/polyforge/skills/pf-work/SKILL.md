@@ -38,6 +38,16 @@ Invocation modes:
 
 ## Mechanic
 
+### Pinned-workflow handoff
+
+After any successful claim/resume/takeover, read `pf_get_workflow` before choosing a
+scenario skill. If `steps_version > 0`, read
+`using-polyforge/fragments/workflow-v2.md`: a human-session claim's primary next action is
+`polyforge engine workflow --work-item='<slug>' --continue` (then its exact
+`--prepare`/`--submit`/approval instructions), while an unattended claim still dispatches
+drain through the existing post-claim rule. Do not suggest `/pf-spec` or `/pf-plan` as a
+second workflow authority for a pinned flow.
+
 ### Post-claim routing
 
 Two fragments own the two branches, and their names are nearly identical - do not reach for

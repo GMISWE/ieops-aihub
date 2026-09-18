@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
+	"github.com/GMISWE/ieops-aihub/internal/controller"
 	"github.com/GMISWE/ieops-aihub/internal/drain"
 	"github.com/GMISWE/ieops-aihub/internal/engine"
 	"github.com/GMISWE/ieops-aihub/internal/lifecycle"
@@ -205,6 +206,12 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 	}
 	fmt.Fprintf(os.Stderr, "drain: models from %s\n", presetLabel)
 
+	// The legacy scenario path keeps its existing post-wrap cleanup. Pinned DB
+	// workflows deliberately do not receive that callback: automatic cleanup
+	// cannot yet prove a dirty/unshipped worktree is disposable after detach or
+	// partial failure, so preserving it is the only safe default.
+	legacyCleanup := drainCleanup(ctx, wsRoot)
+
 	r := &drain.Runner{
 		Project:  opts.Project,
 		Scope:    scope,
@@ -224,10 +231,17 @@ func RunDrain(ctx context.Context, c *client.Client, wsRoot string, args []strin
 
 		AttemptPaused: q.AttemptPaused,
 
+		Workflow: func(ctx context.Context, claim drain.ClaimInfo) (bool, error) {
+			state, err := controller.Select(ctx, c, claim.WorkItemID)
+			return state != nil, err
+		},
+		ExecuteWorkflow: func(ctx context.Context, claim drain.ClaimInfo, active func(stepID string, stepIndex, stepCount int)) (drain.Outcome, error) {
+			return runPinnedDrainWorkflow(ctx, q, claim, runDir, active)
+		},
 		Startup:     drainStartup(ctx, wsRoot, opts.Project),
 		ResolveRole: drainResolveRole,
 		Dispatch:    dispatchWithPresetModel(tierModels),
-		Cleanup:     drainCleanup(ctx, wsRoot),
+		Cleanup:     legacyCleanup,
 
 		Logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) },
 		Publish: func(s *drain.Snapshot) {
@@ -1405,6 +1419,218 @@ func dispatchStepAgent(ctx context.Context, req drain.DispatchRequest) (drain.Di
 	return drain.DispatchResult{Output: out, ExitErr: runErr}, runErr
 }
 
+// runPinnedDrainWorkflow keeps pinned work completely separate from the legacy
+// scenario bracket/role path, and deliberately does NOT re-implement the
+// workflow loop: controller.Run IS the loop (select → next → one
+// server-fenced invocation → structured result → pure policy), shared with
+// every other mode driver. This adapter only supplies what a drain run owns
+// — the attempt's captured credentials, the run directory for step logs and
+// bundle scratch, and bound pause/complete seams — and maps the driver's
+// terminal answer onto drain's Outcome vocabulary. Cleanup is deliberately
+// absent here: the current forceful cleanup cannot safely judge DB-workflow
+// worktree state.
+//
+// A server read error inside the driver is returned as an error and NEVER
+// selects the legacy path; a pinned workflow that disappears mid-run fails
+// the same way. The legacy scenario engine below runs only for work items
+// the server confirmed have no workflow (Workflow seam returned false).
+func runPinnedDrainWorkflow(ctx context.Context, q *drainQueries, claim drain.ClaimInfo, runDir string, active func(stepID string, stepIndex, stepCount int)) (drain.Outcome, error) {
+	var out drain.Outcome
+	sf, err := config.ResolveStateFile(claim.WorkItemID)
+	if err != nil {
+		return out, config.StateFileMissingErr(claim.WorkItemID, err)
+	}
+	binding := workflowAttemptBinding{
+		AttemptID: sf.AttemptID, ClaimEpoch: sf.ClaimEpoch, SessionSecret: sf.SessionSecret,
+	}
+	if binding.AttemptID != claim.AttemptID || binding.SessionSecret == "" || binding.ClaimEpoch <= 0 {
+		return out, fmt.Errorf("workflow attempt credentials do not match claim")
+	}
+
+	// Read the pinned shape once for observation. controller.Run re-reads and
+	// validates it as the execution authority; this copy only maps step IDs to
+	// stable positions in Snapshot.Active. Publish before entering the driver so
+	// watch/stop can see claimed DB work even while controller startup is still
+	// reading history and binding skills.
+	workflowState, err := controller.Select(ctx, q.c, claim.WorkItemID)
+	if err != nil {
+		return out, fmt.Errorf("read workflow for active snapshot: %w", err)
+	}
+	if workflowState == nil {
+		return out, fmt.Errorf("pinned workflow disappeared before execution")
+	}
+	stepPosition := make(map[string]int, len(workflowState.Steps.Steps))
+	for i, step := range workflowState.Steps.Steps {
+		stepPosition[step.ID] = i + 1
+	}
+	stepCount := len(workflowState.Steps.Steps)
+	initial := workflowState.NextAction().StepID
+	if initial == "" {
+		initial = "workflow completion"
+	}
+	active(initial, stepPosition[initial], stepCount)
+
+	// Intercept the server-fenced start, rather than parsing controller logs, so
+	// every retry/repair updates ActiveWI immediately before the invocation is
+	// minted. The embedded client supplies the remainder of controller.RunAPI.
+	api := &drainWorkflowAPI{Client: q.c, onStep: func(stepID string) {
+		active(stepID, stepPosition[stepID], stepCount)
+	}}
+
+	// The step-log sequence is per STEP for the whole adapter, not per
+	// executeStep call: a step driven again after a hold (an open invocation
+	// reconciled away, a retry authorization picked up) restarts the driver's
+	// own counter, and keying the log path on that would overwrite the
+	// earlier attempt's bytes — the one record a failure is examinable
+	// through afterwards.
+	stepSeq := map[string]int{}
+	res := controller.Run(ctx, api, controller.RunOptions{
+		WorkItemID:  claim.WorkItemID,
+		AttemptID:   claim.AttemptID,
+		Credentials: binding.credentials(),
+		WorkDir:     claim.WorktreeRoot,
+		RunDir:      runDir,
+		StepTimeout: stepTimeout,
+		Logf:        func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) },
+		StepLog: func(stepID string, _ int, output []byte) {
+			stepSeq[stepID]++
+			logPath := drain.StepLogPath(runDir, sf.Slug, stepSeq[stepID], stepID)
+			if mkErr := os.MkdirAll(filepath.Dir(logPath), 0o700); mkErr == nil {
+				_ = os.WriteFile(logPath, output, 0o600)
+			}
+		},
+		PauseAttempt: func(ctx context.Context, reason string) error {
+			if err := binding.ensureCurrent(claim.WorkItemID); err != nil {
+				return err
+			}
+			body := binding.body()
+			body["pause_reason"] = reason
+			_, err := q.c.PauseAttempt(ctx, claim.WorkItemID, body)
+			return binding.classifyMutation(err)
+		},
+		CompleteAttempt: func(ctx context.Context, status, note string) error {
+			// Bind failure and wrap to the credentials captured before the
+			// controller started. A takeover may replace the state file while this
+			// process is still unwinding; it must never lend the stale controller
+			// the successor's identity or let it delete the successor's state.
+			return q.completeWorkflowAttempt(ctx, claim.WorkItemID, status, note,
+				"this attempt executed a pinned DB workflow; workflow results are recorded in wi_workflow_results and intentionally do not create legacy wi_step_state rows",
+				binding)
+		},
+		// No CleanupWorktrees callback on the DB path. The current cleanup is
+		// forceful and cannot distinguish shipped-clean work from a dirty tree or
+		// a failed detach. Preserve the worktree until a safety-aware cleanup is
+		// implemented rather than turning a successful wrap into data loss.
+		CleanupWorktrees: nil,
+	})
+
+	out.Steps = res.Steps
+	out.Err = res.Err
+	switch res.Status {
+	case controller.RunWrapped:
+		fmt.Fprintf(os.Stderr, "workflow: cleanup deferred; preserving %s until safe DB-workflow cleanup is implemented\n", claim.WorktreeRoot)
+		out.Result = drain.ResultWrapped
+		out.Err = ""
+	case controller.RunPaused:
+		out.Result = drain.ResultPaused
+	case controller.RunCancelled:
+		out.Result = drain.ResultCancelled
+	default:
+		out.Result = drain.ResultFailed
+		if out.Err == "" {
+			out.Err = "workflow driver returned no status"
+		}
+	}
+	return out, nil
+}
+
+// drainWorkflowAPI observes the exact moment controller.Run is about to ask
+// the server to mint an invocation. Embedding preserves the complete RunAPI
+// surface while this one override keeps Snapshot.Active current without
+// teaching the controller about drain snapshots.
+type drainWorkflowAPI struct {
+	*client.Client
+	onStep func(string)
+}
+
+func (a *drainWorkflowAPI) StartWorkflowStep(ctx context.Context, wiID string, body any) (map[string]any, error) {
+	if a.onStep != nil {
+		if m, ok := body.(map[string]any); ok {
+			if stepID, _ := m["step_id"].(string); stepID != "" {
+				a.onStep(stepID)
+			}
+		}
+	}
+	return a.Client.StartWorkflowStep(ctx, wiID, body)
+}
+
+var errWorkflowLostOwnership = errors.New("workflow controller lost attempt ownership")
+
+// workflowAttemptBinding is an immutable copy of the identity minted by this
+// run's claim. Lifecycle callbacks use these fields directly; state-file reads
+// below are ownership guards only and never become credentials. That
+// distinction prevents a stale controller from borrowing a takeover's secret.
+type workflowAttemptBinding struct {
+	AttemptID     string
+	ClaimEpoch    int64
+	SessionSecret string
+}
+
+func (b workflowAttemptBinding) credentials() controller.Credentials {
+	return controller.Credentials{
+		AttemptID: b.AttemptID, ClaimEpoch: b.ClaimEpoch, SessionSecret: b.SessionSecret,
+	}
+}
+
+func (b workflowAttemptBinding) body() map[string]any {
+	return map[string]any{
+		"attempt_id": b.AttemptID, "claim_epoch": b.ClaimEpoch, "session_secret": b.SessionSecret,
+	}
+}
+
+func (b workflowAttemptBinding) matches(sf *config.StateFile) bool {
+	return sf != nil && sf.AttemptID == b.AttemptID && sf.ClaimEpoch == b.ClaimEpoch &&
+		sf.SessionSecret == b.SessionSecret
+}
+
+func (b workflowAttemptBinding) ensureCurrent(wiID string) error {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errWorkflowLostOwnership, config.StateFileMissingErr(wiID, err))
+	}
+	if !b.matches(sf) {
+		return fmt.Errorf("%w: %s now names attempt %s at epoch %d, not captured attempt %s at epoch %d",
+			errWorkflowLostOwnership, wiID, sf.AttemptID, sf.ClaimEpoch, b.AttemptID, b.ClaimEpoch)
+	}
+	return nil
+}
+
+func (b workflowAttemptBinding) classifyMutation(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && (apiErr.Code == "ATTEMPT_MISMATCH" ||
+		apiErr.Code == "CONFLICT_EPOCH_MISMATCH") {
+		return fmt.Errorf("%w: %v", errWorkflowLostOwnership, err)
+	}
+	return classifyHubError(err)
+}
+
+// deleteStateIfCurrent removes only the captured attempt's canonical state
+// file. A takeover replacement is preserved. The server has already completed
+// the captured attempt before this runs, so a matching file cannot legitimately
+// be rewritten to a successor without a separate takeover between these two
+// local operations; the immediate re-read is the narrowest guard available at
+// this file boundary.
+func (b workflowAttemptBinding) deleteStateIfCurrent(wiID string) {
+	sf, err := config.ResolveStateFile(wiID)
+	if err != nil || !b.matches(sf) {
+		return
+	}
+	_ = config.DeleteStateFile(wiID)
+}
+
 // ─── engine seams ─────────────────────────────────────────────────────────────
 
 // drainStartup wraps internal/engine's startup sequence. It calls the SAME functions
@@ -2052,6 +2278,15 @@ func (q *drainQueries) UpdateStep(ctx context.Context, wiID string, call engine.
 }
 
 func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note string) error {
+	return q.completeAttempt(ctx, wiID, status, note, "")
+}
+
+// completeAttempt is the shared authenticated completion path. The legacy
+// runner passes noStepsReason="" and therefore retains its exact request.
+// Pinned DB workflows may carry commits without legacy wi_step_state rows, so
+// their adapter supplies the truthful escape-hatch explanation the existing
+// completion endpoint requires in that case.
+func (q *drainQueries) completeAttempt(ctx context.Context, wiID, status, note, noStepsReason string) error {
 	body := map[string]any{"status": status, "note": note}
 	for k, v := range attemptCredentials(wiID) {
 		body[k] = v
@@ -2086,18 +2321,11 @@ func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note s
 		body["force_terminate_step"] = true
 	}
 	if status == "wrapped" {
-		// 🔴 `derived` is REQUIRED on a wrap since aihub#350 (migration 0040) and the server
-		// refuses without it — "an omitted list is refused because …". Sending nothing here made
-		// every wrap fail, so a drain run could execute a work item perfectly and still end
-		// FAILED on the last call; found running a real round for aihub#667.
-		//
-		// An EMPTY list is the honest value, not a placeholder: `derived` is the disposition of
-		// findings this attempt noticed and did not fix, and a headless scheduler has no channel
-		// on which a step agent can report one. Sending [] says "nothing was carried forward",
-		// which is true of A today. When the step agent grows a structured return (aihub#640
-		// `retro_and_crystallize` wants one for retro_worthy anyway), this is where its
-		// dispositions belong.
+		// `derived` is required on every successful wrap.
 		body["derived"] = []any{}
+		if noStepsReason != "" {
+			body["no_steps_reason"] = noStepsReason
+		}
 	}
 	if _, err := q.c.CompleteAttempt(ctx, wiID, body); err != nil {
 		return classifyHubError(err)
@@ -2113,6 +2341,35 @@ func (q *drainQueries) CompleteAttempt(ctx context.Context, wiID, status, note s
 				_ = config.DeleteStateFile(wiID)
 			}
 		}
+	}
+	return nil
+}
+
+// completeWorkflowAttempt is the DB workflow's bound lifecycle seam. It is
+// intentionally separate from completeAttempt: the legacy path keeps reading
+// its state exactly as before, while this path must never rebind to credentials
+// a takeover wrote after the controller started.
+func (q *drainQueries) completeWorkflowAttempt(ctx context.Context, wiID, status, note, noStepsReason string, binding workflowAttemptBinding) error {
+	if err := binding.ensureCurrent(wiID); err != nil {
+		return err
+	}
+	body := binding.body()
+	body["status"] = status
+	body["note"] = note
+	if status == "failed" {
+		body["force_terminate_step"] = true
+	}
+	if status == "wrapped" {
+		body["derived"] = []any{}
+		if noStepsReason != "" {
+			body["no_steps_reason"] = noStepsReason
+		}
+	}
+	if _, err := q.c.CompleteAttempt(ctx, wiID, body); err != nil {
+		return binding.classifyMutation(err)
+	}
+	if status == "wrapped" || status == "failed" {
+		binding.deleteStateIfCurrent(wiID)
 	}
 	return nil
 }

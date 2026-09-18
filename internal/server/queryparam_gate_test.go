@@ -118,29 +118,60 @@ var queryParamReaderFuncs = map[string]bool{
 	"queryCSV":     true,
 }
 
-// queryParamReaderMethods are the method names that hand back caller-supplied
-// request text. `QueryParam` is the one echo idiom this package uses, but the
-// others reach the same bytes by a different route and were each verified to
-// slip past an earlier draft of this gate that only knew the first two:
+// queryParamReaderMethods are the method names that directly hand back caller-
+// supplied request text. QueryParam is the normal echo idiom; FormValue and
+// FormParams also include URL query values under net/http's parsing rules.
 //
-//	c.Request().URL.Query().Get("x")   -> Get
-//	c.FormValue("x")                   -> FormValue
-//
-// Get is deliberately unqualified. Narrowing it to "Get called on a Query()
-// call" would be more precise and would also be the thing to write around, and a
-// false positive here costs one call to the shared reader.
+// A bare method named Get is deliberately NOT in this map. Header.Get and
+// reflect.StructTag.Get are unrelated to query parameters, and classifying
+// every method by spelling makes legitimate strict parsers look like policy
+// bypasses. isQueryParamCall handles Get separately and only when its receiver
+// is visibly sourced from URL.Query or Echo's QueryParams.
 var queryParamReaderMethods = map[string]bool{
 	"QueryParam":  true,
 	"QueryParams": true,
 	"FormValue":   true,
 	"FormParams":  true,
-	"Get":         true,
 }
 
-// isQueryParamCall reports whether e reads caller-supplied request text: an
-// echo.Context reader whatever the receiver is named, or one of this package's
-// own wrappers around one.
+// queryValuesSource reports whether e visibly produces URL query values. This
+// is intentionally syntactic, matching the rest of this gate's one-hop AST
+// model: it recognizes net/http's Request.URL.Query() and Echo's QueryParams(),
+// but not unrelated Query/Get methods from arbitrary types.
+func queryValuesSource(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "QueryParams":
+			found = true
+		case "Query":
+			// Match Request.URL.Query(), not an arbitrary database/client Query.
+			if owner, ok := sel.X.(*ast.SelectorExpr); ok && owner.Sel.Name == "URL" {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// isQueryParamCall reports whether e reads caller-supplied query text. Get is
+// receiver-classified instead of globally name-classified so Header.Get and
+// StructTag.Get do not become false query-param sources.
 func isQueryParamCall(e ast.Expr) bool {
+	// A local bound to URL.Query() is itself a query source, so subsequent
+	// q.Get calls remain tainted even without an inline receiver chain.
+	if queryValuesSource(e) {
+		return true
+	}
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -152,7 +183,50 @@ func isQueryParamCall(e ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	return queryParamReaderMethods[sel.Sel.Name]
+	if queryParamReaderMethods[sel.Sel.Name] {
+		return true
+	}
+	return sel.Sel.Name == "Get" && queryValuesSource(sel.X)
+}
+
+func TestQueryParamReaderClassificationDistinguishesGetReceivers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		expr string
+		want bool
+	}{
+		{"echo query param", `c.QueryParam("limit")`, true},
+		{"echo query values", `c.QueryParams().Get("limit")`, true},
+		{"net http query values", `c.Request().URL.Query().Get("limit")`, true},
+		{"net http values binding", `c.Request().URL.Query()`, true},
+		{"origin header", `c.Request().Header.Get("Origin")`, false},
+		{"json struct tag", `shape.Field(i).Tag.Get("json")`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, err := parser.ParseExpr(tc.expr)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			if got := isQueryParamCall(expr); got != tc.want {
+				t.Fatalf("isQueryParamCall(%s) = %v, want %v", tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQueryValuesLocalRemainsTainted(t *testing.T) {
+	for _, binding := range []string{`q := c.Request().URL.Query()`, `var q = c.Request().URL.Query()`} {
+		file, err := parser.ParseFile(token.NewFileSet(), "fixture.go", "package p; func f() { "+binding+`; strconv.Atoi(q.Get("limit")) }`, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := file.Decls[0].(*ast.FuncDecl).Body
+		tainted := taintedIdents(body)
+		conversion := body.List[1].(*ast.ExprStmt).X
+		if !tainted["q"] || !reachesQueryParam(conversion, tainted) {
+			t.Fatalf("query conversion through local missed: %s", binding)
+		}
+	}
 }
 
 // reachesQueryParam reports whether expression e mentions a tainted identifier

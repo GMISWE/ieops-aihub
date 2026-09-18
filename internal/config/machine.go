@@ -51,6 +51,25 @@ type MachineConfig struct {
 	// user-override layer over internal/roles/definitions (see
 	// UnreadRolesOverrideDir).
 	Roles *MachineRoles `toml:"roles,omitempty"`
+
+	// Models is the machine-local [[models]] catalog (aihub#708): named
+	// {harness, model, effort} routes plus the uses each entry may serve.
+	// It is the NEW path's model source — steps of the new WI workflow
+	// persist the harness-native identity resolved deterministically from
+	// these entries (internal/modelruntime), while [roles]/[roles.presets]
+	// above stay the LEGACY path's tier table and are read only by the legacy
+	// role/agent generators and drain. The two are not merged and neither
+	// silently overrides the other (spec D9: conflicting pinning must be
+	// explicit).
+	//
+	// Optional: a machine that never sets it has no new-path routes, and every
+	// new-path dispatch preflight refuses with "candidate not in the local
+	// catalog" rather than inventing a route. Strict validation lives in
+	// ValidateModels; effort here is the uniform public vocabulary
+	// (config.ModelEfforts), never a harness-native-only token such as
+	// "xhigh"/"max"/"minimal"/"off" — those are refused so no entry can claim
+	// a level the uniform adapter cannot express on all four harnesses.
+	Models []MachineModel `toml:"models,omitempty"`
 }
 
 // MachineRoles is the `[roles]` table in ~/.polyforge/config.toml.

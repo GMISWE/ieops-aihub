@@ -1,0 +1,12 @@
+provider        model                context  max-out  thinking  images
+sub2api-claude  pi-claude-fable-5    1M       16.4K    yes       yes   
+sub2api-claude  pi-claude-haiku-4.5  1M       16.4K    yes       yes   
+sub2api-claude  pi-claude-opus-5     1M       16.4K    yes       yes   
+sub2api-claude  pi-claude-sonnet-5   1M       16.4K    yes       yes   
+sub2api-glm     glm-5.3              1M       16.4K    yes       no    
+sub2api-glm     glm-5.3-flash        1M       16.4K    yes       no    
+sub2api-grok    grok-4.6             500K     16.4K    yes       yes   
+sub2api-openai  gpt-5.6-luna         1M       16.4K    yes       yes   
+sub2api-openai  gpt-5.6-sol          1M       16.4K    yes       yes   
+sub2api-openai  gpt-5.6-terra        1M       16.4K    yes       yes   
+sub2api-openai  gpt-6-astra          1M       16.4K    yes       yes   

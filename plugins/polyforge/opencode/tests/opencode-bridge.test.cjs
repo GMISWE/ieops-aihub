@@ -240,6 +240,56 @@ test('tool.execute.after payload passes the WORKSPACE ROOT as cwd, not the workt
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+test('tool.execute.after forwards the ACTUAL tool result, and the hook confirms/rejects it', async () => {
+  // tool.execute.after's second hook argument IS the tool's result — for MCP tools the
+  // raw MCP CallToolResult (measured against opencode 1.18.30's compiled source; MCP
+  // errors throw BEFORE the trigger, so reaching "after" means success for MCP tools).
+  // A stub `{}` used to be the whole tool_response: the chain hook (rightly) refuses an
+  // unconfirmed empty, so on opencode the chain could never advance. The forward must
+  // carry the real content and any error markers; the shared hook's own predicate must
+  // confirm the success and refuse the error, keeping the two contracts tied.
+  const hook = require(path.join(ROOT, 'bin/pf-chain-hook.cjs'));
+  const tmp = makeWorkspace();
+  const seen = [];
+  const h = mount({
+    hooks: { 'tool.execute.after': [{ matcher: '^polyforge_pf_update_step$', match: 'toolName', bash: 'true' }] },
+    exec: async (cmd, payload) => { seen.push(JSON.parse(payload)); return { stdout: '', stderr: '', timedOut: false, failed: false }; },
+    directory: tmp,
+  });
+  const okResult = { content: [{ type: 'text', text: '{"current_step":"write_spec","version":2}' }] };
+  await h['tool.execute.after'](
+    { tool: 'polyforge_pf_update_step', sessionID: 's', callID: 'c', args: { step_id: 's', status: 'completed' } },
+    okResult,
+  );
+  await h['tool.execute.after'](
+    { tool: 'polyforge_pf_update_step', sessionID: 's', callID: 'c', args: { step_id: 's', status: 'completed' } },
+    { content: [{ type: 'text', text: '409 CAS failed' }], isError: true },
+  );
+  assert.deepStrictEqual(seen[0].tool_response, okResult, 'the raw MCP result must be forwarded, not a stub');
+  assert.strictEqual(hook.successfulResponse(seen[0].tool_response), true, 'forwarded success must be confirmed by the hook');
+  assert.strictEqual(hook.successfulResponse(seen[1].tool_response), false, 'forwarded error markers must be refused by the hook');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('normalizeToolResult maps every observed result shape, and invents nothing', () => {
+  // MCP shape: passed through untouched (content + structuredContent + markers).
+  const mcp = { content: [{ type: 'text', text: 'ok' }], structuredContent: { a: 1 } };
+  assert.deepStrictEqual(bridge.normalizeToolResult(mcp), mcp);
+  // Built-in shape (title/output/metadata): the output STRING becomes a text item.
+  assert.deepStrictEqual(
+    bridge.normalizeToolResult({ title: 'bash', output: 'done', metadata: {} }),
+    { content: [{ type: 'text', text: 'done' }] },
+  );
+  // An empty built-in output stays empty — the hook must fail closed on it.
+  assert.deepStrictEqual(bridge.normalizeToolResult({ title: 'bash', output: '', metadata: {} }), {});
+  assert.deepStrictEqual(bridge.normalizeToolResult(undefined), {});
+  assert.deepStrictEqual(bridge.normalizeToolResult('text'), {});
+  // Error markers always survive the normalization.
+  assert.strictEqual(bridge.normalizeToolResult({ content: [], isError: true }).isError, true);
+  assert.strictEqual(bridge.normalizeToolResult({ content: [], success: false }).success, false);
+  assert.strictEqual(bridge.normalizeToolResult({ content: [], error: 'x' }).error, 'x');
+});
+
 test('tool.execute.after: no workspace root found -> silently does nothing (no throw, no exec)', async () => {
   let ran = false;
   const h = mount({

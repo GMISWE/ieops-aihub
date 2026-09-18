@@ -948,6 +948,11 @@ func buildAppNav(active, theme string, user *UserContext) htmltemplate.HTML {
 	} else {
 		b.WriteString("<a href=\"/ui/memories\">Memories</a>")
 	}
+	if active == "skills" {
+		b.WriteString("<a href=\"/ui/skills\" class=\"pf-active\">Skills</a>")
+	} else {
+		b.WriteString("<a href=\"/ui/skills\">Skills</a>")
+	}
 	b.WriteString("</nav>\n")
 	b.WriteString("  <span class=\"pf-appnav-spacer\"></span>\n")
 	b.WriteString("  <div class=\"pf-theme-seg\" id=\"pf-theme-seg\" role=\"group\" aria-label=\"Color theme\">\n")

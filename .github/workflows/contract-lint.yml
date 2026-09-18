@@ -64,6 +64,14 @@ on:
       - 'internal/cli/**'
       - 'internal/coding/**'
       - 'internal/config/**'
+      # New at aihub#708, and added in the SAME change that created the
+      # packages rather than after a job silently failed to run: cmd/polyforge
+      # links all four — internal/cli's drain and engine commands call
+      # internal/controller, whose driver materializes internal/skillregistry
+      # bundles/contracts, executes them on internal/modelruntime, and records
+      # internal/workflow step results — so the "paths: filter covers every
+      # package the plugin links" step below would go red without these lines.
+      - 'internal/controller/**'
       - 'internal/domain/**'
       - 'internal/drain/**'
       - 'internal/embedding/**'
@@ -77,9 +85,12 @@ on:
       # shipped through the hole (aihub#326).
       - 'internal/lifecycle/**'
       - 'internal/mcp/**'
+      - 'internal/modelruntime/**'
       - 'internal/render/**'
       - 'internal/roles/**'
+      - 'internal/skillregistry/**'
       - 'internal/version/**'
+      - 'internal/workflow/**'
       - 'pkg/client/**'
       - 'cmd/polyforge/**'
       - 'scripts/pf_contract_lint.py'

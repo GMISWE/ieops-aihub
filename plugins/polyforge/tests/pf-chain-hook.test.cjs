@@ -7,16 +7,18 @@ const ok = { content: [{ type: 'text', text: '{"status":"ok"}' }] };
 const base = () => ({ wi: 'aihub#71', completed: [], active: null, exec: { done: [], active: null }, status: 'running' });
 const step = (chain, input, response = ok) => applyEvent(chain, 'polyforge_pf_update_step', input, response);
 
-test('prefixes and legacy spec/plan artifact forms', () => {
+test('prefixes and legacy spec/plan artifact forms: pi prefix tool name (polyforge_) is handled; Copilot prefix tool name (polyforge-) is handled; Codex prefix tool name (mcp__polyforge__) is handled; pi prefix: unrelated polyforge_ tool is inert', () => {
   assert.equal(mapStep('write_spec'), 'spec');
   for (const prefix of ['', 'mcp__polyforge__', 'mcp__plugin_polyforge_polyforge__', 'polyforge-', 'polyforge_']) {
     assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'methodology.spec' }, ok).completed, ['spec']);
     assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'spec' }, ok).completed, ['spec']);
     assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'methodology.plan' }, ok).completed, ['plan']);
   }
+  // An unrelated polyforge-prefixed tool must not advance the workflow cache.
+  assert.deepEqual(applyEvent(base(), 'polyforge_pf_get_work_item', { type: 'spec' }, ok), base());
 });
 
-test('only confirmed successful responses advance or delete', () => {
+test('pi prefix: update_step and wrap fire identically; only confirmed successful responses advance or delete', () => {
   const input = { status: 'completed', step_id: 'write_spec' };
   // Refused: missing, empty, error-marked, or "success" with no actual result behind
   // it — a bridge that drops the real result must never advance the cache.

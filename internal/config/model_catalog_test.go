@@ -222,8 +222,8 @@ func TestValidateModelsProblems(t *testing.T) {
 			}
 			for _, sub := range tc.wantSub {
 				if !strings.Contains(err.Error(), sub) {
-				t.Errorf("error missing %q:\n%s", sub, err)
-			}
+					t.Errorf("error missing %q:\n%s", sub, err)
+				}
 			}
 		})
 	}

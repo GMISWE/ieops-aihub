@@ -624,12 +624,12 @@ var dbCheckPolicies = map[string]dbCheckPolicy{
 	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_kind_check": {
 		Where:       "AuthorizeWorkflowRepair (workflow_run.go): refuses any kind but retry/episode with a 400",
 		Disposition: dispGuarded,
-		Reason: "the kind is validated before the transaction opens; Go refuses exactly the CHECK's set.",
+		Reason:      "the kind is validated before the transaction opens; Go refuses exactly the CHECK's set.",
 	},
 	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_reason_check": {
 		Where:       "AuthorizeWorkflowRepair (workflow_run.go): refuses a trimmed reason outside 10..2000 chars with a 400",
 		Disposition: dispGuarded,
-		Reason: "the length bounds are validated in Go first, against the same 10..2000 window the CHECK enforces.",
+		Reason:      "the length bounds are validated in Go first, against the same 10..2000 window the CHECK enforces.",
 	},
 	"wi_workflow_repair_episodes.wi_workflow_repair_episodes_failed_steps_version_check": {
 		Where:       "AuthorizeWorkflowRepair (workflow_run.go): the failed result's generation must equal the current one or the authorization is refused 409",

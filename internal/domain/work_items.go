@@ -121,6 +121,7 @@ type WorkItemStepState struct {
 //
 // A nil RequiresHumanSession means "omitted", which stores NULL — the third
 // state, not a default of false. See WorkItem.RequiresHumanSession.
+//
 //	Steps is the OPTIONAL pinned-workflow form (aihub#708 Batch 2A): a
 //	new-flow work item is created WITH its first generation. Resolution and
 //	validation run inside CreateWorkItem's own transaction, so an invalid
@@ -137,24 +138,24 @@ type WorkItemStepState struct {
 //	bind; a direct Go caller that forgets it gets a 500, not a silent wider
 //	access view.
 type CreateWorkItemRequest struct {
-	Project              string          `json:"project"`
-	Goal                 string          `json:"goal"`
-	Scenario             string          `json:"scenario"`
-	Priority             string          `json:"priority"`
-	WIType               *string         `json:"wi_type"`
-	RequiresHumanSession *bool           `json:"requires_human_session"`
-	Milestone            *string         `json:"milestone"`
-	Labels               []string        `json:"labels"`
-	DeclaredResources    json.RawMessage `json:"declared_resources"`
-	ParentWorkItemID     *string         `json:"parent_work_item_id"`
-	BlockedBy            []string        `json:"blocked_by"`
-	Source               string          `json:"source"`
-	Attrs                json.RawMessage `json:"attrs"`
-	Content              *string         `json:"content"`
-	ForceCreate          bool            `json:"force_create"`
-	ForceReason          string          `json:"force_reason"`
+	Project              string             `json:"project"`
+	Goal                 string             `json:"goal"`
+	Scenario             string             `json:"scenario"`
+	Priority             string             `json:"priority"`
+	WIType               *string            `json:"wi_type"`
+	RequiresHumanSession *bool              `json:"requires_human_session"`
+	Milestone            *string            `json:"milestone"`
+	Labels               []string           `json:"labels"`
+	DeclaredResources    json.RawMessage    `json:"declared_resources"`
+	ParentWorkItemID     *string            `json:"parent_work_item_id"`
+	BlockedBy            []string           `json:"blocked_by"`
+	Source               string             `json:"source"`
+	Attrs                json.RawMessage    `json:"attrs"`
+	Content              *string            `json:"content"`
+	ForceCreate          bool               `json:"force_create"`
+	ForceReason          string             `json:"force_reason"`
 	Steps                []WorkflowStepSpec `json:"steps,omitempty"`
-	RegistryCaller       *UserRecord      `json:"-"`
+	RegistryCaller       *UserRecord        `json:"-"`
 }
 
 // UpdateWorkItemRequest is the parsed body for PATCH /v1/work_items/:id.

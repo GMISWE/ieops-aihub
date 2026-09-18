@@ -200,7 +200,7 @@ func ValidateModels(models []MachineModel) error {
 			if firstName, dup := triples[key]; dup {
 				problems = append(problems, fmt.Sprintf(
 					"%s (name %q) pins the same route as entry named %q (harness=%q model=%q effort=%q); "+
-					"a duplicate route would silently resolve to the last entry and ITS uses policy — remove one",
+						"a duplicate route would silently resolve to the last entry and ITS uses policy — remove one",
 					prefix, m.Name, firstName, m.Harness, m.Model, m.Effort))
 			} else {
 				triples[key] = m.Name

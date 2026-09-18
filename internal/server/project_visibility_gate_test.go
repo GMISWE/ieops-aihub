@@ -184,8 +184,8 @@ var projectRoleReaders = map[string]string{
 	// checkProjectAccess exactly like the work-item routes they sit beside;
 	// workflowCallerRecord only copies the caller's role/scope into the
 	// domain UserRecord shape — it decides nothing itself.
-	"routes_workflows.go:handlePutWorkflow":     "authorizes",
-	"routes_workflows.go:workflowCallerRecord":  "populates",
+	"routes_workflows.go:handlePutWorkflow":    "authorizes",
+	"routes_workflows.go:workflowCallerRecord": "populates",
 
 	"router.go:handleListWorkItems":             "authorizes",
 	"router.go:handleClaimWorkItem":             "authorizes",

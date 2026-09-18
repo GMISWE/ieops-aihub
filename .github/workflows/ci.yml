@@ -5778,6 +5778,53 @@ jobs:
           ! grep -q -- '--- SKIP' wrap_no_steps_recorded.log \
             || { echo "::error::the aihub#684 AC8 wrap-convergence test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
+      # aihub#708: Workflow-v2's DB surface is not covered by the ordinary
+      # unit step because that step deliberately unsets AIHUB_TEST_DB. Keep
+      # the whole qualification together: registry privacy/CAS, atomic flow
+      # creation and pinning, exact approval, FAIL -> pause -> resumed repair
+      # episode, retry lineage/fencing, and the HTTP/client seed smoke. The
+      # pure seed body and plugin bridge checks run here too so the final gate
+      # cannot publish server wiring while omitting Batch4's base_ref and
+      # privacy-preserving session bridges.
+      - name: aihub#708 workflow-v2 integration and migration qualification
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          GOWORK=off go test ./internal/domain/ -run '^(TestSkillRegistry|TestWorkflow)' -count=1 -v 2>&1 | tee workflow_v2_domain.log
+          for want in TestSkillRegistryPublishCASAndRetention \
+                      TestSkillRegistrySharingAndLatestAccessible \
+                      TestWorkflowCreatePinsAtomically \
+                      TestWorkflowApprovalHumanOnlyExactArtifact \
+                      TestWorkflowReviewFailPausesNotTerminal \
+                      TestWorkflowEpisodeOpenReplacementOldApprovalRefusesSuccessors \
+                      TestWorkflowReconcileFencesDeadAttemptInvocations; do
+            grep -q -- "--- PASS: $want (" workflow_v2_domain.log \
+              || { echo "::error::$want did not run; workflow-v2 lifecycle qualification is incomplete"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' workflow_v2_domain.log \
+            || { echo "::error::a workflow-v2 domain test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          GOWORK=off go test ./internal/server/ -run '^(TestSkillRoutesAuthVersionsAndExpectedLatest|TestUISkillWriteRoutesDB|TestWorkflowV2SeedSmokeThroughAuthenticatedAPI)$' -count=1 -v 2>&1 | tee workflow_v2_server.log
+          for want in TestSkillRoutesAuthVersionsAndExpectedLatest TestUISkillWriteRoutesDB TestWorkflowV2SeedSmokeThroughAuthenticatedAPI; do
+            grep -q -- "--- PASS: $want (" workflow_v2_server.log \
+              || { echo "::error::$want did not run; the authenticated registry/seed route is not qualified"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' workflow_v2_server.log \
+            || { echo "::error::a workflow-v2 server test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
+          GOWORK=off go test ./internal/skillregistry/ -run '^(TestSeed|TestApplySeed|TestApplyImport|TestBuildImportedBundle)' -count=1 -v 2>&1 | tee workflow_v2_seed.log
+          grep -q -- '--- PASS: TestSeedVerificationBodyAssignsBaseRefBeforeMergeBase (' workflow_v2_seed.log \
+            || { echo "::error::Batch4 verification base_ref regression did not run"; exit 1; }
+          grep -q -- '--- PASS: TestApplySeedSeedsAFreshRegistryThenIsIdempotent (' workflow_v2_seed.log \
+            || { echo "::error::Batch4 deterministic seed idempotency regression did not run"; exit 1; }
+          ! grep -q -- '--- SKIP' workflow_v2_seed.log \
+            || { echo "::error::a Batch4 seed/import test SKIPped; this suite requires no optional environment"; exit 1; }
+
+          node --test plugins/polyforge/tests/pi-bridge.test.cjs plugins/polyforge/opencode/tests/opencode-bridge.test.cjs 2>&1 | tee workflow_v2_bridges.log
+          ! grep -q -- '^not ok ' workflow_v2_bridges.log \
+            || { echo "::error::a workflow-v2 privacy/session bridge test failed"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

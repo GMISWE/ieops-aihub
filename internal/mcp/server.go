@@ -168,6 +168,7 @@ func (s *Server) registerAll() {
 	s.registerMemoryTools()
 	s.registerConflictTools()
 	s.registerStepTools()
+	s.registerWorkflowTools()
 	s.registerDependencyTools()
 	s.registerCodingTools()
 	s.registerProjectTools()

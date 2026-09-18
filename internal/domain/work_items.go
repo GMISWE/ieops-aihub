@@ -121,6 +121,21 @@ type WorkItemStepState struct {
 //
 // A nil RequiresHumanSession means "omitted", which stores NULL — the third
 // state, not a default of false. See WorkItem.RequiresHumanSession.
+//	Steps is the OPTIONAL pinned-workflow form (aihub#708 Batch 2A): a
+//	new-flow work item is created WITH its first generation. Resolution and
+//	validation run inside CreateWorkItem's own transaction, so an invalid
+//	composition refuses the whole create — no partial work item, no half-pinned
+//	generation (spec D4). A nil Steps keeps the legacy no-workflow path,
+//	byte-identical to before.
+//
+//	RequiresHumanSession must be EXPLICIT when Steps is set (spec D5): a
+//	workflow-bearing work item is classified at birth.
+//
+//	RegistryCaller is NOT a wire field: the routes set it from the
+//	authenticated UserContext so skill resolution applies the SAME scoped-key
+//	confinement the registry itself applies. json:"-" keeps it out of every
+//	bind; a direct Go caller that forgets it gets a 500, not a silent wider
+//	access view.
 type CreateWorkItemRequest struct {
 	Project              string          `json:"project"`
 	Goal                 string          `json:"goal"`
@@ -138,6 +153,8 @@ type CreateWorkItemRequest struct {
 	Content              *string         `json:"content"`
 	ForceCreate          bool            `json:"force_create"`
 	ForceReason          string          `json:"force_reason"`
+	Steps                []WorkflowStepSpec `json:"steps,omitempty"`
+	RegistryCaller       *UserRecord      `json:"-"`
 }
 
 // UpdateWorkItemRequest is the parsed body for PATCH /v1/work_items/:id.
@@ -636,6 +653,34 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	)
 	if err != nil {
 		return nil, dbErr(err, "failed to emit work_item_filed event")
+	}
+
+	// aihub#708 Batch 2A: an optional pinned workflow rides the SAME
+	// transaction. Resolution (latest-accessible → exact version), grant
+	// derivation and pure validation all run inside this tx, and any refusal
+	// propagates — an invalid composition leaves NO work item behind (spec
+	// D4's "atomic create/pin", and the Requirement's "the whole invalid flow
+	// is refused, without partial WI/version bindings").
+	if req.Steps != nil {
+		if req.RequiresHumanSession == nil {
+			return nil, NewErr(ErrBadRequest,
+				"requires_human_session is required when creating a work item with steps: a workflow-bearing work item needs an explicit human-session classification")
+		}
+		if req.RegistryCaller == nil {
+			// Wiring defect, not a caller error: the routes must set the
+			// registry caller view. Refuse rather than resolve with a wider
+			// (unscoped) view than the authenticated principal holds.
+			return nil, NewErr(ErrInternalError,
+				"steps were supplied but the create path was not given the caller's registry view; refusing to resolve skill refs")
+		}
+		if aihubErr := pinFirstWorkflowGenerationInTx(ctx, tx, wiID, req.Project, callerUserID,
+			workflowRevisionInput{
+				Caller:               req.RegistryCaller,
+				RequiresHumanSession: *req.RequiresHumanSession,
+				Steps:                req.Steps,
+			}); aihubErr != nil {
+			return nil, aihubErr
+		}
 	}
 
 	// Insert blocked_by dependencies, one 'blocks' edge and one

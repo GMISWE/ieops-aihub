@@ -38,7 +38,14 @@ ready queue, or which items are stalled/blocked.
    > an id already names one wi. Before that, `ids` reached no forwarding table
    > and no `project` was sent, so this call was a hard 400 and never ran.
 
-2. ```
+2. **Pinned DB workflow check (aihub#708)**: call `pf_get_workflow(work_item_id=<current>)`.
+   If `steps_version > 0`, render the step row(s) from the STORED flow's progress (per-step
+   status, review verdict, approval state, open invocation) - the legacy `step_state` is
+   absent for workflow wis BY DESIGN (their results live in the workflow tables and create
+   no `wi_step_state` rows), so do not report "no steps" for them. If `steps_version == 0`,
+   use the `step_state` from call 1 as before.
+
+3. ```
    pf_read_events(
      work_item_id=<current>,
      limit=5,
@@ -46,7 +53,7 @@ ready queue, or which items are stalled/blocked.
    )
    ```
 
-3. Render three-segment output with full wi fields + last 5 events.
+4. Render three-segment output with full wi fields + last 5 events.
 
 ---
 

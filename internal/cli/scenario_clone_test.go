@@ -664,7 +664,7 @@ var scenarioPathBanOnlyDocs = []struct {
 	rel    string
 	anchor string
 }{
-	{"skills/pf-crystallize/SKILL.md", "### Step 4: Common skill extraction"},
+	{"skills/pf-crystallize/SKILL.md", "### Step 5 (LEGACY): scenario-repo branch"},
 }
 
 // legacyScenarioSpellings are the derivations that drop the owner. Any one of

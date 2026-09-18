@@ -543,12 +543,15 @@ rewrite the site into one of the recognised ones.`, s.File, s.Line, s.Src)
 // re-adding a site, where absence reads as "this file is not part of the family",
 // which is the truth.
 var stateRefusalCallSites = map[string]int{
+	"internal/cli/drain.go":           2,
+	"internal/cli/engine.go":          1,
 	"internal/coding/scenario.go":     1,
 	"internal/mcp/tools_coding.go":    2,
 	"internal/mcp/tools_events.go":    1,
 	"internal/mcp/tools_lifecycle.go": 3,
 	"internal/mcp/tools_memory.go":    3,
 	"internal/mcp/tools_step.go":      1,
+	"internal/mcp/tools_workflows.go": 4,
 }
 
 // TestStateRefusalCallSitesAreAccountedFor pins the inventory above against the
@@ -642,7 +645,8 @@ type stateRefusalExemption struct {
 // stateRefusalExemptSites are the config.ResolveStateFile call sites that must
 // NOT be converted.
 //
-// There are 17 such call sites in production and 11 are members of this family.
+// There are 26 such call sites in production and 18 are members of this family
+// (aihub#708 added the workflow tools plus the shared controller/CLI adapters).
 // Writing that down is the point: "unify the wording" is exactly the kind of
 // instruction that gets over-applied, and the second entry below is one an
 // over-eager unification would visibly damage.
@@ -764,13 +768,14 @@ func TestStateRefusalExemptionsStillSayWhatTheyMean(t *testing.T) {
 			members++
 		}
 	}
-	if len(sites) != 17 || members != 11 {
-		t.Errorf("stateRefusalExemptSites' comment says 17 call sites of which 11 are members; the tree "+
-			"has %d and %d. Update the sentence in the same change — the pair before this one (16 and "+
-			"12) held only until aihub#446 retired the three artifact-action tools, and the pair before "+
+	if len(sites) != 26 || members != 18 {
+		t.Errorf("stateRefusalExemptSites' comment says 26 call sites of which 18 are members; the tree "+
+			"has %d and %d. Update the sentence in the same change — the pair before this one (20 and "+
+			"14) held only until aihub#708 B3 added the reconcile tool's member site, which held only "+
+			"until aihub#708 Batch 2A added three member sites in internal/mcp/tools_workflows.go, "+
+			"which held only until aihub#446 retired the three artifact-action tools; the pair before "+
 			"that (18 and 14) went stale the moment aihub#448 deleted tools_release.go's two sites and "+
-			"stayed that way because nothing checked it; aihub#667 moved it 15 -> 17 by adding two "+
-			"NON-member sites in internal/cli/drain.go", len(sites), members)
+			"stayed that way because nothing checked it", len(sites), members)
 	}
 
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/mcp/tools_coding.go"))

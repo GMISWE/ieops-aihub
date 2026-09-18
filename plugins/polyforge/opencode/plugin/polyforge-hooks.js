@@ -234,6 +234,38 @@ function extractDeny(out) {
 	return typeof reason === "string" && reason ? reason : "blocked by polyforge hook";
 }
 
+/**
+ * Normalize the runtime's tool result into the Claude Code-shaped tool_response the
+ * shared hook scripts parse.
+ *
+ * MEASURED against opencode's own compiled source (1.18.30, the same round that pinned
+ * the bare "bash" id and the `sanitize(serverKey)+"_"+sanitize(toolName)` join):
+ * `tool.execute.after`'s second hook argument is, for MCP tools, the RAW MCP
+ * CallToolResult — `{content: [...], structuredContent?, isError?}` — because the
+ * prompt path triggers it with the MCP execute's return value directly, and opencode's
+ * own execute guarantees non-empty content on success (it synthesizes a text item from
+ * structuredContent when content comes back empty). MCP tool ERRORS throw BEFORE the
+ * trigger, so for the tools this bridge routes, reaching "after" already means the tool
+ * succeeded — but the error markers are still forwarded when present so a future runtime
+ * change cannot turn a failure into an unverified success. Built-in tools pass
+ * `{title, output, metadata}` instead (output is the tool's text); the wrapper shape is
+ * normalized too, so nothing is invented: a missing result stays missing and the chain
+ * hook fails closed on it (it accepts explicit, non-empty success only — never empty).
+ */
+function normalizeToolResult(out) {
+	if (!out || typeof out !== "object" || Array.isArray(out)) return {};
+	const response = {};
+	if (Array.isArray(out.content)) response.content = out.content;
+	else if (typeof out.output === "string" && out.output) response.content = [{ type: "text", text: out.output }];
+	if (out.isError === true) response.isError = true;
+	if (out.success === false) response.success = false;
+	if (out.error) response.error = out.error;
+	if (out.structuredContent && typeof out.structuredContent === "object" && !Array.isArray(out.structuredContent)) {
+		response.structuredContent = out.structuredContent;
+	}
+	return response;
+}
+
 // ─────────────────────────── the bridge ───────────────────────────
 
 /**
@@ -314,7 +346,12 @@ function createBridge(opts) {
 		},
 
 		// ── tool.execute.after -> pf-chain-hook.cjs (wi lifecycle chain tracking) ──
-		"tool.execute.after": async (input) => {
+		//
+		// The SECOND hook argument is the tool's actual result (see normalizeToolResult's
+		// doc comment for how that was measured): forwarding it — instead of a stub `{}` that
+		// the chain hook must refuse — is what lets the chain cache advance on opencode at
+		// all, while error markers keep a failed call from advancing it.
+		"tool.execute.after": async (input, output) => {
 			const toolName = (input && input.tool) || "";
 			if (!toolName || !workspaceRoot) return;
 			for (const entry of entriesFor("tool.execute.after")) {
@@ -322,7 +359,7 @@ function createBridge(opts) {
 				const payload = JSON.stringify({
 					tool_name: toolName,
 					tool_input: (input && input.args) || {},
-					tool_response: {},
+					tool_response: normalizeToolResult(output),
 					cwd: workspaceRoot,
 				});
 				await exec(entry.bash, payload, hookEnv(), entry.timeoutSec || 10);
@@ -374,6 +411,7 @@ module.exports.loadHookConfig = loadHookConfig;
 module.exports.findWorkspaceRoot = findWorkspaceRoot;
 module.exports.resolvePluginRoot = resolvePluginRoot;
 module.exports.extractDeny = extractDeny;
+module.exports.normalizeToolResult = normalizeToolResult;
 module.exports.parseJSON = parseJSON;
 module.exports.runHook = runHook;
 module.exports.hooksJsonPath = hooksJsonPath;

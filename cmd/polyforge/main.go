@@ -229,6 +229,14 @@ func runCLI(ctx context.Context, args []string) {
 			fatalf("%s", noAPIKey)
 		}
 		cli.RunArtifact(ctx, aihubClient, args[1:])
+	case "skills":
+		// Explicit registry bootstrap/import. The caller's ordinary API key is
+		// the authority; project-scoped keys are refused by the server and every
+		// published version remains private until a separate sharing action.
+		if aihubClient == nil {
+			fatalf("%s", noAPIKey)
+		}
+		cli.RunSkills(ctx, aihubClient, args[1:])
 	case "roles":
 		// No aihubClient needed: purely local (embedded role YAMLs + mc.Roles).
 		//
@@ -327,6 +335,19 @@ Git helpers (machine-user):
 
 Artifact viewer:
   artifact view <memory_id>   Fetch spec/plan HTML and open in browser
+
+Skill registry (authenticated, private by default):
+  skills seed                 Idempotently publish the canonical eight bundles
+                              with expected-latest CAS; prints exact version pins.
+  skills import --name=<name> --root=<dir> --entry=<path>
+                --contract-file=<json> --license-name=<SPDX>
+                [--license-url=<url>] [--license-notice-file=<path>]
+                [--provenance-source=<text>] [--upstream-url=<url>]
+                [--upstream-commit=<sha>] [--upstream-license=<SPDX>]
+                [--provenance-notes=<text>]
+                              Import a deterministic closed local bundle. An
+                              unchanged re-import is a no-op; no grant or public
+                              visibility is created.
 
 Role/tier agent generation (aihub#642):
   roles install [--harness <h>] [--dry-run] [--preset=<name>]

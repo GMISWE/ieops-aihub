@@ -1,0 +1,40 @@
+{{define "content"}}
+<section class="ph">
+  <h1>Skills</h1>
+  <span class="sub">immutable, versioned skill bundles available to this account</span>
+</section>
+
+{{if .Message}}<div class="empty" style="max-width:none">{{.Message}}</div>{{end}}
+{{if .Error}}<div class="empty" style="max-width:none">{{.Error}}</div>{{end}}
+
+<form method="GET" action="/ui/skills" class="filters">
+  <label class="search"><span>owner user id</span><input type="text" name="owner" value="{{.Owner}}" placeholder="all accessible owners"></label>
+  <label><span class="sub">page size</span><input type="number" name="limit" value="{{.Limit}}" min="1" max="200"></label>
+  <button type="submit" class="btn sm">Apply</button>
+</form>
+
+{{if not .Items}}
+<div class="empty">
+  <div class="ei">+</div>
+  <div class="et">No accessible skills</div>
+  Skills are private until a specific version is shared or made public.
+</div>
+{{else}}
+<div class="mgrid">
+  {{range .Items}}
+  <div class="mcard">
+    <a class="mcard-link" href="/ui/skills/{{.ID}}" aria-label="Open skill {{.Name}}"></a>
+    <div class="top"><span class="pf-mem-type">skill</span>{{if .LatestAccessible}}<span class="badge b-normal">v{{.LatestAccessible.Version}}</span>{{end}}</div>
+    <h3>{{.Name}}</h3>
+    <p class="sub">{{.OwnerDisplay}} · {{.OwnerUserID}}</p>
+    {{if .LatestAccessible}}<p class="sub">latest accessible · {{.LatestAccessible.Visibility}} · {{truncate 16 .LatestAccessible.Digest}}</p>{{else}}<p class="sub">no versions published</p>{{end}}
+  </div>
+  {{end}}
+</div>
+<div class="pager">
+  {{if .Cursor}}<a class="btn sm" href="/ui/skills?owner={{urlquery .Owner}}&limit={{.Limit}}">First page</a>{{end}}
+  <span style="flex:1"></span>
+  {{if .Next}}<a class="btn sm" href="/ui/skills?owner={{urlquery .Owner}}&limit={{.Limit}}&cursor={{urlquery .Next}}">Next</a>{{end}}
+</div>
+{{end}}
+{{end}}

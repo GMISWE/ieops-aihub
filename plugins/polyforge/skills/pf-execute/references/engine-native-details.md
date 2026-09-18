@@ -767,3 +767,24 @@ including the `step_attempt_id` trap in the two-call fallback.
 Since aihub#280 `ids` is a real filter and an id already names exactly one wi. Before that, `ids`
 reached no forwarding table and no `project` was sent, so this call was a hard 400 and never ran -
 which is why older copies of this engine passed `project` defensively.
+
+## 4. Pinned DB workflows (aihub#708): this file is the LEGACY path
+
+Everything on this page drives the **scenario step graph**. Before any of it applies, check
+which step graph the wi actually has:
+
+```
+wf = pf_get_workflow(work_item_id=<current>)
+wf.steps_version > 0  -> pinned DB workflow: the STORED flow wins. Do not run
+                        `engine startup` + this loop for it; follow
+                        `using-polyforge/fragments/workflow-v2.md` instead (rhs=false is
+                        drain's job; rhs=true paces through the workflow step tools).
+wf.steps_version == 0 -> no workflow: this page applies, unchanged.
+```
+
+The two graphs never merge: a pinned-flow wi's results land in the workflow tables and
+intentionally create no `wi_step_state` rows, so this loop's bracket sequence (and
+`bracket-plan`) is the wrong instrument for it; conversely, a scenario wi must not be
+driven through the workflow step tools, which will refuse a wi with no generation. When
+unsure which one you are holding, `pf_get_workflow` is the authority, not the wi_type and
+not the scenario repo.

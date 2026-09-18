@@ -1,0 +1,4 @@
+      Edit")
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --environment <environment_id>        Create a new cloud session that runs on

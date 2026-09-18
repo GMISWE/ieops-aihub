@@ -7,6 +7,17 @@ description: >
 
 # pf-plan - Plan & Child Wi Creation
 
+## DB-aware compatibility (aihub#708 workflow v2)
+
+For a wi whose flow is a **pinned DB workflow** (`pf_get_workflow` -> `steps_version > 0`),
+plan authoring is driven by the stored pinned skill. Read
+`using-polyforge/fragments/workflow-v2.md`, then run
+`polyforge engine workflow --work-item='<current>' --continue`; use `--prepare` and
+`--submit` exactly when instructed. The preparation contains the actual approved spec value
+and pinned output schema, not a symbolic predecessor descriptor. Do not use the legacy
+artifact/step calls below on that path. The remainder of this file is compatibility behavior
+for wis with no pinned flow.
+
 ## Usage
 
 **Purpose**: Write the plan artifact for the current wi - OpenSpec requirements + scenarios,
@@ -186,6 +197,10 @@ pf_remember(type=<ONE concrete type - e.g. experience.pitfall / fact.architectur
             project=<current>, content=<finding>,
             work_item_id=<current>, visibility="project")
 ```
+
+**Step bracket honesty**: the examples below bracket `step_id="plan"`. If the wi's
+scenario graph names this phase differently (`pf_get_step` -> `current_step`), bracket
+THAT step id - a hardcoded id that is not the graph's is a silent no-op bracket.
 
 ## NL Triggers
 

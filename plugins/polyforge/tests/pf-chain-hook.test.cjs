@@ -1,133 +1,84 @@
 'use strict';
 const { test } = require('node:test');
-const assert = require('node:assert');
-const { applyEvent, mapStep, resolveWiId } = require('../bin/pf-chain-hook.cjs');
+const assert = require('node:assert/strict');
+const { applyEvent, mapStep, resolveWiId, successfulResponse } = require('../bin/pf-chain-hook.cjs');
 
-const base = () => ({ wi: 'aihub#71', worktree: '/w', completed: [], active: null, status: 'running' });
+const ok = { content: [{ type: 'text', text: '{"status":"ok"}' }] };
+const base = () => ({ wi: 'aihub#71', completed: [], active: null, exec: { done: [], active: null }, status: 'running' });
+const step = (chain, input, response = ok) => applyEvent(chain, 'polyforge_pf_update_step', input, response);
 
-test('mapStep maps step ids to macro stations', () => {
-  assert.strictEqual(mapStep('write_spec'), 'spec');
-  assert.strictEqual(mapStep('plan_steps'), 'plan');
-  assert.strictEqual(mapStep('code_change'), 'execute');
+test('prefixes and legacy spec/plan artifact forms', () => {
+  assert.equal(mapStep('write_spec'), 'spec');
+  for (const prefix of ['', 'mcp__polyforge__', 'mcp__plugin_polyforge_polyforge__', 'polyforge-', 'polyforge_']) {
+    assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'methodology.spec' }, ok).completed, ['spec']);
+    assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'spec' }, ok).completed, ['spec']);
+    assert.deepEqual(applyEvent(base(), prefix + 'pf_save_artifact', { type: 'methodology.plan' }, ok).completed, ['plan']);
+  }
 });
 
-test('pf_update_step in_progress sets active', () => {
-  const s = applyEvent(base(), 'pf_update_step', { status: 'in_progress', step_id: 'write_spec' }, {});
-  assert.strictEqual(s.active, 'spec');
+test('only confirmed successful responses advance or delete', () => {
+  const input = { status: 'completed', step_id: 'write_spec' };
+  // Refused: missing, empty, error-marked, or "success" with no actual result behind
+  // it — a bridge that drops the real result must never advance the cache.
+  for (const response of [null, {}, { isError: true, content: [] }, { error: 'bad' },
+    { content: [{ type: 'text', text: '{"error":"denied"}' }] }, { success: false },
+    { isError: false }, { content: [] }, { content: [], isError: false },
+    { structuredContent: {} }, { result: null }, { result: '' }]) {
+    assert.deepEqual(step(base(), input, response), base());
+    assert.deepEqual(applyEvent(base(), 'pf_wrap', {}, response), base());
+    assert.equal(successfulResponse(response), false);
+  }
+  // Accepted: explicit normalized status, or the actual non-empty error-free result.
+  assert.deepEqual(step(base(), input).completed, ['spec']);
+  assert.equal(successfulResponse({ status: 'ok' }), true);
+  assert.equal(successfulResponse({ content: [{ type: 'text', text: 'plain prose is a result too' }] }), true);
+  // The pi bridge's forward shape: the real content plus an explicit non-error status.
+  assert.equal(successfulResponse({ content: [{ type: 'text', text: '{"status":"ok"}' }], isError: false }), true);
+  // The opencode bridge's forward shape: the raw MCP CallToolResult it was handed.
+  assert.equal(successfulResponse({ content: [{ type: 'text', text: '{"removed":["aihub"]}' }] }), true);
+  assert.equal(successfulResponse({ structuredContent: { removed: ['aihub'] }, content: [] }), true);
+  assert.equal(successfulResponse({ result: { removed: ['aihub'] } }), true);
+  assert.equal(applyEvent(base(), 'pf_wrap', {}, ok), null);
 });
 
-test('pf_update_step completed adds to completed and clears active', () => {
-  const start = { ...base(), active: 'spec' };
-  const s = applyEvent(start, 'pf_update_step', { status: 'completed', step_id: 'write_spec' }, {});
-  assert.ok(s.completed.includes('spec'));
-  assert.strictEqual(s.active, null);
+test('fused next_step closes old step and opens successor atomically in cache', () => {
+  let state = step(base(), { status: 'in_progress', step_id: 'write_spec' });
+  state = step(state, { status: 'completed', step_id: 'write_spec', next_step: 'plan_steps' });
+  assert.deepEqual(state.completed, ['spec']);
+  assert.equal(state.active, 'plan');
+  state = step(state, { status: 'completed', step_id: 'plan_steps', next_step: 'code_change' });
+  assert.deepEqual(state.completed, ['spec', 'plan']);
+  assert.equal(state.exec.active, 'code_change');
+  state = step(state, { status: 'completed', step_id: 'code_change', next_step: 'code_review' });
+  assert.deepEqual(state.exec.done, ['code_change']);
+  assert.equal(state.exec.active, 'code_review');
+  assert.equal(state.active, 'execute');
 });
 
-test('pf_save_artifact type=spec marks spec done', () => {
-  const s = applyEvent(base(), 'pf_save_artifact', { type: 'spec' }, {});
-  assert.ok(s.completed.includes('spec'));
+test('failure and heartbeat never mark a step done; pause clears transient activity', () => {
+  const running = step(base(), { status: 'in_progress', step_id: 'code_change' });
+  assert.deepEqual(step(running, { heartbeat: true, status: 'completed', step_id: 'code_change' }), running);
+  const failed = step(running, { status: 'failed', step_id: 'code_change' });
+  assert.deepEqual(failed.exec.done, []);
+  assert.equal(failed.exec.active, null);
+  const paused = applyEvent(running, 'pf_pause_attempt', {}, ok);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.active, null);
+  assert.equal(paused.exec.active, null);
+  assert.equal(applyEvent(base(), 'pf_complete_attempt', { status: 'failed' }, ok), null);
 });
 
-test('pf_save_artifact type=methodology.plan marks plan done', () => {
-  const s = applyEvent(base(), 'pf_save_artifact', { type: 'methodology.plan' }, {});
-  assert.ok(s.completed.includes('plan'));
+test('exact WI routing never borrows a different recent claim', () => {
+  const states = [{ wi_id: 'wi_A', slug: 'aihub#71' }, { wi_id: 'wi_B', slug: 'aihub#72' }];
+  assert.equal(resolveWiId('pf_update_step', { work_item_id: 'aihub#71' }, states[1], states), 'wi_A');
+  assert.equal(resolveWiId('pf_wrap', { work_item_id: 'wi_A' }, null), 'wi_A');
+  assert.equal(resolveWiId('pf_update_step', {}, states[1], states), null);
+  assert.equal(resolveWiId('pf_update_step', { work_item_id: 'aihub#73' }, states[1], states), null);
 });
 
-test('pause sets status=paused (does not delete)', () => {
-  const s = applyEvent(base(), 'pf_complete_attempt', { status: 'paused' }, {});
-  assert.strictEqual(s.status, 'paused');
-});
-
-test('wrap returns null (delete chain.json)', () => {
-  const s = applyEvent(base(), 'pf_wrap', { status: 'wrapped' }, {});
-  assert.strictEqual(s, null);
-});
-
-test('completed is deduped', () => {
-  let s = applyEvent(base(), 'pf_save_artifact', { type: 'spec' }, {});
-  s = applyEvent(s, 'pf_save_artifact', { type: 'spec' }, {});
-  assert.deepStrictEqual(s.completed, ['spec']);
-});
-
-test('full prefix tool name is handled', () => {
-  const s = applyEvent(base(), 'mcp__plugin_polyforge_polyforge__pf_save_artifact', { type: 'spec' }, {});
-  assert.ok(s.completed.includes('spec'));
-});
-
-test('Codex prefix tool name (mcp__polyforge__) is handled', () => {
-  const s = applyEvent(base(), 'mcp__polyforge__pf_save_artifact', { type: 'spec' }, {});
-  assert.ok(s.completed.includes('spec'));
-});
-
-test('Copilot prefix tool name (polyforge-) is handled', () => {
-  const s = applyEvent(base(), 'polyforge-pf_save_artifact', { type: 'spec' }, {});
-  assert.ok(s.completed.includes('spec'));
-});
-
-// pi names MCP tools `<server>_<tool>` with an UNDERSCORE and no "__" separator, so it
-// matches neither the two mcp__ forms nor Copilot's `polyforge-`. Left unstripped, every
-// case below falls to `default: return chain` and the chain file is never advanced —
-// silently, with exit 0. Same shape as the aihub#503 finding in pf-commit-guard.
-test('pi prefix tool name (polyforge_) is handled', () => {
-  const s = applyEvent(base(), 'polyforge_pf_save_artifact', { type: 'spec' }, {});
-  assert.ok(s.completed.includes('spec'));
-});
-
-test('pi prefix: update_step and wrap fire identically', () => {
-  const s = applyEvent(base(), 'polyforge_pf_update_step', { status: 'in_progress', step_id: 'write_spec' }, {});
-  assert.strictEqual(s.active, 'spec');
-  assert.strictEqual(applyEvent(base(), 'polyforge_pf_wrap', { status: 'wrapped' }, {}), null);
-});
-
-// Negative control: stripping must not be so greedy that an unrelated tool whose name
-// merely starts with the server prefix turns into a lifecycle transition.
-test('pi prefix: unrelated polyforge_ tool is inert', () => {
-  const start = base();
-  assert.deepStrictEqual(applyEvent(start, 'polyforge_pf_get_work_item', { type: 'spec' }, {}), start);
-});
-
-// ─── execute is a multi-step phase (event-driven sub-progress, no premature green) ───
-
-test('execute in_progress keeps execute active + records exec.active (not in completed)', () => {
-  const s = applyEvent(base(), 'pf_update_step', { status: 'in_progress', step_id: 'code_change' }, {});
-  assert.strictEqual(s.active, 'execute');
-  assert.strictEqual(s.exec.active, 'code_change');
-  assert.deepStrictEqual(s.exec.done, []);
-  assert.ok(!s.completed.includes('execute'));
-});
-
-test('execute completed accumulates in exec.done, execute STAYS active, never in completed', () => {
-  let s = applyEvent(base(), 'pf_update_step', { status: 'in_progress', step_id: 'code_change' }, {});
-  s = applyEvent(s, 'pf_update_step', { status: 'completed', step_id: 'code_change' }, {});
-  assert.strictEqual(s.active, 'execute');            // not cleared after first step
-  assert.deepStrictEqual(s.exec.done, ['code_change']);
-  assert.strictEqual(s.exec.active, null);
-  assert.ok(!s.completed.includes('execute'));         // Gap B: no premature green
-  s = applyEvent(s, 'pf_update_step', { status: 'in_progress', step_id: 'code_review' }, {});
-  s = applyEvent(s, 'pf_update_step', { status: 'completed', step_id: 'code_review' }, {});
-  assert.deepStrictEqual(s.exec.done, ['code_change', 'code_review']);
-  assert.strictEqual(s.active, 'execute');
-});
-
-test('exec.done is deduped on repeat completion', () => {
-  let s = applyEvent(base(), 'pf_update_step', { status: 'completed', step_id: 'code_change' }, {});
-  s = applyEvent(s, 'pf_update_step', { status: 'completed', step_id: 'code_change' }, {});
-  assert.deepStrictEqual(s.exec.done, ['code_change']);
-});
-
-// ─── resolveWiId: terminal events must not rely on findActiveState (Gap C) ───
-
-test('resolveWiId: terminal event uses toolInput.work_item_id even when state file gone', () => {
-  assert.strictEqual(resolveWiId('pf_complete_attempt', { work_item_id: 'wi_X' }, null), 'wi_X');
-  assert.strictEqual(resolveWiId('pf_wrap', { work_item_id: 'wi_X' }, null), 'wi_X');
-});
-
-test('resolveWiId: non-terminal event uses the active state wi_id', () => {
-  assert.strictEqual(resolveWiId('pf_update_step', {}, { wi_id: 'wi_Y' }), 'wi_Y');
-  assert.strictEqual(resolveWiId('pf_update_step', { work_item_id: 'wi_X' }, { wi_id: 'wi_Y' }), 'wi_Y');
-});
-
-test('resolveWiId: terminal falls back to active state when no toolInput wi; null when neither', () => {
-  assert.strictEqual(resolveWiId('pf_complete_attempt', {}, { wi_id: 'wi_Z' }), 'wi_Z');
-  assert.strictEqual(resolveWiId('pf_update_step', {}, null), null);
+test('ambiguous credential or sidecar slugs never select an arbitrary WI', () => {
+  const duplicateSlug = [{ wi_id: 'wi_A', slug: 'aihub#71' }, { wi_id: 'wi_B', slug: 'aihub#71' }];
+  assert.equal(resolveWiId('pf_update_step', { work_item_id: 'aihub#71' }, null, duplicateSlug), null);
+  const duplicateID = [{ wi_id: 'wi_A', slug: 'aihub#71' }, { wi_id: 'wi_A', slug: 'aihub#72' }];
+  assert.equal(resolveWiId('pf_update_step', { work_item_id: 'wi_A' }, null, duplicateID), null);
 });

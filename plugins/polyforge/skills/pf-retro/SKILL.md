@@ -14,16 +14,26 @@ description: >
 
 **Pattern**: `/pf-retro`
 
-**Required**: a recently-wrapped wi accessible in context (auto-dispatched by `/pf-execute` after wrap, or run standalone)
+**Required**: a just-finished (or about-to-finish) wi accessible in context. Preferred
+placement is BEFORE the terminal call (`/pf-stop --wrap` / `--fail`) so artifacts can be
+saved; standalone post-wrap runs are memory-only (see When to use)
 
 **Flags**: none
 
 ## When to use
 
-After completing a wi (wrap). Best run immediately while context is fresh. Also
-dispatched automatically by `/pf-execute` as the built-in retro subagent.
+After completing a wi. **Placement matters** (credentials, not preference):
 
-Optionally run standalone: `/pf-retro` with a recently-wrapped wi in context.
+- **Preferred - BEFORE the terminal call** (`/pf-stop --wrap` / `--fail`): the attempt's
+  state file is still live, so `pf_save_artifact` works and the retro + wrap_summary
+  artifacts land on the wi. `/pf-execute`'s built-in retro dispatch and `/pf-stop`'s
+  suggestion both point here.
+- **Standalone after wrap**: the state file is gone and the wi is TERMINAL - it cannot be
+  re-claimed. Analysis and `pf_remember` still work (they need no attempt credentials),
+  but artifact saves (`pf_save_artifact`) cannot run. Post-wrap retro is therefore
+  **memory-only by design**, not a degraded accident. Do not re-claim a wrapped wi to
+  work around this; an explicitly authorized post-wrap artifact path is tracked as a
+  follow-up (docs/workflow-v2/04-unresolved-migration-references.md).
 
 ## Mechanic
 
@@ -142,13 +152,17 @@ Memory types to use:
 - `experience.pitfall` - gotchas to avoid next time
 - `experience.code` - specific code-level findings
 
-> **NOTE**: `pf_save_artifact` requires an active wi claim (state file present).
-> When running standalone retro on an already-wrapped wi, either:
-> (a) re-claim the wi first: `pf_claim_work_item(work_item_id=<slug>, idempotency_key=<ULID>)`
->     - a re-claim needs no resume flag, and since aihub#394 there is none to pass; or
-> (b) skip artifact saves if re-claim is impractical; `pf_remember` (Step 5) still works.
+> **NOTE - artifact saves need live attempt credentials.** `pf_save_artifact` requires an
+> active wi claim (state file present). Running retro BEFORE the terminal call satisfies
+> this for free. When running standalone on an ALREADY-WRAPPED wi: skip Steps 6-7 (the
+> artifact saves) - `pf_remember` (Step 5), `pf_read_events` and `pf_list_work_items` still
+> work (no attempt credentials needed). Do NOT re-claim a wrapped wi to force the artifact
+> saves: a terminal work item refuses claims, and teaching that path is exactly the
+> contradiction this section exists to remove.
 
-### Step 6: Save retro artifact
+### Step 6: Save retro artifact (only while the attempt is live)
+
+Skipped on an already-wrapped wi (see the NOTE above - no state file, no artifact saves).
 
 ```
 pf_save_artifact(
@@ -164,7 +178,7 @@ pf_save_artifact(
 )
 ```
 
-### Step 7: Save wrap summary
+### Step 7: Save wrap summary (same condition)
 
 ```
 pf_save_artifact(

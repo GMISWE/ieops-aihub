@@ -82,6 +82,10 @@ var workItemColumnsNotCallerSupplied = map[string]string{
 		"Neither CreateWorkItemRequest nor UpdateWorkItemRequest binds it.",
 	"external_share_type": "set by the external-share path, not by create/update: neither request " +
 		"struct binds it, and the value comes from which integration is being attached.",
+	"steps_version": "server-controlled (aihub#708 Batch 2A): neither create nor update binds it. " +
+		"The only writers are the workflow pinning transactions, which compute the next " +
+		"generation number from the locked row (next = current+1, both non-negative by " +
+		"construction), so a caller-supplied illegal value has no route to the column.",
 }
 
 // ─── deriving the columns and their CHECKs from the migrations ──────────────

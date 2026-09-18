@@ -79,6 +79,10 @@ authority: self
 kind: info
 authority: self
 
+@ondemand: fragments/workflow-v2.md
+kind: info
+authority: self
+
 @ondemand: fragments/post-claim-routing.md
 kind: rule
 gate: none

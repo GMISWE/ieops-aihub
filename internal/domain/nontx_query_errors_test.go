@@ -205,7 +205,15 @@ func TestNonTransactionalQuerySitesAnswerTheirErrors(t *testing.T) {
 	// 29 -> 31 same day: aihub#360 added the two lexical-section page queries
 	// (recallLexical in memory_lexical.go, listWorkItemsLexical in
 	// wi_lexical.go), both answering their errors through dbErrCause.
-	const wantSites = 31
+	//
+	// 31 -> 33 (2026-09-17, aihub#708 Batch 1A): the skill registry's two page
+	// queries — ListSkills and ListSkillVersions in skill_registry_sharing.go
+	// — both answering their errors through dbErrCause.
+	//
+	// 33 -> 35 (2026-09-17, aihub#708 Batch 2A): the workflow view's two page
+	// queries — generations and repairs in GetWorkItemWorkflow
+	// (workflow_run.go) — both answering their errors through dbErrCause.
+	const wantSites = 35
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d Query sites in non-transactional functions, want %d — see the count-arm "+
 			"note above this assertion before touching the number", totalSites, wantSites)
@@ -239,7 +247,27 @@ func TestNonTransactionalQueryRowSitesAnswerTheirErrors(t *testing.T) {
 	// note in EmitEvent (memory.go) through a single-assign QueryRow; ErrNoRows
 	// is the ordinary "no note yet" answer and every other error is classified
 	// through dbErrCause.
-	const wantSites = 23
+	//
+	// 23 -> 27 (2026-09-17, aihub#708 Batch 2A): the workflow's four
+	// single-assign QueryRow reads — the exact-version and latest-accessible
+	// resolutions in workflow.go's resolveWorkflowSkillRef, and the latest
+	// result + latest approval reads in workflow_run.go's
+	// GetWorkItemWorkflow. All four classify through dbErrCause, with
+	// ErrNoRows the ordinary empty answer (guarded by the compound
+	// `err != nil && !errors.Is` shape the scanner recognises).
+	//
+	// 27 -> 28 (2026-09-18, aihub#708): the newly added trusted pinned
+	// contract read in workflow.go's resolvePinnedSkillRefTrusted, now
+	// canonically classified in the same nested shape as
+	// resolveWorkflowSkillRef: the `if err != nil` guard answers ErrNoRows as
+	// the explicit internal "pinned workflow skill version is missing"
+	// data-defect error (a missing pin is a defect, never an ordinary empty
+	// answer) and classifies every other failure through dbErrCause, which
+	// callsClassifier reads through the nested ErrNoRows branch. The site
+	// lands as a compliant fifth workflow site — zero violations, no
+	// nontxQueryRowJustifications entry (an unconsumed ledger key would
+	// itself fail checkLedger as stale).
+	const wantSites = 28
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d QueryRow sites in non-transactional functions, want %d — fewer may mean a "+
 			"site moved into a stated blind spot (if-init, row-helper, blanked error), which "+
@@ -328,12 +356,37 @@ func TestNonTxBlindSpotShapesArePinned(t *testing.T) {
 		"memory_unmatched.go:UnmatchedTypes":                 1,
 		"projects.go:TransferOwner":                          1,
 		"wi_embedding.go:refreshWorkItemEmbeddingBestEffort": 1,
+		// aihub#708 Batch 2A: GetWorkItemWorkflow's open-invocation lookup is
+		// if-init by style; ErrNoRows is the ordinary "no open invocation"
+		// answer and every other error classifies via dbErrCause in the branch.
+		"workflow_run.go:GetWorkItemWorkflow": 1,
+		// aihub#708 Batch 1A: the skill registry's single-row reads are if-init
+		// by style (the guard IS the error branch). All classify via
+		// dbErrCause after their ErrNoRows arm; adjudicated 2026-09-17.
+		// Batch 1A repair (same day, review finding 7): skillOwnsSkill's arm
+		// used to SWALLOW its DB failure into a false return while this pin
+		// claimed it was classified — the "falsely ratcheted as handled" the
+		// review named. It now propagates through dbErrCause, and
+		// TestSkillRegistryOwnershipProbeFailuresPropagate pins that; this
+		// pin's claim is true again.
+		"skill_registry_sharing.go:ListSkillVersions":                1,
+		"skill_registry_sharing.go:requireSkillShareProjectRight":    2,
+		"skill_registry_sharing.go:skillOwnsSkill":                   1,
+		"skill_registry_sharing.go:skillRequireSkillVersionForWrite": 2,
 	})
 	assertPinnedSet(t, "row-helper QueryRow", rowHelper, map[string]int{
 		"dependencies.go:GetParentRef": 1,
 		"memory.go:findCommitEntry":    1,
 		"projects.go:getProjectByName": 1,
 		"projects.go:CreateProject":    1,
+		// aihub#708 Batch 1A: the multi-column reads that hand the row to a
+		// scan helper (scanSkillRow / row.Scan), all classified through
+		// dbErrCause or pgxErr-style guards at the scan site.
+		"skill_registry_sharing.go:GetSkill":        1,
+		"skill_registry_sharing.go:GetSkillVersion": 1,
+		// aihub#708 Batch 1A repair: the no-auth summary helper was UNEXPORTED to
+		// skillVersionSummaryForOwner (review finding 6) — same site, new name.
+		"skill_registry_sharing.go:skillVersionSummaryForOwner": 1,
 	})
 	assertPinnedSet(t, "blank-assigned QueryRow.Scan", blankScan, map[string]int{
 		"memory.go:ReplyCommit":   1,

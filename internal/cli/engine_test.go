@@ -338,6 +338,13 @@ func setUpCleanupWorktreesFixture(t *testing.T) (root, wtPath, parent string) {
 	}
 	gitDir(t, mainRepo, "add", "-A")
 	gitDir(t, mainRepo, "commit", "-q", "-m", "seed")
+	// Safe cleanup now requires every worktree branch to exist on origin at
+	// the same commit. Seed a local bare remote so this success fixture proves
+	// delivered-clean cleanup rather than relying on the old forceful delete.
+	remote := filepath.Join(root, "remote.git")
+	gitDir(t, root, "init", "--bare", "-q", remote)
+	gitDir(t, mainRepo, "remote", "add", "origin", remote)
+	gitDir(t, mainRepo, "push", "-q", "-u", "origin", "HEAD")
 
 	parent = filepath.Join(root, "pf.aihub-654")
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -345,6 +352,7 @@ func setUpCleanupWorktreesFixture(t *testing.T) (root, wtPath, parent string) {
 	}
 	wtPath = filepath.Join(parent, "aihub")
 	gitDir(t, mainRepo, "worktree", "add", wtPath)
+	gitDir(t, wtPath, "push", "-q", "-u", "origin", "HEAD")
 	return root, wtPath, parent
 }
 

@@ -314,12 +314,13 @@ func TestRoleLevelIsReadAtExactlyTheSitesThisCardNames(t *testing.T) {
 	// The READER SET, keyed on file+function: stable under reformatting, and the
 	// unit a reader of the card cares about ("who decides what a role is worth").
 	want := map[string]bool{
-		"domain/dependencies.go:ListDependencies":         false,
-		"domain/projects.go:checkProjectAccess":           false,
-		"server/middleware.go:checkProjectAccess":         false,
-		"server/router.go:handleListWorkItems":            false,
-		"server/routes_memory.go:hasProjectAccess":        false,
-		"server/ui_handlers_wi.go:checkProjectAccessSoft": false,
+		"domain/dependencies.go:ListDependencies":                        false,
+		"domain/projects.go:checkProjectAccess":                          false,
+		"domain/skill_registry_sharing.go:requireSkillShareProjectRight": false,
+		"server/middleware.go:checkProjectAccess":                        false,
+		"server/router.go:handleListWorkItems":                           false,
+		"server/routes_memory.go:hasProjectAccess":                       false,
+		"server/ui_handlers_wi.go:checkProjectAccessSoft":                false,
 	}
 	statements := map[string]int{}
 	var extra []string

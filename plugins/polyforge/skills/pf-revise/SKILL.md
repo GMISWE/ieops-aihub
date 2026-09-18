@@ -138,6 +138,10 @@ and stop. Do NOT create a spurious new artifact version.
 covered by rule (c) above - apply at document level; note in the resolve reply:
 "anchor no longer locatable in current version; applied at document level".
 
+**Ambiguity preflight**: before Step 5, decide whether every open annotation's requested
+change is concrete enough to apply safely. If any annotation body needs a human decision,
+follow Step 7a immediately. Do not partially revise or supersede either artifact first.
+
 ### Step 5: Apply the revision rule (spec -> plan coupling)
 
 > **IMPORTANT**: annotations on a PLAN change ONLY the plan artifact. Annotations on a
@@ -201,8 +205,7 @@ not the newly created version):
 pf_resolve_commit(
   memory_id=<head_spec_id>,   # <- the OLD head that had the annotation
   commit_id=<entry.id>,
-  reply="<1-2 sentences: how the revision addressed this request, or - if not acted on -
-          why, e.g. out of scope / deferred to next round>"
+  reply="<1-2 sentences describing exactly how the revision addressed this request>"
 )
 
 # For each open annotation on the plan:
@@ -219,35 +222,51 @@ but remains addressable by id. `pf_resolve_commit` targets the memory by id, so 
 on the OLD head id. The resolved status is preserved on the archived entry and the UI
 will reflect it correctly.
 
-All open annotations must be resolved in this call. There is NO carry-forward: if the
-reviewer still disagrees with the resolution, they annotate the NEW version and trigger
-another `/pf-revise` round.
+Every open annotation must be concrete and addressed before this call proceeds; then every
+one is resolved. There is NO carry-forward after superseding: if the reviewer still
+disagrees with a resolution, they annotate the NEW version and trigger another
+`/pf-revise` round. Ambiguous feedback never reaches this point; Step 7a leaves it open on
+the unchanged current head.
 
-### Step 7a: Post a clarifying reply (when feedback is ambiguous)
+### Step 7a: Ambiguous feedback - leave it open and ask
 
-If a commit entry's `body` is ambiguous and the agent cannot safely make a change without
-human clarification, post a **threaded reply** to ask - without resolving the annotation.
-The commit stays open; the reviewer sees the question inline in the /ui viewer.
+If a commit entry's `body` is ambiguous and you cannot safely make the requested change
+without human clarification, **do not guess, do not revise from that annotation, and do
+not resolve it**. There is no MCP surface for a threaded annotation reply today. The raw
+HTTP endpoint is NOT a sanctioned path (IR3 forbids raw-HTTP fallbacks; a
+`pf_reply_commit` tool does not exist yet - tracked in
+`docs/workflow-v2/04-unresolved-migration-references.md`).
 
-```bash
-curl -s -X POST \
-  "${POLYFORGE_AIHUB_URL}/v1/memories/${MEMORY_ID}/commit/${COMMIT_ID}/reply" \
-  -H "Authorization: Bearer ${POLYFORGE_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"body": "Could you clarify whether X means Y or Z?"}'
-# -> {"ok": true}
-```
+Treat clarification as a blocking human decision:
 
-- `POLYFORGE_AIHUB_URL` - the aihub server base URL (same value as `[server] url` in
-  `~/.polyforge/config.toml`; e.g. `http://10.146.0.16:8080`).
-- `POLYFORGE_API_KEY` - your project writer API key (`pf_k1_…`).
-- `MEMORY_ID` - the artifact memory id that carries the annotation (the OLD head id, same
-  as the id passed to `pf_resolve_commit`).
-- `COMMIT_ID` - `entry.id` from the commits array.
+1. Stop before superseding either artifact in this round. This keeps the ambiguous
+   annotation open on the current head instead of archiving it on an old version or
+   mixing a partial revision with an unresolved request.
+2. Emit a `note` event that quotes the annotation id, states exactly what is ambiguous,
+   and asks the reviewer a concrete question with the plausible choices:
+   ```
+   pf_emit_event(
+     work_item_id=<current>,
+     event_type="note",
+     payload={
+       "text": "annotation <entry.id> needs clarification: <question>; please clarify in /ui"
+     }
+   )
+   ```
+3. Report the revision step as blocked on that clarification. Leave the annotation open
+   and do not mark the step completed. After the reviewer clarifies in /ui, rerun
+   `/pf-revise` against the still-current head.
 
-After posting the reply, **do NOT call `pf_resolve_commit`** for that entry; leave it open
-so the reviewer can respond. Continue resolving all other unambiguous annotations in the
-same `/pf-revise` run normally.
+A note is only an attention signal; it is not an annotation reply, resolution, or
+approval. Never use raw HTTP to fill the missing reply surface.
+
+### Annotations are not approvals (aihub#708)
+
+An annotation (commit entry) is DOCUMENT feedback on an artifact. A workflow APPROVAL is a
+different, human-only act: `pf_approve_workflow` records an authenticated human decision
+bound to a step's exact artifact on a pinned DB workflow, and a machine credential is
+refused whatever role it holds. Resolving annotations NEVER approves a step; approving a
+step NEVER resolves annotations. `/pf-revise` touches only annotations.
 
 
 ### Step 8: Emit revision note
@@ -298,7 +317,7 @@ table-derived rows:
 | No open annotations on either head | Report "nothing to revise", stop without creating new artifact version |
 | `anchor.quote` present but not found in current text | Fall back to heading-text match (rule b); if also absent, apply at document level (rule c) |
 | Annotation anchor not resolvable (quote + heading both gone, or no anchor) | Apply at document level; note in resolve reply (rule c) |
-| Feedback is ambiguous - agent needs clarification | Post threaded reply via Step 7a; leave commit open; continue resolving other annotations |
+| Feedback is ambiguous - agent needs clarification | Step 7a: stop before superseding, leave the annotation open, emit a note with a concrete clarification question, and report the step blocked; never guess, resolve, or use raw HTTP |
 | Only plan annotated | Revise plan only; spec untouched |
 | Only spec annotated | Revise spec + re-derive plan (spec drives plan) |
 | Both annotated in one round | Revise spec -> re-derive plan -> apply plan-only annotations; one supersede per artifact |

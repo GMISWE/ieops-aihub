@@ -16,7 +16,12 @@ description: >
 **Required**: exactly one of the flags below
 
 **Flags**:
-- `--pause` - release lease, keep locks, status -> paused (resumable via `/pf-work <slug> --resume`)
+- `--pause` - complete the attempt as paused (resumable via `/pf-work <slug> --resume`):
+  the lease ends and **file_scope locks are RELEASED** (the server releases the whole
+  derived set on pause; only non-file_scope lock types would be retained, and there are
+  normally none). The state file is KEPT. On resume the claim re-derives file_scope locks
+  from `declared_resources` - so a concurrent claimant may legitimately hold one by then;
+  a lock conflict on resume is resolved by coordination or waiting, never by force.
 - `--wrap` - terminal success; emits wrap note, calls `pf_wrap`, deletes state file (destructive)
 - `--fail` - terminal failure; emits failure note, calls `pf_complete_attempt(failed)`, deletes state file (destructive)
 
@@ -40,7 +45,14 @@ encounters a terminal failure that cannot be resolved in this session (fail).
    ```
    This resets the step so it can be retried on resume.
 
-2. Release lease (keep locks so no one else can claim the same resources):
+   **Pinned DB workflow wi** (`pf_get_workflow` -> `steps_version > 0`): there are no legacy
+   step rows to reset - skip this sub-step; an open step invocation stays open under the
+   paused attempt and the resumed attempt fences it explicitly via `pf_reconcile_workflow`
+   (see `workflow-v2.md`).
+
+2. Release the lease - complete the attempt as paused. File_scope locks are released with
+   it (the server releases the whole derived set; the state file is kept for resume, and
+   resume re-derives the locks from `declared_resources`):
    ```
    pf_complete_attempt(
      work_item_id=<wi_id>,
@@ -75,6 +87,14 @@ encounters a terminal failure that cannot be resolved in this session (fail).
      note="wrapped: <1-sentence summary of what was accomplished>"
    )
    ```
+
+   **Pinned DB workflow wi** (`pf_get_workflow` -> `steps_version > 0`): wrap only when the
+   stored flow is complete (`pf_get_workflow` progress shows every step `completed`, with
+   approvals recorded for rhs steps). Its results intentionally create NO legacy
+   `wi_step_state` rows, so the no-steps gate may refuse the wrap - pass
+   `no_steps_reason="pinned DB workflow executed; results are recorded in the workflow
+   result tables (wi_workflow_results), not legacy step rows"`. Wrap stays explicit; a
+   completed flow does not wrap itself.
    Check `note_emitted` in the response: a note that failed to record does **not** fail the
    wrap, so it is reported rather than raised.
 
@@ -108,7 +128,11 @@ encounters a terminal failure that cannot be resolved in this session (fail).
 
 2. State file is deleted by `pf_wrap` / `pf_complete_attempt`; no manual delete needed.
 
-3. Suggest: "Run `/pf-retro` to save learnings to team memory."
+3. Suggest: "Run `/pf-retro` to save learnings to team memory." - and note the timing:
+   retro runs BEST before this terminal call (while the attempt credentials are still live,
+   so its artifacts can be saved); run standalone AFTER wrap it degrades to analysis +
+   `pf_remember` only. A wrapped wi is terminal and cannot be re-claimed - see `/pf-retro`.
+   When learnings should become artifacts, do `/pf-retro` BEFORE `/pf-stop --wrap`.
 
 4. Output: "Is this session's workflow worth crystallizing as a wi_type? (enter a name to crystallize, or press Enter to skip)"
 

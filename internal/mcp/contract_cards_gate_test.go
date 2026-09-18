@@ -3028,6 +3028,18 @@ var k12Cards = []string{
 	"pf_list_dependencies",
 	"pf_list_projects",
 	"pf_list_users",
+
+	// aihub#708 Batch 2A — the WI-owned workflow surface. Every claim on these
+	// cards cites internal/domain/workflow_db_test.go's arms or carries a
+	// prose-only marker; they enter the roster with Unclassified 0 by
+	// construction, in the same change that added them.
+	"pf_get_workflow",
+	"pf_update_workflow",
+	"pf_start_workflow_step",
+	"pf_workflow_result",
+	"pf_approve_workflow",
+	"pf_repair_workflow",
+	"pf_reconcile_workflow",
 }
 
 // k12ContractCards is how many pf_* cards docs/mcp-cards holds, which since phase 2
@@ -3039,7 +3051,7 @@ var k12Cards = []string{
 // applied to the population's own definition. Lowering it is legitimate only in the
 // same diff that removes the card and its ledger row, and floorCards bounds how far
 // that can go before K1 objects too.
-const k12ContractCards = 45
+const k12ContractCards = 52
 
 // k12Ledger records what each scoped card currently holds, per class.
 //
@@ -3138,10 +3150,25 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_get_work_item":           {Candidates: 22, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	"pf_list_dependencies":       {Candidates: 14, Cited: 9, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
 	"pf_list_projects":           {Candidates: 14, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_list_users":              {Candidates: 10, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_list_work_items":         {Candidates: 41, Cited: 33, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
-	"pf_pause_attempt":           {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_pr":                      {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	// aihub#708 Batch 2A — the six workflow cards. Unclassified enters at 0 by
+	// construction (each sentence cites a workflow_db_test.go arm or carries a
+	// marker); PendingImplementation carries the wire-shape claims whose probes
+	// are Batch 2B's parity fixtures, each marker citing aihub#708.
+	"pf_get_workflow":        {Candidates: 12, Cited: 6, QuotePinned: 0, Unclassified: 0, PendingImplementation: 4, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_update_workflow":     {Candidates: 12, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 4, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_start_workflow_step": {Candidates: 8, Cited: 4, QuotePinned: 0, Unclassified: 0, PendingImplementation: 3, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_workflow_result":     {Candidates: 7, Cited: 4, QuotePinned: 0, Unclassified: 0, PendingImplementation: 1, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_approve_workflow":    {Candidates: 8, Cited: 6, QuotePinned: 0, Unclassified: 0, PendingImplementation: 2, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_repair_workflow":     {Candidates: 10, Cited: 6, QuotePinned: 0, Unclassified: 0, PendingImplementation: 4, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	// aihub#708 B3 — the reconcile card enters with Unclassified 0 by the
+	// same construction: every assertable sentence cites a
+	// workflow_lifecycle_fence_db_test.go arm or carries a pending-
+	// implementation/prose-only marker citing aihub#708.
+	"pf_reconcile_workflow": {Candidates: 8, Cited: 4, QuotePinned: 0, Unclassified: 0, PendingImplementation: 3, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_list_users":         {Candidates: 10, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_list_work_items":    {Candidates: 41, Cited: 33, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
+	"pf_pause_attempt":      {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_pr":                 {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	// aihub#679 re-pin: 41→46 candidates, 34→39 cited, every other column
 	// unchanged and Unclassified still 0. The five new assertable sentences are
 	// the rewritten H7-fold paragraph — the folded label no longer names the

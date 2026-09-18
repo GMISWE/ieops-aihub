@@ -195,7 +195,24 @@ const maxUndeclaredLiveKeys = 16
 // silently absent, and REACH_GAP below is what forces that choice to be made in
 // a reviewed edit. Deleting the map would make "not driven" expressible by doing
 // nothing.
-var liveWalkOutOfReach = map[string]string{}
+var liveWalkOutOfReach = map[string]string{
+	// aihub#708 Batch 2A: the six workflow tools need a work item with a PINNED
+	// workflow generation, and a pin requires published skill versions. The
+	// registry (Batch 1A/1C) is HTTP-only — no pf_* tool publishes or reads
+	// skills — so this walk cannot build the fixture, and the start/result/
+	// repair trio additionally needs a live attempt plus a server-minted
+	// invocation the walk has no tool to obtain. Batch 2B's engine loop drives
+	// all six against seeded skills; until then their response keys are pinned
+	// by the cards' null response_keys_observed (no corpus record) and the
+	// domain tests in internal/domain/workflow_db_test.go drive the shapes.
+	"pf_get_workflow":        "no MCP route to publish a skill, so no pinned workflow can exist for this walk to read",
+	"pf_update_workflow":     "no MCP route to publish a skill, so the walk cannot pin a generation",
+	"pf_start_workflow_step": "requires a pinned workflow (see pf_update_workflow) plus a claimed attempt",
+	"pf_workflow_result":     "requires a server-minted invocation from pf_start_workflow_step",
+	"pf_approve_workflow":    "requires a recorded step result to approve, which needs the invocation chain",
+	"pf_repair_workflow":     "requires a failed recorded result, which needs the invocation chain",
+	"pf_reconcile_workflow":  "requires an open invocation left by a dead attempt, which needs the invocation chain plus a mid-flow pause/takeover (aihub#708 B3; the domain tests in internal/domain/workflow_lifecycle_fence_db_test.go drive the transition)",
+}
 
 // liveWalkProseOnly names the tools the walk DOES drive but whose successful
 // result is not a JSON object, so they contribute no top-level keys.

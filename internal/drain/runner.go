@@ -136,6 +136,14 @@ type Runner struct {
 	// Notify writes a note onto a work item timeline (layer ②).
 	Notify func(ctx context.Context, n Notification) error
 
+	// Workflow selects a pinned WI workflow after claim. A nil state means the
+	// server confirmed this WI is legacy. Errors must never select legacy.
+	Workflow func(ctx context.Context, c ClaimInfo) (bool, error)
+	// ExecuteWorkflow runs a pinned workflow without touching legacy step APIs.
+	// The callback publishes the workflow's current step into Snapshot.Active;
+	// executors must call it before entering the controller and whenever a new
+	// server-fenced invocation is about to start.
+	ExecuteWorkflow func(ctx context.Context, c ClaimInfo, active func(stepID string, stepIndex, stepCount int)) (Outcome, error)
 	// --- execution side --------------------------------------------------------------------
 
 	// Startup runs `engine startup` for a claimed work item and returns its steps.
@@ -647,6 +655,49 @@ func (r *Runner) executeWorkItem(ctx context.Context, c Candidate) Outcome {
 	// worker's lock refusal can only be called "mine, and about to be released" while it really
 	// is. See registerAttempt.
 	defer r.registerAttempt(claim.AttemptID)()
+
+	if r.Workflow != nil {
+		pinned, werr := r.Workflow(ctx, *claim)
+		if werr != nil {
+			res.Result = ResultFailed
+			res.Err = fmt.Sprintf("workflow selection refused (attempt left claimed): %v", werr)
+			return res
+		}
+		if pinned {
+			if r.ExecuteWorkflow == nil {
+				res.Result = ResultFailed
+				res.Err = "pinned workflow has no executor; attempt left claimed"
+				return res
+			}
+			// Publish immediately after DB-path selection, before the controller
+			// performs any further reads or dispatch. This closes the watch/stop
+			// blind spot for claimed workflow work; the executor callback replaces
+			// this marker with the exact pinned step before each invocation.
+			setWorkflowActive := func(stepID string, stepIndex, stepCount int) {
+				ch, _ := r.currentChannel()
+				r.setActive(ActiveWI{
+					Candidate: c, StepID: stepID, StepIndex: stepIndex, StepCount: stepCount,
+					Role: "pinned workflow", Channel: ch,
+					StepStarted: r.Now().UTC().Format(time.RFC3339), LogDir: res.LogDir,
+				})
+			}
+			setWorkflowActive("workflow startup", 0, 0)
+			outcome, err := r.ExecuteWorkflow(ctx, *claim, setWorkflowActive)
+			outcome.Candidate, outcome.LogDir = c, res.LogDir
+			if err != nil {
+				outcome.Result = ResultFailed
+				outcome.Err = err.Error()
+			} else if outcome.Result == "" {
+				// An executor that returns no classification would fall through
+				// the run's tally switch uncounted — an invisible outcome. Every
+				// nil-error path must name its result; a missing one is a bug in
+				// the executor, reported as the failure it is.
+				outcome.Result = ResultFailed
+				outcome.Err = "pinned workflow executor returned no result classification"
+			}
+			return outcome
+		}
+	}
 
 	steps, err := r.Startup(ctx, *claim)
 	if err != nil {

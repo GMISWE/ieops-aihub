@@ -585,15 +585,6 @@ func jsonTypeName(value any) string {
 	return "unknown"
 }
 
-// canonicalJSON serializes value deterministically (sorted map keys), for
-// uniqueness comparisons over DECODED values. This is the runtime-value half;
-// exact-spelling comparisons (schema texts, digests) go through
-// canonicalizeJSON instead, which preserves exact numbers rather than the
-// float64 form a decoded value already carries.
-func canonicalJSON(value any) ([]byte, error) {
-	return json.Marshal(value)
-}
-
 // uniqueItemsKey is the uniqueness key for one DECODED array element.
 func uniqueItemsKey(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)

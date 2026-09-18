@@ -268,7 +268,7 @@ func SubmitSession(ctx context.Context, api SessionAPI, wiID string, cred Creden
 	// RecordWorkflowResult path validates the stored artifact and its output
 	// against the trusted pinned contract, even after that visibility lapses.
 	// Independent/read-only grants cannot be submitted by the main producer.
-	if inv.Grant.ProducerIsolation != workflow.IsolationShared || inv.Grant.Authority != workflow.AuthorityWrite {
+	if inv.Grant.ProducerIsolation != workflow.IsolationShared {
 		return nil, sessionWorkerHold(state.WorkItemID, inv.StepID, "independent_producer_required", true)
 	}
 	status := sub.Status

@@ -267,122 +267,121 @@ func (d *driver) run(ctx context.Context) RunResult {
 	}
 }
 
-// executeStep runs one step to a recorded result, driving the authorized
-// retry loop for provider_error results. bound, when non-nil, is an already
-// open retry authorization the first invocation binds to. A non-empty
+// executeStep runs one step to a recorded result. bound, when non-nil, is an
+// already open retry authorization the invocation binds to. A non-empty
 // RunResult ends the run; an empty one means the step completed.
 func (d *driver) executeStep(ctx context.Context, stepID string, bound *pendingRepair) RunResult {
 	pending := bound
-	for seq := 1; ; seq++ {
+	if ctx.Err() != nil {
+		return RunResult{Status: RunCancelled, Err: cancelledGuidance(stepID)}
+	}
+	repairID := ""
+	if pending != nil {
+		repairID = pending.id
+	}
+	grant := d.grants[stepID]
+	var buf bytes.Buffer
+	out, err := RunStep(ctx, d.api, d.opts.WorkItemID, stepID, d.opts.WorkDir, StepOptions{
+		Credentials:          d.opts.Credentials,
+		RepairEpisodeID:      repairID,
+		RunDir:               d.opts.RunDir,
+		Log:                  &buf,
+		Logf:                 d.logf,
+		StepTimeout:          d.opts.StepTimeout,
+		ExpectedStepsVersion: d.stepsVersion,
+		ExpectedGrant:        &grant,
+	})
+	if d.opts.StepLog != nil {
+		// The per-step attempt counter is always 1: a recorded provider_error
+		// pauses for an explicit server-side repair instead of rerolling, so
+		// one invocation is all this driver ever drives for the step.
+		d.opts.StepLog(stepID, 1, buf.Bytes())
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return RunResult{Status: RunCancelled, Err: cancelledGuidance(stepID)}
 		}
-		repairID := ""
-		if pending != nil {
-			repairID = pending.id
-		}
-		grant := d.grants[stepID]
-		var buf bytes.Buffer
-		out, err := RunStep(ctx, d.api, d.opts.WorkItemID, stepID, d.opts.WorkDir, StepOptions{
-			Credentials:          d.opts.Credentials,
-			RepairEpisodeID:      repairID,
-			RunDir:               d.opts.RunDir,
-			Log:                  &buf,
-			Logf:                 d.logf,
-			StepTimeout:          d.opts.StepTimeout,
-			ExpectedStepsVersion: d.stepsVersion,
-			ExpectedGrant:        &grant,
-		})
-		if d.opts.StepLog != nil {
-			d.opts.StepLog(stepID, seq, buf.Bytes())
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return RunResult{Status: RunCancelled, Err: cancelledGuidance(stepID)}
-			}
-			if isPausedConflict(err) {
-				return RunResult{Status: RunPaused, Steps: d.stepsDone, Err: fmt.Sprintf(
-					"workflow step %s: the attempt was paused out from under the run: %v", stepID, err)}
-			}
-			if errors.Is(err, ErrInvocationOpenLive) {
-				return d.retainClaim(fmt.Sprintf("workflow step %s: %v", stepID, err))
-			}
-			var executionHold *RecoverableExecutionError
-			if errors.As(err, &executionHold) && executionHold.RetainClaim {
-				return d.retainClaim(fmt.Sprintf("workflow step %s: %v", stepID, err))
-			}
-			return d.fail(ctx, fmt.Sprintf("workflow step %s: %v", stepID, err))
-		}
-		if !out.Recorded {
-			return d.fail(ctx, fmt.Sprintf("workflow step %s returned without recording a result", stepID))
-		}
-
-		expected := workflow.ExpectedInvocation{
-			WorkItemID:    d.opts.WorkItemID,
-			FlowVersion:   out.Invocation.StepsVersion,
-			StepID:        out.Invocation.StepID,
-			StepAttemptID: out.Invocation.StepAttemptID,
-			Epoch:         int(out.Invocation.ClaimEpoch),
-			ProducerID:    out.Invocation.ProducerID,
-		}
-		d.hist.Record(expected, out.Result)
-		if pending != nil {
-			d.hist.NoteRepair(pending.id, "retry", pending.failedSA, pending.reason, expected, len(d.hist.Results)-1)
-			pending = nil
-		}
-
-		if out.Result.ReviewVerdict == workflow.ReviewFail {
-			// The server paused the attempt atomically when the FAIL was
-			// recorded; the recovery is an episode authorization, which is a
-			// repair-producer judgment this unattended controller does not
-			// make (see holdRepair).
+		if isPausedConflict(err) {
 			return RunResult{Status: RunPaused, Steps: d.stepsDone, Err: fmt.Sprintf(
-				"review FAIL on workflow step %s (step attempt %s); the attempt is paused (recoverable, never terminal). "+
-					"Recovery is a repair episode (repair producer + fresh verification + fresh independent review) driven from a resumed attempt",
-				stepID, out.Invocation.StepAttemptID)}
+				"workflow step %s: the attempt was paused out from under the run: %v", stepID, err)}
 		}
-
-		if out.Result.Status == workflow.StatusProviderError {
-			// A recorded provider_error is a real result. Opening a replacement
-			// is a repair decision, so pause and require an explicit server-side
-			// authorization instead of fabricating one unattended.
-			return d.pause(ctx, fmt.Sprintf(
-				"workflow step %s recorded provider_error; the attempt is paused with the result retained. "+
-					"Authorize an explicit retry repair before re-draining; no repair was fabricated", stepID))
+		if errors.Is(err, ErrInvocationOpenLive) {
+			return d.retainClaim(fmt.Sprintf("workflow step %s: %v", stepID, err))
 		}
-
-		if out.Result.Status != workflow.StatusCompleted {
-			// incomplete/blocked/invalid_result: a step outcome, not
-			// infrastructure. The pure policy pauses on it; so does this run.
-			return d.pause(ctx, fmt.Sprintf(
-				"workflow step %s recorded %q; the flow cannot advance on it and recovery is a decision, not a reroll. "+
-					"The attempt is paused with the result retained", stepID, out.Result.Status))
+		var executionHold *RecoverableExecutionError
+		if errors.As(err, &executionHold) && executionHold.RetainClaim {
+			return d.retainClaim(fmt.Sprintf("workflow step %s: %v", stepID, err))
 		}
-
-		d.stepsDone++
-
-		// Completed: the pure policy runs over the whole history. Mid-flow its
-		// answers mean: WAIT is the ordinary "flow not finished" verdict (and,
-		// after a provider_error retry, "hold until fresh gates run") — both are
-		// exactly what looping does next, and the approval-required hold is
-		// NextAction's to report as ActionApprovalRequired, never this branch's;
-		// PAUSE is the recoverable stop. ADVANCE is the wrap-time verdict and
-		// cannot appear before the last step records — complete() re-runs the
-		// policy there, which is where it is acted on.
-		dec, verifiable, derr := d.decide()
-		switch {
-		case !verifiable:
-			// Fence mode (history.go): the server's start fence already
-			// ordered this completion; continue on NextAction.
-		case derr != nil:
-			return d.fail(ctx, fmt.Sprintf("pure workflow policy refused the history after step %s: %v", stepID, derr))
-		case dec == workflow.DecisionWait:
-			d.logf("workflow: step %s completed; the pure policy holds the flow at wait (not finished or fresh gates pending); continuing", stepID)
-		case dec == workflow.DecisionPause:
-			return d.pause(ctx, fmt.Sprintf("pure workflow policy paused the flow after step %s", stepID))
-		}
-		return RunResult{}
+		return d.fail(ctx, fmt.Sprintf("workflow step %s: %v", stepID, err))
 	}
+	if !out.Recorded {
+		return d.fail(ctx, fmt.Sprintf("workflow step %s returned without recording a result", stepID))
+	}
+
+	expected := workflow.ExpectedInvocation{
+		WorkItemID:    d.opts.WorkItemID,
+		FlowVersion:   out.Invocation.StepsVersion,
+		StepID:        out.Invocation.StepID,
+		StepAttemptID: out.Invocation.StepAttemptID,
+		Epoch:         int(out.Invocation.ClaimEpoch),
+		ProducerID:    out.Invocation.ProducerID,
+	}
+	d.hist.Record(expected, out.Result)
+	if pending != nil {
+		d.hist.NoteRepair(pending.id, "retry", pending.failedSA, pending.reason, expected, len(d.hist.Results)-1)
+	}
+
+	if out.Result.ReviewVerdict == workflow.ReviewFail {
+		// The server paused the attempt atomically when the FAIL was
+		// recorded; the recovery is an episode authorization, which is a
+		// repair-producer judgment this unattended controller does not
+		// make (see holdRepair).
+		return RunResult{Status: RunPaused, Steps: d.stepsDone, Err: fmt.Sprintf(
+			"review FAIL on workflow step %s (step attempt %s); the attempt is paused (recoverable, never terminal). "+
+				"Recovery is a repair episode (repair producer + fresh verification + fresh independent review) driven from a resumed attempt",
+			stepID, out.Invocation.StepAttemptID)}
+	}
+
+	if out.Result.Status == workflow.StatusProviderError {
+		// A recorded provider_error is a real result. Opening a replacement
+		// is a repair decision, so pause and require an explicit server-side
+		// authorization instead of fabricating one unattended.
+		return d.pause(ctx, fmt.Sprintf(
+			"workflow step %s recorded provider_error; the attempt is paused with the result retained. "+
+				"Authorize an explicit retry repair before re-draining; no repair was fabricated", stepID))
+	}
+
+	if out.Result.Status != workflow.StatusCompleted {
+		// incomplete/blocked/invalid_result: a step outcome, not
+		// infrastructure. The pure policy pauses on it; so does this run.
+		return d.pause(ctx, fmt.Sprintf(
+			"workflow step %s recorded %q; the flow cannot advance on it and recovery is a decision, not a reroll. "+
+				"The attempt is paused with the result retained", stepID, out.Result.Status))
+	}
+
+	d.stepsDone++
+
+	// Completed: the pure policy runs over the whole history. Mid-flow its
+	// answers mean: WAIT is the ordinary "flow not finished" verdict (and,
+	// after a provider_error retry, "hold until fresh gates run") — both are
+	// exactly what looping does next, and the approval-required hold is
+	// NextAction's to report as ActionApprovalRequired, never this branch's;
+	// PAUSE is the recoverable stop. ADVANCE is the wrap-time verdict and
+	// cannot appear before the last step records — complete() re-runs the
+	// policy there, which is where it is acted on.
+	dec, verifiable, derr := d.decide()
+	switch {
+	case !verifiable:
+		// Fence mode (history.go): the server's start fence already
+		// ordered this completion; continue on NextAction.
+	case derr != nil:
+		return d.fail(ctx, fmt.Sprintf("pure workflow policy refused the history after step %s: %v", stepID, derr))
+	case dec == workflow.DecisionWait:
+		d.logf("workflow: step %s completed; the pure policy holds the flow at wait (not finished or fresh gates pending); continuing", stepID)
+	case dec == workflow.DecisionPause:
+		return d.pause(ctx, fmt.Sprintf("pure workflow policy paused the flow after step %s", stepID))
+	}
+	return RunResult{}
 }
 
 // holdRepair maps an ActionRepairRequired hold onto an ending. A D9 retry
@@ -532,14 +531,6 @@ func progressFor(state *State, stepID string) *Progress {
 		}
 	}
 	return nil
-}
-
-func strField(m map[string]any, key string) string {
-	if m == nil {
-		return ""
-	}
-	s, _ := m[key].(string)
-	return s
 }
 
 func cancelledGuidance(stepID string) string {

@@ -51,7 +51,7 @@ func GitDiff(ctx context.Context, worktreePath string, vsBase bool) (string, err
 		fileDiff, diffErr := exec.CommandContext(ctx, "git", "-C", worktreePath,
 			"diff", "--no-index", "--no-ext-diff", "--", "/dev/null", name).CombinedOutput()
 		var exit *exec.ExitError
-		if diffErr != nil && !(errors.As(diffErr, &exit) && exit.ExitCode() == 1) {
+		if diffErr != nil && (!errors.As(diffErr, &exit) || exit.ExitCode() != 1) {
 			return "", fmt.Errorf("git diff untracked %q: %w\n%s", name, diffErr, fileDiff)
 		}
 		diff.Write(fileDiff)

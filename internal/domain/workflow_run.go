@@ -88,12 +88,14 @@ package domain
 // records, it refuses what must be refused, and it pauses on FAIL.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -2100,8 +2102,14 @@ func resolveCompletedResultArtifact(ctx context.Context, tx pgx.Tx, w *WorkItem,
 	// therefore refused, not waived.
 	var attrs map[string]any
 	if len(attrsRaw) > 0 {
-		if err := json.Unmarshal(attrsRaw, &attrs); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(attrsRaw))
+		dec.UseNumber()
+		if err := dec.Decode(&attrs); err != nil {
 			return NewErr(ErrInternalError, fmt.Sprintf("stored artifact %s attrs do not parse", result.Artifact.ID))
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); err != io.EOF {
+			return NewErr(ErrInternalError, fmt.Sprintf("stored artifact %s attrs contain trailing data", result.Artifact.ID))
 		}
 	}
 	payload, hasPayload := attrs["structured_payload"].(map[string]any)
@@ -2513,7 +2521,7 @@ func ApproveWorkflowStep(ctx context.Context, pool *pgxpool.Pool, idOrSlug strin
 		return nil, NewErr(ErrNotFound, fmt.Sprintf("step %q is not in the current workflow", req.StepID))
 	}
 	wiRHS := w.RequiresHumanSession != nil && *w.RequiresHumanSession
-	if !(wiRHS && step.RHS != nil && *step.RHS) {
+	if !wiRHS || step.RHS == nil || !*step.RHS {
 		return nil, NewErr(ErrBadRequest, fmt.Sprintf(
 			"step %q does not gate on a human approval (effective RHS is false); there is nothing to approve", req.StepID))
 	}

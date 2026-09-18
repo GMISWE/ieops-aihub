@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -231,19 +230,6 @@ func CanonicalBundleJSON(b *SkillBundle) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(b)
-}
-
-// ensureJSONEOF verifies that a decoder that has read one JSON value has
-// nothing but WELL-FORMED whitespace left: the next token must be io.EOF
-// exactly. A nil token means a second value followed; any other error is
-// malformed trailing text — neither reads as success. Retained for callers
-// that drive their own json.Decoder and want the same exactly-one-value rule
-// as decodeStrictOne.
-func ensureJSONEOF(dec *json.Decoder) error {
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("unexpected trailing JSON content")
-	}
-	return nil
 }
 
 // VersionDigest computes the content digest of a skill version:

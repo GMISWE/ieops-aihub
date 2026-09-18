@@ -123,16 +123,13 @@ func episodeStatusOf(t *testing.T, pool *pgxpool.Pool, id string) string {
 // authorization on the failed review.
 type episodeFixture struct {
 	wi       *WorkItem
-	attempt1 string
 	attempt2 string
 	auth     *WorkflowRepairAuthorization
-	reviewSA string // the FAILED review's step attempt
 	ownerRec *UserRecord
 	owner    string
 	project  string
 	pool     *pgxpool.Pool
 	specRHS  bool
-	specArt  string // the ORIGINAL spec artifact id ("art-spec")
 }
 
 func seedEpisodeFixture(t *testing.T, specRHS bool) *episodeFixture {

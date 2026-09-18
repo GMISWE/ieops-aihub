@@ -345,7 +345,6 @@ func skillVersionAccessSQL(alias string, caller *UserRecord, idx int) (clause st
 // exactly this one function — the single-copy gate greps for it, so do not
 // restate the table name in SQL anywhere else in this package.
 func skillGrantExistsSQL(alias string, firstIdx int, withScope bool, caller *UserRecord, memberProbe []byte) (clause string, args []any, nextIdx int) {
-	nextIdx = firstIdx
 	// args order: $firstIdx = caller ID (project-owner arm / membership arm),
 	//            $firstIdx+1 = membership probe,
 	//            then optionally the scoped-admin flag, then the scope pin.

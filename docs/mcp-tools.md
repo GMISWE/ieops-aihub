@@ -1,7 +1,7 @@
 # MCP tool reference
 
 The polyforge MCP server (the `polyforge` binary in MCP mode, see
-[`../README.md`](../README.md)) exposes **45 `pf_*` tools**. Every tool maps to
+[`../README.md`](../README.md)) exposes **52 `pf_*` tools**. Every tool maps to
 an HTTP endpoint through the Go SDK in one path:
 
 ```

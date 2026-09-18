@@ -619,7 +619,8 @@ func TestSkillRegistryListPaginationAndOwnerFilter(t *testing.T) {
 	owner := &UserRecord{ID: ownerID, Role: "writer"}
 
 	// Three skills; ids are generated, so capture them and sort by what the
-	// query orders on (s.id) to know the page boundaries.
+	// query orders on (s.id in COLLATE "C" byte order — sortStrings) to know
+	// the page boundaries.
 	var ids []string
 	for _, name := range []string{"page-a", "page-b", "page-c"} {
 		ids = append(ids, createSkillFor(t, ctx, pool, owner, name))
@@ -647,6 +648,76 @@ func TestSkillRegistryListPaginationAndOwnerFilter(t *testing.T) {
 	filtered, aerr := ListSkills(ctx, pool, owner, ListSkillsRequest{Owner: &missing})
 	require.Nil(t, aerr)
 	require.Empty(t, filtered)
+}
+
+// TestSkillRegistryListOrdersSkillIDsBytewise pins the collation half of the
+// list contract deterministically. The pagination test above relies on
+// randomly generated ids, so a lost COLLATE only fails it when the day's
+// random ids happen to straddle a case boundary. These four ids are chosen
+// so locale order and byte order DISAGREE wherever the database's collation
+// is not already C: bytewise '9'(0x39) < 'B'(0x42) < 'Z'(0x5A) < 'a'(0x61)
+// gives 9,B,Z,a, while a case-folding locale collation (glibc or ICU
+// en_US.utf8 — the GitHub Actions service container's initdb default) orders
+// 9,a,B,Z. The full-list assertion catches a lost ORDER BY collation; the
+// page assertions catch a lost cursor-collation independently (bytes put B <
+// Z < a, so a locale `s.id > 'skill_Bzzzzzz1'` would judge 'skill_aaaaaaa1'
+// not-greater and silently drop it from every later page).
+//
+// On a database that IS initdb'd C/POSIX the test passes either way and
+// cannot distinguish — CI's en_US.utf8 database is where a regression
+// shows up, which is exactly the environment that filed the bug.
+func TestSkillRegistryListOrdersSkillIDsBytewise(t *testing.T) {
+	pool := setupSkillRegistryDB(t)
+	ctx := context.Background()
+	ownerID := skillUser(t, pool, "owner")
+	skillCleanup(t, pool, ownerID)
+	defer skillCleanup(t, pool, ownerID)
+	owner := &UserRecord{ID: ownerID, Role: "writer"}
+
+	// Pure diagnostics: says which collation this run actually exercised.
+	var datcollate string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT datcollate FROM pg_database WHERE datname = current_database()`).Scan(&datcollate))
+	t.Logf("database LC_COLLATE is %q", datcollate)
+
+	// Already in byte order; a locale collation would return 9,a,B,Z instead.
+	rows := []struct{ id, name string }{
+		{"skill_9zzzzzz1", "byte-a"},
+		{"skill_Bzzzzzz1", "byte-b"},
+		{"skill_Zzzzzzz1", "byte-c"},
+		{"skill_aaaaaaa1", "byte-d"},
+	}
+	for _, r := range rows {
+		mustExec(t, pool, fmt.Sprintf(
+			`INSERT INTO skills (id, owner_user_id, name) VALUES ('%s', '%s', '%s')`,
+			r.id, ownerID, r.name))
+	}
+
+	// The full list comes back in BYTE order whatever the database collation.
+	list, aerr := ListSkills(ctx, pool, owner, ListSkillsRequest{})
+	require.Nil(t, aerr)
+	require.Len(t, list, len(rows))
+	for i, item := range list {
+		require.Equal(t, rows[i].id, item.ID, "list must be in byte order of skill id")
+	}
+
+	// Cursor pagination must traverse the SAME order without skips or
+	// repeats — the cursor comparison and the ORDER BY share COLLATE "C".
+	page1, aerr := ListSkills(ctx, pool, owner, ListSkillsRequest{Limit: 2})
+	require.Nil(t, aerr)
+	require.Len(t, page1, 2)
+	require.Equal(t, rows[0].id, page1[0].ID)
+	require.Equal(t, rows[1].id, page1[1].ID)
+
+	page2, aerr := ListSkills(ctx, pool, owner, ListSkillsRequest{Limit: 2, Cursor: page1[1].ID})
+	require.Nil(t, aerr)
+	require.Len(t, page2, 2)
+	require.Equal(t, rows[2].id, page2[0].ID)
+	require.Equal(t, rows[3].id, page2[1].ID)
+
+	page3, aerr := ListSkills(ctx, pool, owner, ListSkillsRequest{Limit: 2, Cursor: page2[1].ID})
+	require.Nil(t, aerr)
+	require.Empty(t, page3)
 }
 
 // ─── aihub#708 Batch 1A repair: digest reproducibility over a real JSONB roundtrip ──

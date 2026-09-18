@@ -184,6 +184,16 @@ func GetSkillVersion(ctx context.Context, pool *pgxpool.Pool, caller *UserRecord
 // accessible version attached, ordered by skill id (the page cursor). A skill
 // appears for a caller iff the caller is an unscoped admin, owns it
 // (unscoped), or can access at least one of its versions.
+//
+// The order is BYTE order of the id, on every database: both the ORDER BY and
+// the cursor comparison are pinned to COLLATE "C". Skill ids are mixed-case
+// base62, which a locale collation orders differently than bytes ('a' sorts
+// before 'B' under en_US.utf8; bytewise 'B' < 'a'), and the GitHub Actions
+// service container initdb's its database en_US.utf8 while local databases
+// are often C/POSIX — so an unpinned list has one order on CI and another
+// locally. Pinning BOTH ends also keeps the cursor predicate in the same
+// collation as the sort: a comparison under one collation and an ORDER BY
+// under another skips or repeats ids across page boundaries.
 func ListSkills(ctx context.Context, pool *pgxpool.Pool, caller *UserRecord, req ListSkillsRequest) ([]SkillDetail, *AihubError) {
 	if aerr := skillRequireReadCaller(caller); aerr != nil {
 		return nil, aerr
@@ -228,7 +238,10 @@ func ListSkills(ctx context.Context, pool *pgxpool.Pool, caller *UserRecord, req
 	}
 	if req.Cursor != "" {
 		args = append(args, req.Cursor)
-		conds = append(conds, fmt.Sprintf("s.id > $%d", nextIdx))
+		// COLLATE "C": the cursor predicate must compare ids exactly as the
+		// ORDER BY sorts them (byte order), whatever LC_COLLATE the database
+		// was initdb'd with — see the function comment.
+		conds = append(conds, fmt.Sprintf(`(s.id COLLATE "C") > $%d`, nextIdx))
 		nextIdx++
 	}
 	args = append(args, limit)
@@ -246,7 +259,7 @@ func ListSkills(ctx context.Context, pool *pgxpool.Pool, caller *UserRecord, req
 		    LIMIT 1
 		) acc ON TRUE
 		WHERE %s
-		ORDER BY s.id
+		ORDER BY s.id COLLATE "C"
 		LIMIT $%d`, pred, strings.Join(conds, " AND "), nextIdx), args...)
 	if err != nil {
 		return nil, dbErrCause(err, "list skills")

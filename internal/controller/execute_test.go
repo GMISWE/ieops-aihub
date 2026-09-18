@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/workflow"
 )
@@ -257,5 +258,62 @@ func TestRunStepSideEffectFailureStopsWithoutFallback(t *testing.T) {
 	}
 	if log := env.log.String(); !strings.Contains(log, "reconcile_required") {
 		t.Fatalf("step log lacks the reconcile_required chain record:\n%s", log)
+	}
+}
+
+// TestRunStepDeadlineOutputSnapshotIsRaceFree pins the CI -race report on the
+// step-deadline branch: RunStep reads the worker's output after Proc.Stop
+// without waiting for Proc.Wait, while os/exec's pipe-copy goroutine can
+// still be draining the streams — with a raw bytes.Buffer that read raced the
+// copy goroutine's Write. The harness emits one line per stream and then
+// outlives the deadline, so the deadline branch snapshots both streams while
+// the pipes are live; under -race the mutex-protected outputCollector must
+// serialize every snapshot against every pipe-copy Write (the race detector
+// flags the unsynchronized pair even when the writes complete long before the
+// read, because nothing on this branch ever orders them). The retained log
+// also pins that the streams stay separate: the worker's stderr line belongs
+// to the labeled stderr section and its stdout line to the stdout section,
+// because stdout's contract is exactly one JSON StepResult and merged
+// narration would break the parse.
+func TestRunStepDeadlineOutputSnapshotIsRaceFree(t *testing.T) {
+	env := newRunStepTestEnv(t, "printf 'deadline stdout line\\n'\nprintf 'deadline stderr line\\n' >&2\nsleep 30\n")
+
+	out, err := RunStep(context.Background(), env.api, "wi_fake", "review-code", t.TempDir(), StepOptions{
+		Credentials:          Credentials{AttemptID: "ra_fake", ClaimEpoch: 7, SessionSecret: "sec"},
+		RunDir:               t.TempDir(),
+		Log:                  &env.log,
+		ExpectedStepsVersion: 3,
+		StepTimeout:          500 * time.Millisecond,
+	})
+
+	var hold *RecoverableExecutionError
+	if !errors.As(err, &hold) {
+		t.Fatalf("error = %v, want a *RecoverableExecutionError for the step deadline", err)
+	}
+	if !strings.Contains(hold.Detail, "timed out") {
+		t.Fatalf("hold detail %q does not report the step deadline", hold.Detail)
+	}
+	if hold.RetainClaim {
+		t.Fatalf("the sleeping worker's stop is confirmed; the hold must not retain the claim: %+v", hold)
+	}
+	if out.Recorded || len(env.api.recorded) != 0 {
+		t.Fatalf("a timed-out step records nothing; out=%+v recorded=%+v", out, env.api.recorded)
+	}
+	if starts := env.harnessStarts(t); starts != 1 {
+		t.Fatalf("harness started %d times; a step deadline must never fall back over the open invocation", starts)
+	}
+
+	log := env.log.String()
+	stderrAt := strings.Index(log, "[worker stderr]")
+	stdoutAt := strings.Index(log, "[worker stdout]")
+	if stderrAt < 0 || stdoutAt < 0 || stderrAt > stdoutAt {
+		t.Fatalf("step log lacks the labeled, separated worker stream sections:\n%s", log)
+	}
+	stderrSection, stdoutSection := log[stderrAt:stdoutAt], log[stdoutAt:]
+	if !strings.Contains(stderrSection, "deadline stderr line") ||
+		!strings.Contains(stdoutSection, "deadline stdout line") ||
+		strings.Contains(stderrSection, "deadline stdout line") ||
+		strings.Contains(stdoutSection, "deadline stderr line") {
+		t.Fatalf("stream separation lost in the retained step log:\n%s", log)
 	}
 }

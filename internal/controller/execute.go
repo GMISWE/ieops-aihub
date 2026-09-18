@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GMISWE/ieops-aihub/internal/config"
@@ -458,7 +459,15 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			_ = chain.MarkUnavailable(sel, refusal.Error())
 			continue
 		}
-		var stdout, stderr bytes.Buffer
+		// One mutex-protected collector per stream (outputCollector): the
+		// os/exec pipe-copy goroutine keeps draining the worker's pipes after
+		// Proc.Stop observes the process group empty — a group that emptied
+		// says nothing about the pipes, whose in-flight bytes are still being
+		// copied — and the deadline branch below reads these streams without
+		// waiting for Proc.Wait. With a raw bytes.Buffer those reads raced the
+		// copy goroutine's Writes (the CI -race report); with the collector every
+		// Write and every snapshot serializes on its mutex.
+		var stdout, stderr outputCollector
 		proc, e := modelruntime.Start(ready.Command, modelruntime.StartOptions{WorkingDir: workDir, Stdout: &stdout, Stderr: &stderr})
 		if e != nil {
 			opts.logf("workflow: step %s: could not start %s/%s: %v", stepID, sel.Candidate.Harness, sel.Candidate.Model, e)
@@ -476,7 +485,10 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			// A step deadline is distinct from cancellation of the whole run.
 			// Both stop the group; only a confirmed stop permits a pause.
 			stopErr := proc.Stop(10 * time.Second)
-			writeLog(opts.Log, combinedWorkerOutput(stdout.Bytes(), stderr.Bytes()), chain)
+			// Snapshot under the collector's mutex: the pipe-copy goroutine can
+			// still be draining here, because Stop's group-empty observation
+			// precedes any Proc.Wait on this branch.
+			writeLog(opts.Log, combinedWorkerOutput(stdout.bytes(), stderr.bytes()), chain)
 			if stopErr != nil {
 				cleanupScratch = false
 				return out, &RecoverableExecutionError{Detail: fmt.Sprintf("worker stop after step deadline/cancellation was not confirmed: %v", stopErr), RetainClaim: true}
@@ -490,7 +502,7 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 		// because a leader that exited says nothing about descendants still
 		// holding the group id (modelruntime.Proc.Stop's whole contract).
 		stopErr := proc.Stop(10 * time.Second)
-		workerOutput := combinedWorkerOutput(stdout.Bytes(), stderr.Bytes())
+		workerOutput := combinedWorkerOutput(stdout.bytes(), stderr.bytes())
 		if stopErr != nil {
 			cleanupScratch = false
 			// A process tree whose stop is not confirmed can still mutate the
@@ -527,7 +539,7 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			opts.logf("workflow: step %s: worker exited nonzero after start (%v); validating its structured result before deciding the hold", stepID, runErr)
 		}
 		var result workflow.StepResult
-		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.bytes()), &result); err != nil {
 			if runErr == nil {
 				// A clean exit that still broke the output contract: the
 				// worker's own act, never something to reroll on another
@@ -605,7 +617,7 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			return out, &RecoverableExecutionError{Detail: "record workflow result: " + err.Error()}
 		}
 		if aErr := chain.Apply(sel, result); aErr != nil {
-			writeLog(opts.Log, combinedWorkerOutput(stdout.Bytes(), stderr.Bytes()), chain)
+			writeLog(opts.Log, combinedWorkerOutput(stdout.bytes(), stderr.bytes()), chain)
 			return out, fmt.Errorf("record candidate outcome in the fallback chain: %w", aErr)
 		}
 		if modelruntime.ClassifyOutcome(result) == modelruntime.OutcomeInfrastructure {
@@ -669,6 +681,54 @@ type RecoverableExecutionError struct {
 }
 
 func (e *RecoverableExecutionError) Error() string { return e.Detail }
+
+// outputCollector is a mutex-protected collector for one worker output
+// stream. os/exec hands the worker a pipe and copies it into the writer in a
+// goroutine of its own, and that copy can still be running AFTER Proc.Stop
+// returns: Stop's success means the process GROUP is empty, which says
+// nothing about the pipes — bytes the tree wrote before dying may still be
+// in flight in the pipe, and the bounded WaitDelay drain keeps the copy
+// goroutine alive after the leader is reaped. RunStep reads the streams back
+// on the step-deadline branch without ever waiting for Proc.Wait, so with a
+// raw bytes.Buffer the read and the pipe-copy goroutine's Write touched the
+// same memory with no happens-before edge between them (the CI -race
+// report). The collector closes that gap at the data structure: every Write
+// takes the mutex, and every read is bytes(), an atomic snapshot taken under
+// the same mutex — the two goroutines can never touch the same bytes
+// unsynchronized, no matter which returns first.
+//
+// One collector per stream, deliberately: stdout's entire contract is one
+// JSON StepResult while harnesses narrate progress on stderr, and the step
+// log labels the two sections separately (combinedWorkerOutput) — merging
+// the streams would let stderr narration break the stdout parse. The
+// collector changes no fallback, stop or lifecycle semantics: it is only the
+// buffering between the pipe and the snapshot.
+type outputCollector struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write appends one drained chunk under the collector's mutex. It is the
+// only method the os/exec pipe-copy goroutine ever calls.
+func (c *outputCollector) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+// bytes returns an atomic snapshot of everything drained so far, as a
+// detached copy: taken under the mutex, so a concurrent Write can neither
+// tear it nor run unsynchronized with it, and copied out, so later Writes can
+// never alias the returned slice. RunStep takes a fresh snapshot before every
+// log write and every stdout parse rather than holding a stale slice across
+// code that may still be racing the pipe drain.
+func (c *outputCollector) bytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]byte, c.buf.Len())
+	copy(out, c.buf.Bytes())
+	return out
+}
 
 // combinedWorkerOutput retains diagnostics in the step log without polluting
 // stdout, whose entire contract is one JSON StepResult. Harnesses routinely

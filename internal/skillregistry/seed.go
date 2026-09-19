@@ -1017,6 +1017,11 @@ Rules:
 - Self-check what you can (compile, quick tests) but do not claim
   verification results you did not produce; the verification gate exists to
   establish those.
+- Implementation discipline: implement the plan as complete slices and
+  self-check at most once per slice. Do NOT run full builds or test suites
+  after each file — per-file full validation is the exact pattern that makes
+  this step slow. Concentrated build/test/validation belongs to the
+  orchestrator and the verification gate, not to this step.
 - If you cannot complete the work, report incomplete/blocked with exactly
   what remains — an honest incomplete is a recoverable state.
 

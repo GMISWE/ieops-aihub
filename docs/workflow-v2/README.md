@@ -20,6 +20,7 @@ effect.
 | `03-contradictions-corrected.md` | the five contradictions this batch corrects in the shipped skill prose, each with the tool-surface truth it now matches |
 | `04-unresolved-migration-references.md` | remaining bounded limitations, including interactive lifecycle ownership outside step execution and deferred DB-workflow cleanup |
 | `05-qualification.md` | isolated DB/CLI/drain/browser qualification matrix and exact compatibility promises |
+| `06-gate-semantics-mutation-audit.md` | isolated pure and not-publishable prototype contract for strict mutation-gate audit evidence |
 
 ## The one-paragraph version
 

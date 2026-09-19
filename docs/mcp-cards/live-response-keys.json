@@ -47,12 +47,18 @@
     "pf_recall": {
       "lexical": "Added by aihub#360 (2026-09-12): the verbatim-substring second section, present whenever query is sent. The corpus was extracted before the section existed, so no record can hold it."
     },
+    "pf_remember": {
+      "version": "aihub#725 (2026-09-19) added version:1 to the POST /v1/memories remember response (server-side immutable-version attribution) so the controller-side artifact sink can cite the exact stored triple. The aihub#412 corpus predates the field, so no record can hold it."
+    },
     "pf_resolve_commit": {
       "ok": "Published and never called in the corpus window (annotations are answered through the /ui viewer), so no corpus record and a null card list."
     },
     "pf_rotate_identifier": {
       "plain": "Published and never called in the corpus window, so no corpus record and a null card list.",
       "prefix": "Published and never called in the corpus window, so no corpus record and a null card list."
+    },
+    "pf_save_artifact": {
+      "version": "aihub#725 (2026-09-19) added version:1 to the POST /v1/memories remember response (server-side immutable-version attribution) so the controller-side artifact sink can cite the exact stored triple. The aihub#412 corpus predates the field, so no record can hold it."
     },
     "pf_update_project": {
       "members_version": "Same aihub#260 field as pf_create_project above (PR #289, landed 2026-09-02). The corpus's 22 pf_update_project calls end on 2026-09-01, the day before."

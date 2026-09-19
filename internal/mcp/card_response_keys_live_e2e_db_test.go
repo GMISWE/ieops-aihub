@@ -180,7 +180,18 @@ const floorLiveKeyChecks = 218
 // K7 CORPUS_INVENTED forbids a card from naming a key the generated corpus has
 // no record of, and the corpus predates the section; they move onto the cards
 // whenever the corpus is next re-extracted, which lowers this back for free.
-const maxUndeclaredLiveKeys = 16
+//
+// 16 -> 33 on 2026-09-19: aihub#720 published the four skill-registry read
+// tools (pf_list_skills / pf_get_skill / pf_list_skill_versions /
+// pf_get_skill_version), the first NEW tools since the corpus was extracted,
+// and the live walk drives all four against a seeded skill. Every one of the
+// 17 new keys is the same debt class as aihub#360's — the corpus predates the
+// tool, so K7 forbids the card from naming any of them and the golden file is
+// the only place they can be declared until the corpus is next re-extracted.
+// The entire 17 (not 16+17: the walk unions across runs, and the fresh-database
+// measurement is 33) lowers for free at that re-extraction; no pre-existing
+// entry moved.
+const maxUndeclaredLiveKeys = 33
 
 // liveWalkOutOfReach names the published tools this walk cannot drive, with the
 // reason. It is asserted to be EXACTLY the set of undriven tools, so a tool that
@@ -641,6 +652,42 @@ func runLiveKeyWalk(t *testing.T, w *liveKeyWalk) {
 		"name": project, "description": "aihub#482 live response-key walk, updated",
 	})
 	w.drive(t, "pf_rotate_identifier", map[string]any{"name": project})
+
+	// ── skills (aihub#720 read surface) ─────────────────────────────────────
+	//
+	// The walk's stack connects straight to the migrated database, so the
+	// fixture seeds one private skill identity + version directly by SQL —
+	// the registry has no published WRITE tool (deliberately: aihub#720's
+	// scope is the read surface), and without a seeded row three of the four
+	// read tools could only ever answer 404 refusals, which the walk counts
+	// as undriven. The digest is not content-verified here because nothing in
+	// the read path re-derives it; the columns the four tools actually
+	// project (id, name, owner, version, visibility, timestamps) are real.
+	skillID := fmt.Sprintf("skill_livewalk%d", stamp%100000)
+	// e2eStack seeds its admin as the constant uid "u_echo_e2e" (newE2EStack);
+	// the skills table wants that owner, and this walk's MCP session IS that
+	// admin, so the seeded skill is visible to the four read tools.
+	const liveWalkOwnerID = "u_echo_e2e"
+	if _, err := s.pool.Exec(context.Background(), `
+		INSERT INTO skills(id, owner_user_id, name) VALUES($1,$2,$3)
+		ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+		skillID, liveWalkOwnerID, fmt.Sprintf("live-walk-read-%d", stamp%100000)); err != nil {
+		t.Fatalf("seed skill identity: %v", err)
+	}
+	if _, err := s.pool.Exec(context.Background(), `
+		INSERT INTO skill_versions(skill_id, version, bundle, contract, digest, author_user_id)
+		VALUES($1, 1, $2, $3, 'sha256:'||repeat('a',64), $4)
+		ON CONFLICT (skill_id, version) DO NOTHING`,
+		skillID,
+		`{"entry":"SKILL.md","files":[{"path":"SKILL.md","content":"live walk"}],"provenance":{"source":"aihub#720 live walk"},"license":{"name":"Proprietary"}}`,
+		`{"capabilities":["read_only"],"runtime":{"interactive":false}}`,
+		liveWalkOwnerID); err != nil {
+		t.Fatalf("seed skill version: %v", err)
+	}
+	w.drive(t, "pf_list_skills", map[string]any{})
+	w.drive(t, "pf_get_skill", map[string]any{"skill_id": skillID})
+	w.drive(t, "pf_list_skill_versions", map[string]any{"skill_id": skillID})
+	w.drive(t, "pf_get_skill_version", map[string]any{"skill_id": skillID, "version": 1})
 
 	// ── users and keys ──────────────────────────────────────────────────────
 	user := w.drive(t, "pf_create_user", map[string]any{

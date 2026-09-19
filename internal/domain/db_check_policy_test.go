@@ -555,6 +555,14 @@ var dbCheckPolicies = map[string]dbCheckPolicy{
 		Reason: "steps_version is never caller-supplied; the only writer is the pinning transaction, which " +
 			"computes the next generation number from the locked row, so a value outside the CHECK cannot be written.",
 	},
+	"work_items.work_items_workflow_mode_check": {
+		Where: "resolveCreateWorkflowMode (workflow.go), the aihub#720 create-time composition-mode " +
+			"selector: CreateWorkItem refuses any mode outside WorkflowModeValues() with COMPOSE_FAILED " +
+			"naming the legal values BEFORE the transaction opens",
+		Disposition: dispMirroredEnum,
+		Column:      "workflow_mode",
+		GoVocab:     WorkflowModeValues(),
+	},
 	"wi_workflow_generations.wi_workflow_generations_steps_version_check": {
 		Where:       "pinWorkflowGeneration (workflow.go): refuses stepsVersion < 1 before any write",
 		Disposition: dispGuarded,

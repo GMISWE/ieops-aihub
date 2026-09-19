@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -260,6 +261,106 @@ func pinWorkflowGeneration(ctx context.Context, q workflowQuerier, stepsVersion 
 		StepMeta:  stepMeta,
 		Digest:    digest,
 	}, nil
+}
+
+// WorkflowModeValues is the ONE Go copy of migration 0045's CHECK list
+// (work_items.work_items_workflow_mode_check): legacy, db, pending. It is the
+// vocabulary resolveCreateWorkflowMode refuses outside of, and the value the
+// db-check registry compares against the SQL IN-list, so the two cannot drift
+// apart the way a second literal could.
+func WorkflowModeValues() []string {
+	return []string{"legacy", "db", "pending"}
+}
+
+// resolveCreateWorkflowMode is aihub#720's create-time composition-mode
+// selector: the ONE place the steps/workflow_mode combination is judged, kept
+// PURE (no DB, no registry) so the create path's boundary is testable without
+// a database and the rules cannot fork per caller.
+//
+// The combination table, and why each refusal is COMPOSE_FAILED rather than a
+// plain 400: a mode/steps contradiction is a COMPOSITION request that cannot
+// be satisfied, and the composer that sent it must learn WHICH half was
+// wrong from the reason, not from re-reading the whole surface guessing. It
+// is also the fail-closed boundary: no combination here is resolved by
+// silently falling back to legacy — the mode a row ends up with is returned
+// explicitly, and every other answer is an error.
+//
+//	steps present        "" or "db" → db      (generation 1 is pinned in the
+//	                                          same transaction; the caller
+//	                                          cannot opt out)
+//	                     "legacy"  → refused  (a work item cannot carry a
+//	                                          pinned workflow AND the legacy
+//	                                          scenario graph — two authorities
+//	                                          over the same step history)
+//	                     "pending" → refused  (pending means "no flow yet";
+//	                                          steps ARE a flow)
+//	no steps             "" or "legacy" → legacy (byte-identical to before
+//	                                          aihub#720: the default, and
+//	                                          what migration 0045 backfilled)
+//	                     "pending" → pending (filed for orchestration; not
+//	                                          claimable until a first
+//	                                          generation is pinned)
+//	                     "db"      → refused  ('db' asserts a pinned
+//	                                          generation exists; without steps
+//	                                          none was pinned in this
+//	                                          transaction)
+func resolveCreateWorkflowMode(requested string, hasSteps bool) (string, *AihubError) {
+	if requested != "" && !slices.Contains(WorkflowModeValues(), requested) {
+		return "", composeFailed("invalid_workflow_mode",
+			fmt.Sprintf("workflow_mode must be one of legacy, db or pending; got %q", requested))
+	}
+	if hasSteps {
+		switch requested {
+		case "", "db":
+			return "db", nil
+		case "legacy":
+			return "", composeFailed("steps_with_legacy_mode",
+				"steps select DB composition and workflow_mode=legacy selects the scenario graph; a work item cannot carry both (drop workflow_mode or drop steps)")
+		default: // "pending"
+			return "", composeFailed("steps_with_pending_mode",
+				"workflow_mode=pending means no workflow is pinned yet, and steps pin generation 1 in this same create; the two are contradictory (drop one)")
+		}
+	}
+	switch requested {
+	case "", "legacy":
+		return "legacy", nil
+	case "pending":
+		return "pending", nil
+	default: // "db" without steps
+		return "", composeFailed("db_mode_requires_steps",
+			"workflow_mode=db requires steps: db asserts a pinned workflow generation, and without steps none is pinned in this create (send steps, or omit workflow_mode for the legacy path)")
+	}
+}
+
+// composeFailed builds the typed create-time composition refusal: code
+// COMPOSE_FAILED, a human-readable message, and a machine-readable reason in
+// details so a composer can branch without parsing prose.
+func composeFailed(reason, msg string) *AihubError {
+	return NewErrDetails(ErrComposeFailed, msg, map[string]any{"reason": reason})
+}
+
+// composeFailedFromPin re-types a pin-path refusal as COMPOSE_FAILED for the
+// create boundary. The pin path (resolveWorkflowSkillRef, pinWorkflowGeneration)
+// speaks the registry's own vocabulary — NOT_FOUND for an unknown or
+// inaccessible skill (the no-oracle rule), BAD_REQUEST for an invalid
+// composition — and those are exactly the create-with-steps failures aihub#720
+// requires to carry COMPOSE_FAILED. The original message is preserved verbatim
+// as both the message and the reason: it already names the step and the cause,
+// and synthesizing a second phrasing here would be a copy of the rule, which
+// is what this slice must not do.
+//
+// Everything else passes through untouched. A dbErr* INTERNAL_ERROR is a
+// server failure, not a composition verdict, and re-typing it would tell a
+// caller its flow was invalid when the database was.
+func composeFailedFromPin(aerr *AihubError) *AihubError {
+	if aerr == nil {
+		return nil
+	}
+	switch aerr.Code {
+	case ErrBadRequest, ErrNotFound:
+		return NewErrDetails(ErrComposeFailed, aerr.Message, map[string]any{"reason": aerr.Message})
+	}
+	return aerr
 }
 
 // resolveWorkflowSkillRef resolves one skill ref — an exact version, or the

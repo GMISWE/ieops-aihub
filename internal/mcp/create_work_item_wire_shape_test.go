@@ -74,6 +74,11 @@ var createProbeArgs = map[string]any{
 	"content":             "a body the caller sent",
 	"force_create":        true,
 	"force_reason":        "a reason long enough for the server to accept it",
+	// aihub#720 slice C: published on both create tools from workItemFieldProps;
+	// 'pending' is distinguishable from every other probe value and is a value
+	// the real create would accept (store uncomposed), unlike 'db', which the
+	// server refuses without steps — a refusal the fake peer never sees anyway.
+	"workflow_mode": "pending",
 }
 
 // TestCreateForwardsEveryPublishedPropertyVerbatim is the whole-map arm.

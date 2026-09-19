@@ -493,7 +493,7 @@ func UpdateWorkItemWorkflow(ctx context.Context, pool *pgxpool.Pool, idOrSlug st
 	// workflow-bearing work item can never hold a NULL requires_human_session.
 	if _, err := tx.Exec(ctx, `
 		UPDATE work_items
-		SET steps = $1, steps_version = $2, requires_human_session = $3, updated_at = clock_timestamp()
+		SET steps = $1, steps_version = $2, requires_human_session = $3, workflow_mode = 'db', updated_at = clock_timestamp()
 		WHERE id = $4`,
 		stepsJSON, next, *req.RequiresHumanSession, w.ID); err != nil {
 		return nil, dbErrCause(err, "move workflow pointer")
@@ -560,7 +560,7 @@ func pinFirstWorkflowGenerationInTx(ctx context.Context, tx pgx.Tx, wiID, projec
 		return dbErrCause(err, "insert workflow generation")
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE work_items SET steps = $1, steps_version = 1 WHERE id = $2`, stepsJSON, wiID); err != nil {
+		UPDATE work_items SET steps = $1, steps_version = 1, workflow_mode = 'db' WHERE id = $2`, stepsJSON, wiID); err != nil {
 		return dbErrCause(err, "pin workflow pointer")
 	}
 	return insertWorkflowEvent(ctx, tx, wiID, project, callerUserID, "", "workflow_revision", map[string]any{

@@ -702,6 +702,15 @@ var semanticValuesByTool = map[string]string{
 	// nothing else in the request contains it — so the verdict is now
 	// token-proved rather than key-presence-only.
 	"pf_save_artifact.type": domain.MethodologyTypeEnum[0],
+	// aihub#720 slice D. `version` on pf_get_skill_version is the first NUMBER
+	// parameter that travels in the URL PATH rather than the body or the query,
+	// which breaks both of the gate's own detection mechanisms at once: the
+	// generic number filler is float64(7) with no token, and key-presence cannot
+	// see a path segment. The value below is the aihub#280 string spelling
+	// skillVersionArg deliberately tolerates, and it is its own token —
+	// nothing else in the request contains it — so the verdict is token-proved
+	// on the recorded path.
+	"pf_get_skill_version.version": "1701",
 }
 
 // fillerOverridesForProbeTarget is semanticValuesByTool's escape from its own
@@ -1894,6 +1903,15 @@ var serverNamesNoToolCanReach = map[string]string{
 	// publish `steps` on the create tool and delete this entry in the same
 	// change.
 	"handleCreateWorkItem.steps": "create-with-steps is deliberately unpublished until the workflow engine (aihub#708 Batch 2B) can execute it; pf_update_workflow is the published path",
+	// ⚠️ `handleCreateWorkItem.workflow_mode` sat here from aihub#720 slice B
+	// until slice C, and was REMOVED rather than re-worded: slice C publishes
+	// `workflow_mode` on pf_create_work_item (workItemFieldProps, shared with
+	// pf_batch_create_work_items), so the name is reachable from a tool that
+	// calls this route and there is nothing left to exempt — the map's own
+	// staleness arm is what would have forced this deletion had it been
+	// forgotten. `steps` above keeps its exemption: db-mode composition inside
+	// the create still has no published surface, and an exempted entry is worth
+	// more than a published parameter nothing can execute.
 	// ⚠️ `handleClaimWorkItem.task_branches` was the first entry here until
 	// aihub#416, and it was removed rather than re-worded: the git_branch
 	// derivation it existed for is retired, so the handler binds no such field

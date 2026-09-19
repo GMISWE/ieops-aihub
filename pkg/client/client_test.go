@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -704,3 +706,156 @@ func TestNonPoolingFallbackStillDisablesKeepAlives(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// ─── aihub#720: create-with-workflow typed surface ──────────────────────────
+
+// TestCreateWorkItemWithWorkflowSendsTheCompositionBody asserts the WIRE shape
+// of the typed create request, one arm per mode cell the server's
+// resolveCreateWorkflowMode judges. The point is not that HTTP works — the
+// skills tests already prove do() — but that the typed mirror drops, keeps and
+// omits exactly the fields the server's closed decoding expects: steps and
+// workflow_mode present when set, absent when not, an explicit
+// requires_human_session distinct from an omitted one, and no field the
+// pointer/omitempty design would silently rewrite into a different meaning.
+func TestCreateWorkItemWithWorkflowSendsTheCompositionBody(t *testing.T) {
+	rhsTrue, rhsFalse := true, false
+	humanGate := false
+
+	type arm struct {
+		name string
+		req  *CreateWorkItemWithWorkflowRequest
+		want map[string]any
+	}
+	arms := []arm{
+		{
+			name: "steps select db composition and pin generation 1",
+			req: &CreateWorkItemWithWorkflowRequest{
+				Project: "pilot", Goal: "small fix via composed flow", WIType: "fix_bug",
+				RequiresHumanSession: &rhsTrue,
+				Steps: &[]WorkflowStep{
+					{
+						ID: "spec", SkillID: "skill_dp4bDA1C", SkillVersion: 0,
+						Models: []WorkflowModelCandidate{{Harness: "pi", Model: "glm-4.7", Effort: "medium"}},
+					},
+					{
+						ID: "review", SkillID: "skill_7trQkOHs", SkillVersion: 1, RHS: &rhsFalse,
+						Models: []WorkflowModelCandidate{
+							{Harness: "cc", Model: "astra", Effort: "high"},
+							{Harness: "pi", Model: "glm-4.7", Effort: "low"},
+						},
+						Params: map[string]any{"strictness": "blocker"},
+						Inputs: []WorkflowInputRef{{Name: "spec", StepID: "spec", Output: "artifact"}},
+					},
+				},
+			},
+			want: map[string]any{
+				"project": "pilot", "goal": "small fix via composed flow", "wi_type": "fix_bug",
+				"requires_human_session": true,
+				"steps": []any{
+					map[string]any{
+						"id": "spec", "skill_id": "skill_dp4bDA1C", "skill_version": 0,
+						"models": []any{map[string]any{"harness": "pi", "model": "glm-4.7", "effort": "medium"}},
+					},
+					map[string]any{
+						"id": "review", "skill_id": "skill_7trQkOHs", "skill_version": 1, "rhs": false,
+						"models": []any{
+							map[string]any{"harness": "cc", "model": "astra", "effort": "high"},
+							map[string]any{"harness": "pi", "model": "glm-4.7", "effort": "low"},
+						},
+						"params": map[string]any{"strictness": "blocker"},
+						"inputs": []any{map[string]any{"name": "spec", "step_id": "spec", "output": "artifact"}},
+					},
+				},
+			},
+		},
+		{
+			// Astra B1 regression: an explicit EMPTY composition must stay on
+			// the wire as "steps":[] — the server answers COMPOSE_FAILED for
+			// it, and an omitempty slice would have silently rewritten it
+			// into the omitted form (a legacy create) instead.
+			name: "explicit empty steps stay on the wire as an empty array",
+			req: &CreateWorkItemWithWorkflowRequest{
+				Project: "pilot", Goal: "contradiction by construction", WIType: "fix_bug",
+				Steps: &[]WorkflowStep{},
+			},
+			want: map[string]any{
+				"project": "pilot", "goal": "contradiction by construction", "wi_type": "fix_bug",
+				"steps": []any{},
+			},
+		},
+		{
+			name: "pending files an uncomposed work item with no steps on the wire",
+			req: &CreateWorkItemWithWorkflowRequest{
+				Project: "pilot", Goal: "orchestrator will compose this", WorkflowMode: "pending",
+			},
+			want: map[string]any{
+				"project": "pilot", "goal": "orchestrator will compose this", "workflow_mode": "pending",
+			},
+		},
+		{
+			name: "legacy is an explicit opt-in and carries no composition fields",
+			req: &CreateWorkItemWithWorkflowRequest{
+				Project: "pilot", Goal: "scenario graph, explicitly", WorkflowMode: "legacy",
+				RequiresHumanSession: &humanGate,
+			},
+			want: map[string]any{
+				"project": "pilot", "goal": "scenario graph, explicitly",
+				"workflow_mode": "legacy", "requires_human_session": false,
+			},
+		},
+	}
+
+	for _, tc := range arms {
+		var gotBody []byte
+		var gotMethod, gotPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var err error
+			gotBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("%s: read body: %v", tc.name, err)
+			}
+			gotMethod, gotPath = r.Method, r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"wi_probe","workflow_mode":"probe"}`))
+		}))
+		c := New(server.URL, "pfk_test")
+
+		out, err := c.CreateWorkItemWithWorkflow(t.Context(), tc.req)
+		server.Close()
+
+		if err != nil {
+			t.Fatalf("%s: CreateWorkItemWithWorkflow: %v", tc.name, err)
+		}
+		if gotMethod != http.MethodPost || gotPath != "/v1/work_items" {
+			t.Errorf("%s: request was %s %s, want POST /v1/work_items", tc.name, gotMethod, gotPath)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(gotBody, &got); err != nil {
+			t.Fatalf("%s: body is not JSON: %v\n%s", tc.name, err, gotBody)
+		}
+		// Round-trip the expectation through JSON too, so number types match
+		// the decoder (0 the int would otherwise never equal 0 the float64).
+		var want map[string]any
+		if err := json.Unmarshal([]byte(mustJSON(t, tc.want)), &want); err != nil {
+			t.Fatalf("%s: expectation is not JSON: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(want, got) {
+			t.Errorf("%s: wire body mismatch.\nwant: %s\ngot:  %s",
+				tc.name, mustJSON(t, want), mustJSON(t, got))
+		}
+		if out == nil || out["id"] != "wi_probe" {
+			t.Errorf("%s: response was not passed through, got %v", tc.name, out)
+		}
+	}
+}
+
+// mustJSON renders a value for an assertion message; it never fails the test on
+// its own.
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<unmarshalable: %v>", err)
+	}
+	return string(b)
+}

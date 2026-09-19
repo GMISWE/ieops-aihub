@@ -418,7 +418,10 @@ func TestWorkflowCreatePinsAtomically(t *testing.T) {
 	bad[1].ID = "spec"
 	_, aerr = wfCreate(t, ctx, pool, project, caller, owner, true, bad)
 	require.NotNil(t, aerr)
-	require.Equal(t, ErrBadRequest, aerr.Code)
+	// aihub#720 slice B: the create path's composition refusals are typed
+	// COMPOSE_FAILED (with the reason in details), not the pin path's own
+	// BAD_REQUEST — the code is what tells a composer its flow was invalid.
+	require.Equal(t, ErrComposeFailed, aerr.Code)
 	var n int
 	require.Nil(t, pool.QueryRow(ctx,
 		`SELECT count(*) FROM work_items WHERE project=$1 AND goal LIKE 'workflow test 3%'`, project).Scan(&n))
@@ -429,7 +432,7 @@ func TestWorkflowCreatePinsAtomically(t *testing.T) {
 		{ID: "spec", SkillID: spec, SkillVersion: 0, Models: wfModels()},
 	})
 	require.NotNil(t, aerr)
-	require.Equal(t, ErrBadRequest, aerr.Code)
+	require.Equal(t, ErrComposeFailed, aerr.Code)
 	require.Contains(t, aerr.Message, "review and verification")
 
 	// RHS must be explicit when steps are supplied.
@@ -439,7 +442,9 @@ func TestWorkflowCreatePinsAtomically(t *testing.T) {
 		Steps: wfFlowSpec(spec, review, verify), RegistryCaller: caller,
 	}, owner, owner, nil, "writer")
 	require.NotNil(t, aerr)
-	require.Equal(t, ErrBadRequest, aerr.Code)
+	// aihub#720 slice B: the classification guard moved above the transaction
+	// and onto the COMPOSE_FAILED code.
+	require.Equal(t, ErrComposeFailed, aerr.Code)
 	require.Contains(t, aerr.Message, "requires_human_session")
 	_ = rhs
 
@@ -454,7 +459,7 @@ func TestWorkflowCreatePinsAtomically(t *testing.T) {
 		{ID: "verify", SkillID: verify, SkillVersion: 0, Models: wfModels()},
 	})
 	require.NotNil(t, aerr)
-	require.Equal(t, ErrBadRequest, aerr.Code)
+	require.Equal(t, ErrComposeFailed, aerr.Code)
 	require.Contains(t, aerr.Message, "interactive-only")
 }
 

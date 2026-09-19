@@ -113,6 +113,62 @@ func boolArg(args map[string]any, key string) bool {
 	return v
 }
 
+// parseIntArg decodes one numeric MCP argument, reporting whether it was
+// present and whether it was readable as a WHOLE number.
+//
+// The aihub#280 shape, numbers edition: the SDK's untyped AddTool validates
+// nothing per call, so real callers send numbers as JSON strings, and the
+// readers that silently defaulted the unreadable spellings are the defect
+// class queryparam_gate_test.go refuses on both hops. Present=false means
+// absent or JSON null; present=true, ok=false means sent but unreadable in any
+// spelling; present=true, ok=true hands back the value. A fractional number
+// is UNREADABLE here rather than truncated — the callers that use this reader
+// name an exact, integral thing (a registry version number), and truncating
+// 7.25 to 7 would silently answer a different question than the one asked.
+//
+// Lives in this file because package mcp's numeric conversions must all be
+// readable in one place (queryparam_gate_test.go's policy file is
+// helpers.go): a strconv call reachable from a tool argument outside this
+// file is the gate's finding, not a style preference.
+func parseIntArg(args map[string]any, key string) (value int, present, ok bool) {
+	v, exists := args[key]
+	if !exists || v == nil {
+		return 0, false, true
+	}
+	var i int64
+	switch typed := v.(type) {
+	case float64:
+		// JSON numbers arrive as float64; reject anything that cannot round-trip
+		// an exact integer ("1.5", or an integral-looking float beyond int64),
+		// because version selection is exact — a value that round-trips through
+		// float64 truncation would silently pin the wrong version.
+		if typed != math.Trunc(typed) || typed < math.MinInt64 || typed > math.MaxInt64 {
+			return 0, true, false
+		}
+		i = int64(typed)
+	case int:
+		i = int64(typed)
+	case int64:
+		i = typed
+	case string:
+		// Strings must be an EXACT integer literal — no float syntax. "1.0" and
+		// "1e0" are refused rather than coerced: parse a semantic version as a
+		// float and back ("1.0000000000000001" → 1) is exactly the silent rewrite
+		// an exact-version argument must never perform.
+		n, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0, true, false
+		}
+		i = n
+	default:
+		return 0, true, false
+	}
+	if i < math.MinInt32 || i > math.MaxInt32 {
+		return 0, true, false
+	}
+	return int(i), true, true
+}
+
 // scalarArg renders a JSON scalar (string, number, or bool) as the string form
 // the aihub HTTP API parses.
 //

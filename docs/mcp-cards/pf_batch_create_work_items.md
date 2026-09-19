@@ -4,7 +4,7 @@
 {
   "tool": "pf_batch_create_work_items",
   "description_sha256": "e62ef0dd8993dbea19c03158c179a47ff18945f65d56b3d77e728e171d645c9b",
-  "input_schema_sha256": "9626ee1b7589f421493b4b0504c5f643c9cbbafec676f205a63dae99f31418f7",
+  "input_schema_sha256": "54e453efbd4155ca689071e40e3e9099a63238a0254043c4294f2238b0d2623c",
   "params": {
     "items": {
       "type": "array",
@@ -69,6 +69,13 @@ explicit `false` in the same batch. The segmentation itself is held only from th
 says such a row belongs to `unclassified[]` — and nothing in the tree asserts that it
 arrives THERE, so the destination is the queue's documented behaviour rather than a
 checked one.
+
+The same shared set gained the aihub#720 `workflow_mode` selector in slice C, so a
+batch item may pin its composition mode per item — and a contradictory one
+(`db` with no `steps`, `legacy` with `steps`, an out-of-vocabulary value) fails that
+item ALONE with a `COMPOSE_FAILED` error in its own `failed[]` entry, the same
+per-item independence the `force_reason` defaulting and the dedup guard already
+follow: one bad item does not stop the rest.
 
 **Why a separate tool rather than an `items` array on `pf_create_work_item`:**
 `project` and `goal` sit in that tool's flat `required` list while an item requires

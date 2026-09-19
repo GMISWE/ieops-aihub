@@ -173,6 +173,7 @@ func (s *Server) registerAll() {
 	s.registerCodingTools()
 	s.registerProjectTools()
 	s.registerUserTools()
+	s.registerSkillTools()
 }
 
 // jsonResult marshals v to JSON and returns a text content result.

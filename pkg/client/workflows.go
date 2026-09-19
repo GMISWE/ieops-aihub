@@ -81,3 +81,99 @@ func (c *Client) ReconcileWorkflowInvocations(ctx context.Context, wiID string, 
 	var out map[string]any
 	return out, c.do(ctx, http.MethodPost, "/v1/work_items/"+seg(wiID)+"/workflow/reconcile", body, &out)
 }
+
+// ─── aihub#720: typed create-with-workflow surface ─────────────────────────
+//
+// The map-typed CreateWorkItem above stays the raw transport. The types below
+// are the typed mirror of the composition vocabulary the server accepts on
+// POST /v1/work_items (steps + workflow_mode, aihub#720) and PUT
+// /v1/work_items/:id/workflow — the SAME per-step shape both endpoints share
+// (domain.WorkflowStepSpec). They exist so a Go composer gets compile-time
+// field names instead of a map[string]any; they add NO client-side policy. The
+// server remains the only place a proposal is resolved, validated and pinned.
+
+// WorkflowModelCandidate is the client-side mirror of the server's ordered
+// model candidate (internal/workflow.ModelCandidate): harness, model and
+// effort. The server validates each candidate against the step's pinned
+// contract — a candidate the contract does not allow is a COMPOSE_FAILED
+// refusal, never a client-side rewrite.
+type WorkflowModelCandidate struct {
+	Harness string `json:"harness"`
+	Model   string `json:"model"`
+	Effort  string `json:"effort"`
+}
+
+// WorkflowInputRef is the client-side mirror of an input reference: wire an
+// EARLIER step's output (by step id and output name) into a later step under
+// a param name. Forward references are refused server-side.
+type WorkflowInputRef struct {
+	Name   string `json:"name"`
+	StepID string `json:"step_id"`
+	Output string `json:"output"`
+}
+
+// WorkflowStep is one step of a composition proposal. SkillVersion 0 means
+// "pin the caller's latest accessible version" — the server freezes the exact
+// number at pin time. RHS is a pointer so an omitted human gate (nil) stays
+// distinct from an explicit false; Params is any JSON-encodable value. The
+// server derives grants from the pinned contract and ignores nothing silently.
+type WorkflowStep struct {
+	ID           string                   `json:"id"`
+	SkillID      string                   `json:"skill_id"`
+	SkillVersion int                      `json:"skill_version"`
+	RHS          *bool                    `json:"rhs,omitempty"`
+	Models       []WorkflowModelCandidate `json:"models"`
+	Params       any                      `json:"params,omitempty"`
+	Inputs       []WorkflowInputRef       `json:"inputs,omitempty"`
+}
+
+// CreateWorkItemWithWorkflowRequest is the typed body for the aihub#720
+// create-time composition path of POST /v1/work_items. The mode rules are the
+// server's (resolveCreateWorkflowMode) and are restated here only as a map:
+//
+//	steps present            → workflow_mode must be "" or "db"; generation 1
+//	                          is pinned in the same transaction, mode lands 'db'
+//	workflow_mode "pending"  → steps MUST be absent; the row is filed for an
+//	                          orchestrator and refuses claims (COMPOSE_PENDING)
+//	                          until a first generation is pinned
+//	workflow_mode "legacy"   → steps MUST be absent; explicit scenario-graph
+//	                          opt-in, the compatibility path
+//	neither                   → legacy create, byte-identical to pre-aihub#720
+//
+// Any other combination answers 400 COMPOSE_FAILED with a machine-readable
+// details.reason. RequiresHumanSession is a pointer for the same three-state
+// reason as everywhere else: nil omits the field (the legacy NULL/unclassified
+// create), set pins the classification explicitly — and the server REQUIRES it
+// explicitly whenever steps are present.
+type CreateWorkItemWithWorkflowRequest struct {
+	Project              string   `json:"project"`
+	Goal                 string   `json:"goal"`
+	WIType               string   `json:"wi_type,omitempty"`
+	Scenario             string   `json:"scenario,omitempty"`
+	Priority             string   `json:"priority,omitempty"`
+	Milestone            string   `json:"milestone,omitempty"`
+	Labels               []string `json:"labels,omitempty"`
+	Content              string   `json:"content,omitempty"`
+	RequiresHumanSession *bool    `json:"requires_human_session,omitempty"`
+	WorkflowMode         string   `json:"workflow_mode,omitempty"`
+	// Steps carries the composition as a POINTER so three states stay distinct
+	// on the wire: nil (field omitted — pending/legacy create, no composition),
+	// &[]WorkflowStep{} (explicit EMPTY composition — the server answers
+	// COMPOSE_FAILED, db_mode_requires_steps, because an empty pin is a
+	// contradiction, not a request for the default), and a non-empty pointer
+	// (compose and pin generation 1). A plain slice with omitempty would
+	// silently rewrite the second into the first — the exact silent-degradation
+	// shape the composition boundary exists to refuse (Astra review B1).
+	Steps *[]WorkflowStep `json:"steps,omitempty"`
+}
+
+// CreateWorkItemWithWorkflow calls POST /v1/work_items with the typed
+// composition request above. Composition is server-owned: on success the
+// response carries the created work item with its explicit workflow_mode and
+// (when steps were supplied) steps_version=1; on refusal it is an *APIError
+// with Code COMPOSE_FAILED (or COMPOSE_PENDING from the claim gate), and the
+// machine-readable reason in Details — never a silently-legacy work item.
+func (c *Client) CreateWorkItemWithWorkflow(ctx context.Context, req *CreateWorkItemWithWorkflowRequest) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, http.MethodPost, "/v1/work_items", req, &out)
+}

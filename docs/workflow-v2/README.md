@@ -21,6 +21,7 @@ effect.
 | `04-unresolved-migration-references.md` | remaining bounded limitations, including interactive lifecycle ownership outside step execution and deferred DB-workflow cleanup |
 | `05-qualification.md` | isolated DB/CLI/drain/browser qualification matrix and exact compatibility promises |
 | `06-gate-semantics-mutation-audit.md` | isolated pure and not-publishable prototype contract for strict mutation-gate audit evidence |
+| `07-wi-composition.md` | the aihub#720 create-with-steps REST contract, the `workflow_mode` three-state semantics (legacy/db/pending + `COMPOSE_FAILED`/`COMPOSE_PENDING`), the AI composer's standard path (create pending → discover via the skill read tools → pin), and the explicit legacy opt-in |
 
 ## The one-paragraph version
 

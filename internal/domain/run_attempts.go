@@ -384,12 +384,13 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 
 	// Lock the work_item row FOR UPDATE to prevent concurrent claims
 	var wi WorkItem
+	var workflowMode string
 	err = tx.QueryRow(ctx, `
 		SELECT id, seq, slug, project, scenario, goal, source, wi_type, priority,
 		       requires_human_session, milestone, labels, status,
 		       declared_resources, resources_version, external_share_type, external_share_key,
 		       reporter_user_id, reporter_display, current_attempt_id, current_attempt_epoch,
-		       parent_work_item_id, attrs, created_at, updated_at, closed_at
+		   parent_work_item_id, attrs, created_at, updated_at, closed_at, workflow_mode
 		FROM work_items WHERE (id = $1 OR slug = $1) FOR UPDATE`, wiID,
 	).Scan(
 		&wi.ID, &wi.Seq, &wi.Slug, &wi.Project, &wi.Scenario, &wi.Goal, &wi.Source,
@@ -399,6 +400,7 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 		&wi.ReporterUserID, &wi.ReporterDisplay,
 		&wi.CurrentAttemptID, &wi.CurrentAttemptEpoch,
 		&wi.ParentWorkItemID, &wi.Attrs, &wi.CreatedAt, &wi.UpdatedAt, &wi.ClosedAt,
+		&workflowMode,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -413,6 +415,24 @@ func FnClaimWorkItem(ctx context.Context, pool *pgxpool.Pool, wiID string, req *
 			return nil, aerr
 		}
 		return nil, NewErr(ErrInternalError, fmt.Sprintf("failed to lock work_item: %v", err))
+	}
+
+	// aihub#720 slice B: a workflow_mode='pending' work item is NOT claimable.
+	// It was filed for an orchestrator that has not pinned its first workflow
+	// generation yet, so a claim now would hand the work item to the LEGACY
+	// scenario dispatch — exactly the silent mode fall-through the explicit
+	// column exists to close. Refused under the row lock (the same lock the
+	// status checks below read through), so a revision that pins a generation
+	// and a claim racing each other serialize: the claim either sees pending
+	// and refuses, or sees the pinned generation and proceeds.
+	//
+	// COMPOSE_PENDING and not COMPOSE_FAILED: composition has not failed, it
+	// has not happened yet, and the recovery is to pin a workflow (PUT
+	// /v1/work_items/:id/workflow) and claim again — not to fix a bad request.
+	if workflowMode == "pending" {
+		return nil, NewErrDetails(ErrConflictComposePending,
+			"this work item is workflow_mode=pending: its workflow has not been composed yet, so there is nothing to claim; pin a first workflow generation and claim again",
+			map[string]any{"workflow_mode": workflowMode})
 	}
 
 	// Check idempotency: if this key was already used for this wi, return cached response.

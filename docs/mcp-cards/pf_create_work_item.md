@@ -4,7 +4,7 @@
 {
   "tool": "pf_create_work_item",
   "description_sha256": "743e32ca1de21edc36fc36d956a59f7748864e8b363cec5c8196c3fe81452351",
-  "input_schema_sha256": "66ec9cd4453bfb9e14c07eaab66b7e3342789d215a98cabc0e1504f4ad0f5a0a",
+  "input_schema_sha256": "ee9aa287a536465a3d0c762d6a587d4a99a28c4211b3e1071907f4b982955f28",
   "params": {
     "attrs": {
       "type": "object",
@@ -84,6 +84,15 @@
     "wi_type": {
       "type": "string",
       "required": false
+    },
+    "workflow_mode": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "db",
+        "legacy",
+        "pending"
+      ]
     }
   },
   "response_keys_observed": [
@@ -122,13 +131,14 @@
 
 ## hop 0-1 — what the caller is told
 
-Sixteen top-level parameters, fifteen of which come from
-`internal/mcp/tools_lifecycle.go` (`workItemFieldProps`) — one definition shared with
+Seventeen top-level parameters as of aihub#720 slice C — sixteen from
+`internal/mcp/tools_lifecycle.go` (`workItemFieldProps`, the one definition shared with
 `pf_batch_create_work_items`, because two hand-maintained copies would drift and a
 field present on one tool but not the other is the same silent drop the batch tool
 exists downstream of; `internal/mcp/create_work_item_field_set_test.go`
 (`TestBothCreateToolsPublishOneWorkItemFieldSet`) reads both tools off a live session
-and derives the split rather than typing the two numbers.
+and derives the split rather than typing the two numbers) and one (`project`)
+create-only.
 
 | param | type | required | hop 1 promise |
 |---|---|---|---|
@@ -148,6 +158,7 @@ and derives the split rather than typing the two numbers.
 | `content` | string | no | markdown ≤20000 chars; **not echoed back** |
 | `force_create` | boolean | no | bypass the duplicate check |
 | `force_reason` | string | no | required by the server with `force_create` |
+| `workflow_mode` | enum | no | EXPLICIT composition-mode selector (aihub#720): `legacy` (scenario step graph, the default), `pending` (store uncomposed, pin later via `pf_update_workflow`), `db` (pins generation 1 in this create and REQUIRES `steps`, which the create tools do not publish: create, then pin via `pf_update_workflow`). A bad or contradictory combination is a 400 `COMPOSE_FAILED` with a machine-readable `details.reason`, never a silent legacy fall-back (`TestCreateWorkItemRoute_RejectsIllegalWorkflowModeAs400ComposeFailed`, `TestCreateWorkItemRoute_ModeContradictionsAnswer400ComposeFailed`); claiming a `pending` wi answers 409 `COMPOSE_PENDING` (`TestComposeErrorCodesClassifyOnTheWire`, DB-gated `TestCreateWorkItemWorkflowMode_PendingIsStoredAndUnclaimable`) (aihub#720 slice C) |
 
 Two of those are enums rather than prose *because* prose failed: `priority` was a
 pipe-separated string in a description, and `source` read as free text while being a

@@ -70,6 +70,11 @@ var goValidatedWorkItemColumns = map[string]string{
 		"OUT-of-vocabulary scenario should be a 400 instead is a separate question and is NOT " +
 		"settled by this entry. This column was surfaced BY this gate, which is what the gate is " +
 		"for — it was not on aihub#396's list of four.",
+	"workflow_mode": "resolveCreateWorkflowMode (workflow.go), the aihub#720 create-time " +
+		"composition-mode selector: refuses any mode outside WorkflowModeValues() with " +
+		"COMPOSE_FAILED naming the legal values, before the transaction opens. The refusal is a " +
+		"400 (composition is request-content failure), never the SQLSTATE-carrying 500 this " +
+		"policy exists to prevent.",
 }
 
 // workItemColumnsNotCallerSupplied names CHECK-constrained columns no caller can

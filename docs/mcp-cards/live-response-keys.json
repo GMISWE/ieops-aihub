@@ -16,6 +16,31 @@
       "project": "Same aihub#422 rewrite.",
       "slug": "Same aihub#422 rewrite."
     },
+    "pf_get_skill": {
+      "created_at": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "id": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "latest_accessible": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "name": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "owner_display": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "owner_user_id": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "updated_at": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key."
+    },
+    "pf_get_skill_version": {
+      "author_user_id": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "bundle": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "contract": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "created_at": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "digest": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "skill_id": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "version": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key.",
+      "visibility": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key."
+    },
+    "pf_list_skill_versions": {
+      "items": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key."
+    },
+    "pf_list_skills": {
+      "items": "Published by aihub#720 (2026-09-19), the skill registry read surface; the aihub#412 corpus was extracted 2026-09-07, twelve days before the tool existed, so no record can hold this key."
+    },
     "pf_list_work_items": {
       "lexical": "Added by aihub#360 (2026-09-12): the verbatim-substring second section, present whenever query= is sent. The corpus was extracted before the section existed, so no record can hold it."
     },

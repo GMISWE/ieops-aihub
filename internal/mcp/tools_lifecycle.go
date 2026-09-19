@@ -1780,6 +1780,33 @@ func workItemFieldProps() map[string]any {
 		"content":      prop("string", contentPropDescription),
 		"force_create": prop("boolean", "Force create bypassing duplicate check"),
 		"force_reason": prop("string", "Reason for force create"),
+		// aihub#720 slice C: the EXPLICIT composition-mode selector, published on
+		// both create tools from this one shared map (slice B's G4 exemption for
+		// handleCreateWorkItem.workflow_mode is deleted in the same change — the
+		// parameter this row publishes is what makes the name reachable).
+		//
+		// The enum is domain.WorkflowModeValues — the same list
+		// resolveCreateWorkflowMode refuses outside of, so the offered set and
+		// the enforced set are one value (the aihub#396 rule: publish the enum
+		// from the validator's own list, never hand-typed).
+		//
+		// The description states the CONSEQUENCE of a wrong choice rather than
+		// naming the field's type: the selector's whole point (slice A/B) is that
+		// a contradictory combination fails CLOSED with 400 COMPOSE_FAILED and a
+		// machine-readable details.reason instead of silently walking the legacy
+		// graph. 'db' is reachable-but-refused here on purpose: it requires
+		// `steps`, which the create tools do not publish — the published path to a
+		// db-mode flow is create (pending/absent) then pin via
+		// pf_update_workflow, exactly what the aihub#708 exemption for
+		// handleCreateWorkItem.steps records next door. Kept terse: this string
+		// is resident on every request that lists either create tool.
+		"workflow_mode": propEnum("string",
+			"EXPLICIT composition-mode selector: 'legacy' = scenario step graph (the default when steps are omitted and this is absent); "+
+				"'pending' = create uncomposed, pin the flow later via pf_update_workflow; 'db' pins generation 1 in this create and "+
+				"REQUIRES steps (not published on the create tools: create, then pin via pf_update_workflow). A bad or contradictory "+
+				"combination is 400 COMPOSE_FAILED with details.reason, never a silent legacy fall-back; claiming a 'pending' wi "+
+				"answers 409 COMPOSE_PENDING.",
+			domain.WorkflowModeValues()),
 	}
 }
 

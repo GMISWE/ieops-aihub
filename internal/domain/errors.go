@@ -29,6 +29,16 @@ const (
 	ErrProjectAmbiguous      ErrCode = "PROJECT_AMBIGUOUS"
 	ErrWITypeMismatch        ErrCode = "WI_TYPE_MISMATCH"
 	ErrInvalidMemoryType     ErrCode = "INVALID_MEMORY_TYPE"
+	// ErrComposeFailed is aihub#720: create-time workflow COMPOSITION failed —
+	// an unknown/inaccessible skill, an invalid graph/input, a grant or
+	// capability mismatch, an invalid model/effort, or a contradictory
+	// workflow_mode/steps combination. 400 and not 409: the request's content
+	// is wrong, not the server's state. Details always carry a non-empty
+	// machine-readable {"reason"}, so a composer can branch without parsing
+	// prose. Fail-closed by construction: the whole create transaction rolls
+	// back, and nothing ever falls back to the legacy scenario path on a
+	// composition failure — the error is the answer, not a retry in disguise.
+	ErrComposeFailed ErrCode = "COMPOSE_FAILED"
 
 	// HTTP 401
 	//
@@ -100,6 +110,14 @@ const (
 	// that does not), not a malformed request. Escape hatch: resend with a
 	// non-empty no_steps_reason.
 	ErrConflictNoStepsRecorded ErrCode = "CONFLICT_NO_STEPS_RECORDED"
+	// ErrConflictComposePending is aihub#720: the work item was created with
+	// workflow_mode='pending' — filed for an orchestrator that has not pinned
+	// its first workflow generation yet — and a claim arrived before that
+	// pin. 409 like its siblings: the refusal is about the work item's STATE,
+	// and the recovery is to pin a generation (PUT /workflow) and claim again,
+	// not to re-send the claim. Deliberately NOT COMPOSE_FAILED: composition
+	// has not failed, it has not HAPPENED yet.
+	ErrConflictComposePending ErrCode = "COMPOSE_PENDING"
 	// ErrRequiresHumanSessionMismatch has HAD NO EMITTER since aihub#359, and never really had
 	// one: its only call site was an `else if *wi.RequiresHumanSession != resolvedRHS` in
 	// FnClaimWorkItem that compared the work item row against a value just assigned from that
@@ -197,7 +215,10 @@ func codeToHTTPStatus(code ErrCode) int {
 	switch code {
 	case ErrBadRequest, ErrGoalMultiline,
 		ErrInvalidPhaseYAML, ErrInvalidStepTransition, ErrProjectAmbiguous,
-		ErrInvalidMemoryType:
+		ErrInvalidMemoryType,
+		// aihub#720: a composition failure is request-content failure, the
+		// same family as the shape guards above it.
+		ErrComposeFailed:
 		return 400
 	case ErrUnauthorized, ErrStaleCredential:
 		return 401
@@ -216,6 +237,9 @@ func codeToHTTPStatus(code ErrCode) int {
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
 		ErrConflictTerminalState, ErrConflictSerializationFailure,
 		ErrConflictNoStepsRecorded,
+		// aihub#720: claiming a workflow_mode='pending' work item is a state
+		// conflict, not a bad request — the claim itself was well-formed.
+		ErrConflictComposePending,
 		ErrIdempotencyKeyReused,
 		// G6 / design §17: WI_TYPE_MISMATCH is 409 (conflict between wi_type and config)
 		ErrWITypeMismatch,

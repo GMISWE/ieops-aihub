@@ -80,6 +80,21 @@ var detailsWriterCensus = map[string]detailsWriter{
 		Shapes:  []string{"{current_steps_version,expected_steps_version}"},
 		Verdict: "two ints — the caller's expected_steps_version and the locked row's steps_version, mirroring the publication CAS entry above",
 	},
+
+	// ── aihub#720 slice B: the composition-refusal details writers ──────────
+	"workflow.go:composeFailed": {
+		Shapes: []string{"{reason}"},
+		Verdict: "one short reason literal from the closed set at the call sites (invalid_workflow_mode, " +
+			"steps_with_legacy_mode, steps_with_pending_mode, db_mode_requires_steps, " +
+			"requires_human_session_missing) — machine-readable slugs, never caller prose",
+	},
+	"workflow.go:composeFailedFromPin": {
+		Shapes: []string{"{reason}"},
+		Verdict: "the pin refusal's own message: a fixed-format sentence naming one step id and one " +
+			"cause, produced by pinWorkflowGeneration / resolveWorkflowSkillRef, bounded by the " +
+			"validation prose that emits it rather than by anything the caller can inflate beyond " +
+			"the step id it named",
+	},
 	"workflow_run.go:RecordWorkflowResult": {
 		Shapes:  []string{"{current_steps_version,result_flow_version}"},
 		Verdict: "two ints — the result envelope's flow_version and the current generation",
@@ -113,8 +128,8 @@ var detailsWriterCensus = map[string]detailsWriter{
 		Verdict: "a field name and the caller's single user_type string",
 	},
 	"run_attempts.go:FnClaimWorkItem": {
-		Shapes:  []string{"{current_attempt.actor_display,current_attempt.claim_epoch,current_attempt.id,current_attempt.last_active_at}"},
-		Verdict: "one attempt's id/display/epoch/timestamp",
+		Shapes:  []string{"{current_attempt.actor_display,current_attempt.claim_epoch,current_attempt.id,current_attempt.last_active_at}", "{workflow_mode}"},
+		Verdict: "one attempt's id/display/epoch/timestamp, plus the row's workflow_mode — a three-value enum literal, never caller prose (aihub#720's COMPOSE_PENDING refusal)",
 	},
 	"run_attempts.go:verifyAttemptCredential": {
 		Shapes:  []string{"dynamic-call:supersededByDetails"},

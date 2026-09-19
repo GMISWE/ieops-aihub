@@ -155,6 +155,7 @@ type CreateWorkItemRequest struct {
 	ForceCreate          bool               `json:"force_create"`
 	ForceReason          string             `json:"force_reason"`
 	Steps                []WorkflowStepSpec `json:"steps,omitempty"`
+	WorkflowMode         string             `json:"workflow_mode,omitempty"`
 	RegistryCaller       *UserRecord        `json:"-"`
 }
 
@@ -492,6 +493,27 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 		req.Attrs = json.RawMessage("{}")
 	}
 
+	// aihub#720 slice B: resolve the EXPLICIT composition mode before the
+	// transaction opens — a contradictory mode/steps combination is
+	// request-content failure and must not spend an embedding or a wi_seq on
+	// its way to the refusal. Steps select 'db'; no steps keep the legacy
+	// default; 'pending' files the work item as waiting for orchestration;
+	// every other combination is COMPOSE_FAILED with a reason, never a silent
+	// fall-back to legacy (the exact defect class the explicit column closes).
+	workflowMode, aihubErr := resolveCreateWorkflowMode(req.WorkflowMode, req.Steps != nil)
+	if aihubErr != nil {
+		return nil, aihubErr
+	}
+	// The classification guard moved UP here from inside the transaction in the
+	// same slice: it is a pure request check, and refusing before the embedding
+	// call below is the same aihub#396 reasoning every other shape guard above
+	// already states — a doomed request should not first spend an embedding on
+	// it. Byte-identical error, earlier position.
+	if req.Steps != nil && req.RequiresHumanSession == nil {
+		return nil, composeFailed("requires_human_session_missing",
+			"requires_human_session is required when creating a work item with steps: a workflow-bearing work item needs an explicit human-session classification")
+	}
+
 	// Reject unimplemented scenarios
 	if req.Scenario != "coding" {
 		return nil, NewErr(ErrNotImplemented, fmt.Sprintf("scenario %q is not yet implemented", req.Scenario))
@@ -622,18 +644,18 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 			requires_human_session, milestone, labels, status,
 			declared_resources, reporter_user_id, reporter_display,
 			parent_work_item_id, attrs, content,
-			emb_model, emb_dims, emb_vector, embedded_len, emb_pipeline
+			emb_model, emb_dims, emb_vector, embedded_len, emb_pipeline, workflow_mode
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, 'queued',
 			$12, $13, $14,
 			$15, $16, $17,
-			$18, $19, $20::vector, $21, $22
+			$18, $19, $20::vector, $21, $22, $23
 		)`,
 		wiID, seq, req.Project, req.Scenario, req.Goal, req.Source, wiType, req.Priority,
 		requiresHumanSession, req.Milestone, req.Labels, req.DeclaredResources,
 		callerUserID, callerDisplay, parentID, req.Attrs, req.Content,
-		embModel, embDims, embVecLit, embEmbeddedLen, embPipeline,
+		embModel, embDims, embVecLit, embEmbeddedLen, embPipeline, workflowMode,
 	)
 	if err != nil {
 		return nil, dbErrCause(err, "failed to insert work_item")
@@ -663,14 +685,13 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 	// D4's "atomic create/pin", and the Requirement's "the whole invalid flow
 	// is refused, without partial WI/version bindings").
 	if req.Steps != nil {
-		if req.RequiresHumanSession == nil {
-			return nil, NewErr(ErrBadRequest,
-				"requires_human_session is required when creating a work item with steps: a workflow-bearing work item needs an explicit human-session classification")
-		}
 		if req.RegistryCaller == nil {
 			// Wiring defect, not a caller error: the routes must set the
 			// registry caller view. Refuse rather than resolve with a wider
 			// (unscoped) view than the authenticated principal holds.
+			// Deliberately still INTERNAL_ERROR and not COMPOSE_FAILED: nothing
+			// about the caller's composition is wrong, and a 500 here is the
+			// signal that a ROUTE is missing wiring, not that a flow is invalid.
 			return nil, NewErr(ErrInternalError,
 				"steps were supplied but the create path was not given the caller's registry view; refusing to resolve skill refs")
 		}
@@ -680,7 +701,18 @@ func CreateWorkItem(ctx context.Context, pool *pgxpool.Pool, req *CreateWorkItem
 				RequiresHumanSession: *req.RequiresHumanSession,
 				Steps:                req.Steps,
 			}); aihubErr != nil {
-			return nil, aihubErr
+			// aihub#720 slice B: the pin path's typed composition refusals
+			// (unknown/inaccessible skill, invalid graph, grant mismatch,
+			// model/effort, interactive-only in an unattended flow) surface as
+			// COMPOSE_FAILED carrying the reason. The transaction rolls back
+			// either way — nothing partial exists — but the CODE is what tells a
+			// composer this was its flow and not a transient server failure, and
+			// the alternative reading (a plain 400) is indistinguishable from the
+			// non-composition shape guards. INTERNAL_ERROR and friends pass
+			// through untouched: a database failure is not a composition
+			// failure, and re-typing it would promise a caller its flow was bad
+			// when the server was.
+			return nil, composeFailedFromPin(aihubErr)
 		}
 	}
 

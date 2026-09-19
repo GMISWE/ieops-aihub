@@ -5825,6 +5825,40 @@ jobs:
           ! grep -q -- '^not ok ' workflow_v2_bridges.log \
             || { echo "::error::a workflow-v2 privacy/session bridge test failed"; exit 1; }
 
+      # aihub#720: the explicit work_items.workflow_mode discriminator
+      # (migration 0045) and the create-path mode semantics
+      # (resolveCreateWorkflowMode: steps⇒db, pending⇒unclaimable, legacy
+      # opt-in) are DB-gated in exactly these eight top-level functions —
+      # migration_0045_workflow_mode_db_test.go and
+      # create_work_item_workflow_mode_db_test.go. The non-DB halves (the pure
+      # combination table, the COMPOSE_FAILED re-typing boundary, the route's
+      # pre-transaction refusals) run in the ordinary unit step above; the
+      # wire-level DB surface of the route itself is covered by the #708 step's
+      # domain suite plus the server binding tests. Nothing here may SKIP: a
+      # SKIP would mean the mode column and its claim gate are untested on
+      # every CI run, which is exactly the CI-invisible-DB-test hole the
+      # dbtestcov ratchet (aihub#303) exists to keep closed.
+      - name: aihub#720 workflow_mode composition DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          GOWORK=off go test ./internal/domain/ -run '^(TestMigration0045WorkflowMode_|TestCreateWorkItemWorkflowMode_)' -count=1 -v 2>&1 | tee workflow_mode_720.log
+          for want in TestMigration0045WorkflowMode_AcceptsDbAndPending \
+                      TestMigration0045WorkflowMode_BackfillsExistingRowsAsLegacy \
+                      TestMigration0045WorkflowMode_NewRowsDefaultLegacy \
+                      TestMigration0045WorkflowMode_RejectsAnInvalidMode \
+                      TestMigration0045WorkflowMode_ReplayIsANoOp \
+                      TestCreateWorkItemWorkflowMode_LegacyDefaultWithoutSteps \
+                      TestCreateWorkItemWorkflowMode_PendingFlipsToDbOnFirstPin \
+                      TestCreateWorkItemWorkflowMode_PendingIsStoredAndUnclaimable \
+                      TestCreateWorkItemWorkflowMode_PersistsModeDbWithSteps; do
+            grep -q -- "--- PASS: $want (" workflow_mode_720.log \
+              || { echo "::error::$want did not run; aihub#720 workflow_mode coverage is incomplete"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' workflow_mode_720.log \
+            || { echo "::error::an aihub#720 workflow_mode test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+
   publish-schemas:
     name: Publish MCP Schemas
     needs: test

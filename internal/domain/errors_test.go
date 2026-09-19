@@ -57,6 +57,8 @@ func TestCodeToHTTPStatus(t *testing.T) {
 		{ErrInvalidStepTransition, 400},
 		{ErrProjectAmbiguous, 400},
 		{ErrInvalidMemoryType, 400},
+		// aihub#720: composition failure is request-content failure.
+		{ErrComposeFailed, 400},
 		// 401
 		{ErrUnauthorized, 401},
 		{ErrStaleCredential, 401},
@@ -86,6 +88,8 @@ func TestCodeToHTTPStatus(t *testing.T) {
 		{ErrConflictTerminalState, 409},
 		{ErrWITypeMismatch, 409},
 		{ErrGoalChangeNotAllowed, 409},
+		// aihub#720: claiming a not-yet-composed work item is a state conflict.
+		{ErrConflictComposePending, 409},
 		// 412
 		{ErrPreconditionFailed, 412},
 		// 413
@@ -128,6 +132,8 @@ func TestAllErrCodesMapped(t *testing.T) {
 		ErrConflictLockTaken, ErrConflictDualWIAgent,
 		ErrRequiresHumanSessionMismatch, ErrConflictVersionMismatch,
 		ErrConflictTerminalState,
+		// aihub#720
+		ErrComposeFailed, ErrConflictComposePending,
 		ErrPreconditionFailed, ErrProjectMembersUndeclaredRemoval,
 		ErrPayloadTooLarge,
 		ErrServiceUnavailable, ErrAihubUnavailable,

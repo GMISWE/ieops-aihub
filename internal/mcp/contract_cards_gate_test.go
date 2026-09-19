@@ -3040,6 +3040,16 @@ var k12Cards = []string{
 	"pf_approve_workflow",
 	"pf_repair_workflow",
 	"pf_reconcile_workflow",
+
+	// aihub#720 slice D — the skill-registry read tools. Same entry rule as the
+	// aihub#708 band above: every assertable sentence either cites an arm in
+	// internal/mcp/tools_skills_test.go / the aihub#708 registry arms or
+	// carries a prose-only marker, so they enter the roster with Unclassified 0
+	// by construction, in the same change that added them.
+	"pf_list_skills",
+	"pf_get_skill",
+	"pf_list_skill_versions",
+	"pf_get_skill_version",
 }
 
 // k12ContractCards is how many pf_* cards docs/mcp-cards holds, which since phase 2
@@ -3051,7 +3061,7 @@ var k12Cards = []string{
 // applied to the population's own definition. Lowering it is legitimate only in the
 // same diff that removes the card and its ledger row, and floorCards bounds how far
 // that can go before K1 objects too.
-const k12ContractCards = 52
+const k12ContractCards = 56
 
 // k12Ledger records what each scoped card currently holds, per class.
 //
@@ -3140,16 +3150,20 @@ var k12Ledger = map[string]cardclaims.Census{
 	"pf_create_dependency":       {Candidates: 9, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
 	"pf_create_project":          {Candidates: 12, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
 	"pf_create_user":             {Candidates: 23, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_create_work_item":        {Candidates: 30, Cited: 23, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
-	"pf_diff":                    {Candidates: 8, Cited: 7, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_emit_event":              {Candidates: 30, Cited: 26, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_force_takeover":          {Candidates: 21, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
-	"pf_get_memory":              {Candidates: 10, Cited: 8, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_get_ready_queue":         {Candidates: 31, Cited: 20, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
-	"pf_get_step":                {Candidates: 21, Cited: 15, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_get_work_item":           {Candidates: 22, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
-	"pf_list_dependencies":       {Candidates: 14, Cited: 9, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
-	"pf_list_projects":           {Candidates: 14, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	// aihub#720 slice C re-pin: publishing workflow_mode added one candidate
+	// sentence (the field-set count, rejoined so its citation rides inside it)
+	// and the new table row is cited (TestCreateWorkItemRoute_* and
+	// TestComposeErrorCodesClassifyOnTheWire), so Candidates 30→31, Cited 23→24.
+	"pf_create_work_item":  {Candidates: 31, Cited: 24, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 7},
+	"pf_diff":              {Candidates: 8, Cited: 7, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_emit_event":        {Candidates: 30, Cited: 26, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 1, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_force_takeover":    {Candidates: 21, Cited: 18, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	"pf_get_memory":        {Candidates: 10, Cited: 8, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_get_ready_queue":   {Candidates: 31, Cited: 20, QuotePinned: 2, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 9},
+	"pf_get_step":          {Candidates: 21, Cited: 15, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_get_work_item":     {Candidates: 22, Cited: 16, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
+	"pf_list_dependencies": {Candidates: 14, Cited: 9, QuotePinned: 1, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 4},
+	"pf_list_projects":     {Candidates: 14, Cited: 9, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 5},
 	// aihub#708 Batch 2A — the six workflow cards. Unclassified enters at 0 by
 	// construction (each sentence cites a workflow_db_test.go arm or carries a
 	// marker); PendingImplementation carries the wire-shape claims whose probes
@@ -3165,10 +3179,16 @@ var k12Ledger = map[string]cardclaims.Census{
 	// workflow_lifecycle_fence_db_test.go arm or carries a pending-
 	// implementation/prose-only marker citing aihub#708.
 	"pf_reconcile_workflow": {Candidates: 8, Cited: 4, QuotePinned: 0, Unclassified: 0, PendingImplementation: 3, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
-	"pf_list_users":         {Candidates: 10, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_list_work_items":    {Candidates: 41, Cited: 33, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
-	"pf_pause_attempt":      {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
-	"pf_pr":                 {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
+	// aihub#720 slice D — measured by the K12 line the day the cards were
+	// written, like every row above.
+	"pf_list_skills":         {Candidates: 5, Cited: 5, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_get_skill":           {Candidates: 6, Cited: 6, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_list_skill_versions": {Candidates: 5, Cited: 5, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 0},
+	"pf_get_skill_version":   {Candidates: 5, Cited: 4, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 1},
+	"pf_list_users":          {Candidates: 10, Cited: 8, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_list_work_items":     {Candidates: 41, Cited: 33, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 8},
+	"pf_pause_attempt":       {Candidates: 17, Cited: 15, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 2},
+	"pf_pr":                  {Candidates: 13, Cited: 10, QuotePinned: 0, Unclassified: 0, PendingImplementation: 0, KnownDefect: 0, StructurallyUnreachable: 0, AcceptedUnprobed: 0, ProseOnly: 3},
 	// aihub#679 re-pin: 41→46 candidates, 34→39 cited, every other column
 	// unchanged and Unclassified still 0. The five new assertable sentences are
 	// the rewritten H7-fold paragraph — the folded label no longer names the

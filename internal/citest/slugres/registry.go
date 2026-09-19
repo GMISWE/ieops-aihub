@@ -97,6 +97,9 @@ var canonicalParams = []ParamContract{
 		Reason: "AuthorizeWorkflowRepair passes w.ID from getWorkflowWIOnTx; the lineage walk reads invocation and authorization rows keyed by it (aihub#708 Batch 2A re-review blocker mem_FHuxXIXI)"},
 	{File: "internal/domain/workflow_run.go", Func: "pinFirstWorkflowGenerationInTx", Param: "wiID",
 		Reason: "called only by CreateWorkItem with the wiID it minted inside the same transaction (NewID, a registered minter)"},
+	// ── aihub#725: the controller-sink receipt replay probe.
+	{File: "internal/domain/memory.go", Func: "replayControllerSinkReceipt", Param: "req.WorkItemID",
+		Reason: "handleRemember resolves work_item_id to the canonical row before domain.Remember runs (the methodology gate resolves or refuses), so the receipt probe compares against the same canonical id the memory row will store"},
 
 	// ── dependency graph (the aihub#357 surface) ──────────────────────────
 	{File: "internal/domain/dependencies.go", Func: "ListDependencies", Param: "wiID",

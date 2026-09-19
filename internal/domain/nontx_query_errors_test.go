@@ -267,7 +267,14 @@ func TestNonTransactionalQueryRowSitesAnswerTheirErrors(t *testing.T) {
 	// lands as a compliant fifth workflow site — zero violations, no
 	// nontxQueryRowJustifications entry (an unconsumed ledger key would
 	// itself fail checkLedger as stale).
-	const wantSites = 28
+	//
+	// 28 -> 29 (2026-09-19, aihub#725 review_fix B2): the durable
+	// controller-sink receipt lookup in memory.go's replayControllerSinkReceipt
+	// — the attrs containment probe that makes a lost sink save replayable
+	// instead of duplicable. Canonical compound guard: ErrNoRows is the
+	// ordinary "first landing of this receipt" answer, every other failure
+	// classifies through dbErrCause. Zero violations, no ledger entry.
+	const wantSites = 29
 	if totalSites != wantSites {
 		t.Errorf("scanner found %d QueryRow sites in non-transactional functions, want %d — fewer may mean a "+
 			"site moved into a stated blind spot (if-init, row-helper, blanked error), which "+

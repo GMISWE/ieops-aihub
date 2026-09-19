@@ -111,12 +111,38 @@ func TestNoStoredStructuredPayloadIsFedBackIntoAWrite(t *testing.T) {
 			"and its silence about %s would mean nothing", field)
 
 	sort.Strings(writes)
-	require.Empty(t, writes,
-		"these sites write `%s` in Go: %v\nThe card's hop 4 says no path in the repo feeds a "+
+
+	// wireOriginWriters is the CLOSED allowlist of Go statements that write
+	// StructuredPayload WITHOUT violating the card's premise: each entry's
+	// value originates from an external sender's fresh bytes, never out of the
+	// stored attrs column, so "no path feeds a stored structured_payload back
+	// into a write" stays true. aihub#725's controller sink is the first such
+	// writer: it feeds the worker's freshly-decoded structured output object
+	// into its own save request; nothing it writes was ever read from a
+	// memories row. The census requires every allowlisted site to still exist
+	// (a rename must update this list, not silently vanish) and every
+	// NON-allowlisted write to be absent (a second Go writer is presumed a
+	// violation until proven wire-origin here).
+	wireOriginWriters := map[string]string{
+		"controller/execute.go/sinkWorkerOutput": "aihub#725 controller-sink: fresh worker stdout output object, never a stored row",
+	}
+	for site, why := range wireOriginWriters {
+		require.Contains(t, writes, site,
+			"allowlisted wire-origin writer %s is gone; update the allowlist with its successor, "+
+				"together with the reason (%s), in the same change", site, why)
+	}
+	unexpected := []string{}
+	for _, w := range writes {
+		if _, allowed := wireOriginWriters[w]; !allowed {
+			unexpected = append(unexpected, w)
+		}
+	}
+	require.Empty(t, unexpected,
+		"these NON-allowlisted sites write `%s` in Go: %v\nThe card's hop 4 says no path in the repo feeds a "+
 			"stored structured_payload back into a write, and that premise is why the field has no "+
 			"attrsFromStoredRow-style exemption. If one of these carries a value read out of the "+
 			"column, the exemption is now needed and the sentence is now false — fix whichever is "+
-			"wrong, in the same change.", field, writes)
+			"wrong, in the same change.", field, unexpected)
 }
 
 // goFieldWriteSites returns the "<file>/<func>" of every Go statement under root

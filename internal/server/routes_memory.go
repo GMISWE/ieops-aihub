@@ -95,13 +95,37 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 		// exit as one that never existed, and the 400 below is unchanged for both. A
 		// caller who does hold access back-fills exactly as before; an admin, whose
 		// ProjectRoles is empty by design, is scoped by the flag rather than the slice.
-		if req.Project == "" && req.WorkItemID != nil && *req.WorkItemID != "" {
+		// aihub#725: resolve the wi ref ONCE, unconditionally when present —
+		// not only when the project needs backfilling. The canonical id pins
+		// req.WorkItemID before the methodology gate's credential check and
+		// before domain.Remember stores it, so a slug can never reach the
+		// memories.work_item_id FK (aihub#127 class) nor the controller-sink
+		// receipt probe's WHERE, which must compare against the same canonical
+		// id the row stores. The project still back-fills from the same row,
+		// so there is exactly one resolution per request, as the R3 gate holds.
+		var canonicalWIID string
+		if pool != nil && req.WorkItemID != nil && *req.WorkItemID != "" {
+			// (pool == nil is the pre-flight test harness: those arms assert
+			// the 400/403 order BELOW, before any lookup, and must not panic.)
 			ref, wiErr := domain.ResolveVisibleWorkItemRef(ctx, pool, *req.WorkItemID,
 				visibleProjects(u), u != nil && u.Role == "admin")
 			if wiErr != nil {
-				return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required (work_item_id lookup failed)"))
+				// The pre-#725 code only resolved here when the project needed
+				// back-filling and answered 400 regardless of why. Resolving
+				// unconditionally (above) must not change the visibility answer
+				// for an explicit project: a cross-project ref still hides as
+				// 404 (hideNotFound), and a ref that simply does not resolve
+				// keeps the historical 400 for callers who sent no project.
+				if req.Project == "" {
+					return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required (work_item_id lookup failed)"))
+				}
+				return writeError(c, hideNotFound(wiErr))
 			}
-			req.Project = ref.Project
+			canonicalWIID = ref.ID
+			req.WorkItemID = &ref.ID
+			if req.Project == "" {
+				req.Project = ref.Project
+			}
 		}
 		if req.Project == "" {
 			return writeError(c, domain.NewErr(domain.ErrBadRequest, "project is required"))
@@ -163,7 +187,7 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 					"methodology.* artifacts require attempt credentials; write them via pf_save_artifact from the claiming session"))
 			}
 			if credErr := domain.VerifyAttemptCredentialPool(
-				ctx, pool, wiID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
+				ctx, pool, canonicalWIID, req.AttemptID, req.ClaimEpoch, req.SessionSecret,
 			); credErr != nil {
 				return writeError(c, credErr)
 			}
@@ -188,6 +212,13 @@ func handleRemember(pool *pgxpool.Pool) echo.HandlerFunc {
 			"stability_days":   mem.StabilityDays,
 			"base_strength":    mem.BaseStrength,
 			"created_at":       mem.CreatedAt,
+			// aihub#725: the immutable per-id version. A memory id IS one
+			// version — a revision is a NEW id — so any row returned here is
+			// version 1, and resolveCompletedResultArtifact refuses any other
+			// claimed version. Stated on the wire so the controller-side sink
+			// can fill the artifact triple the server will later validate from
+			// server-returned values rather than a client-side guess.
+			"version": 1,
 		}
 		return c.JSON(http.StatusCreated, resp)
 	}

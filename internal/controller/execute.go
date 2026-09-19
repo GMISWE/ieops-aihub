@@ -52,6 +52,7 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/modelruntime"
 	"github.com/GMISWE/ieops-aihub/internal/skillregistry"
 	"github.com/GMISWE/ieops-aihub/internal/workflow"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // API is the existing WI workflow and immutable skill-version client surface.
@@ -64,6 +65,12 @@ type API interface {
 	RecordWorkflowResult(context.Context, string, any) (map[string]any, error)
 	GetSkillVersion(context.Context, string, int) (map[string]any, error)
 	ReconcileWorkflowInvocations(context.Context, string, any) (map[string]any, error)
+	// SaveArtifact is the controller-sink persistence seam (aihub#725): the
+	// SAME attempt-authorized POST /v1/memories path pf_save_artifact uses.
+	// *client.Client implements it; RunStep calls it only on the sink branch,
+	// with the credentials captured at claim time — never any worker-supplied
+	// credential.
+	SaveArtifact(context.Context, client.SaveArtifactRequest) (client.SavedArtifact, error)
 }
 
 type Credentials struct {
@@ -605,16 +612,83 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			writeLog(opts.Log, workerOutput, chain)
 			return out, &RecoverableExecutionError{Detail: "worker result identity differs from invocation; fallback is forbidden after start"}
 		}
+
+		// Controller-side artifact sink (aihub#725): a credentialless worker
+		// cannot call pf_save_artifact — it has no MCP tools and never sees the
+		// attempt credentials — so a completed result with NO artifact triple
+		// would otherwise be unrecordable. The controller, which DOES hold the
+		// claim-time credentials, saves the worker's transient structured
+		// output object as a methodology artifact through the same
+		// attempt-authorized path pf_save_artifact uses, then fills the
+		// server-returned immutable identity plus the canonical hash into the
+		// result before recording. Everything the server validates afterwards
+		// — existence, wi-binding, type, version, visibility, digest over the
+		// STORED structured payload — still holds, because the id/version are
+		// real server-returned values and the hash is computed over the exact
+		// bytes sent. A result that already carries a triple is NOT rewritten:
+		// the sink never replaces a worker-supplied (or fabricated) id, so the
+		// server's existing refusal stays observable. Non-completed results
+		// bypass the sink entirely and keep their byte-identical behavior.
+		// sunkID names the artifact the sink stored, for the record-failure
+		// report below: a save that succeeded is a side effect the operator
+		// must see separately from the failed recording.
+		var sunkID string
+		// 🔴 The trigger is the ZERO triple, not a bare empty id (aihub#725
+		// review_fix SF1): a result whose artifact carries any populated
+		// component — an id-less fragment like {version:1,hash:...} — is a
+		// worker-supplied (or malformed) reference the sink must NOT overwrite;
+		// it records unchanged and the server's resolution refuses it. Only the
+		// fully-zero triple means "no artifact was cited at all".
+		if result.Status == workflow.StatusCompleted && result.Artifact == (workflow.ArtifactRef{}) {
+			if result.Output == nil {
+				// A completed result that cites no artifact and carries no
+				// structured output object: nothing could be stored, so nothing
+				// is recorded and no fallback may run over the possibly-dirty
+				// worktree — the same discipline as any other post-start
+				// contract breach.
+				reason := fmt.Sprintf("process group %d stopped; the completed result cited no artifact and carried no structured output object to sink; output retained, worktree not reset, and side effects may exist", proc.PID())
+				_ = chain.MarkNoFallback(sel, reason)
+				writeLog(opts.Log, workerOutput, chain)
+				return out, &RecoverableExecutionError{Detail: "completed worker result carries neither an artifact triple nor a structured output object; the sink cannot store it and fallback is forbidden after start"}
+			}
+			ref, sErr := sinkWorkerOutput(stepCtx, api, wiID, inv, opts, result, contract)
+			if sErr != nil {
+				// The save was refused or unconfirmed. Because a lost response
+				// cannot be distinguished from a refused one, the once-guard
+				// below has already burned this invocation's sink: a retry of
+				// the SAME invocation will never save again, so no duplicate
+				// artifact can be created by a retry loop. Nothing was recorded.
+				reason := fmt.Sprintf("process group %d stopped; controller-sink artifact save was refused or unconfirmed (%v); no workflow result was recorded; output retained, worktree not reset, and side effects may exist", proc.PID(), sErr)
+				_ = chain.MarkNoFallback(sel, reason)
+				writeLog(opts.Log, workerOutput, chain)
+				return out, &RecoverableExecutionError{Detail: "controller artifact sink: " + sErr.Error()}
+			}
+			result.Artifact = ref
+			sunkID = ref.ID
+		}
+		// The transient output object never leaves this process: it exists for
+		// the sink alone, and the recorded result must stay byte-identical to
+		// the pre-sink wire shape (omitempty keeps a nil map off the JSON).
+		result.Output = nil
 		if _, err := api.RecordWorkflowResult(stepCtx, wiID, map[string]any{
 			"attempt_id":     opts.Credentials.AttemptID,
 			"claim_epoch":    opts.Credentials.ClaimEpoch,
 			"session_secret": opts.Credentials.SessionSecret,
 			"result":         result,
 		}); err != nil {
+			detail := "record workflow result: " + err.Error()
+			if sunkID != "" {
+				// aihub#725: the sink already committed an artifact server-side.
+				// Sink success is NOT step completion, and the two outcomes stay
+				// distinguishable: the held invocation must not re-save (the
+				// once-guard has burned), and recovery re-records against the
+				// known artifact id rather than silently creating another one.
+				detail = fmt.Sprintf("record workflow result: %v; the controller-sink artifact WAS stored as %s (version %d, hash %s) and result recording was NOT confirmed", err, sunkID, result.Artifact.Version, result.Artifact.Hash)
+			}
 			reason := fmt.Sprintf("process group %d stopped; the structured result was not confirmed recorded (%v); output retained, worktree not reset, and side effects may exist", proc.PID(), err)
 			_ = chain.MarkNoFallback(sel, reason)
 			writeLog(opts.Log, workerOutput, chain)
-			return out, &RecoverableExecutionError{Detail: "record workflow result: " + err.Error()}
+			return out, &RecoverableExecutionError{Detail: detail}
 		}
 		if aErr := chain.Apply(sel, result); aErr != nil {
 			writeLog(opts.Log, combinedWorkerOutput(stdout.bytes(), stderr.bytes()), chain)
@@ -648,6 +722,118 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 		out.Recorded = true
 		return out, nil
 	}
+}
+
+// sinkAttempts is the controller-side fast half of aihub#725 S3's
+// idempotency: a per-invocation once-guard keyed on the server-minted
+// step_attempt_id. It is marked BEFORE the save call, not after it, so an
+// attempt whose response was lost (a save that may or may not have committed
+// server-side) can never produce a second save for the same invocation from
+// THIS process.
+//
+// 🔴 Since aihub#725 review_fix B2 the durability no longer rests on this map:
+// every sink save carries attrs.controller_sink_receipt =
+// {invocation_id, step_attempt_id, attempt_id}, and the server replays that
+// receipt durably — the same receipt with the same payload returns the
+// already-stored row, a different payload is refused — so a sink retried
+// after a controller restart (or on another process) cannot mint a duplicate
+// artifact either. The map remains as the in-process fast path: it prevents
+// the second HTTP save from being issued at all, keeps the error path
+// explicit, and stays correct in exactly the process-local scope it claims.
+var sinkAttempts sync.Map // step_attempt_id -> struct{}
+
+// claimSinkAttempt reports whether THIS invocation's sink save may proceed,
+// and burns the once-token either way: a second claim for the same
+// step_attempt_id always reports false.
+func claimSinkAttempt(stepAttemptID string) bool {
+	_, attempted := sinkAttempts.LoadOrStore(stepAttemptID, struct{}{})
+	return !attempted
+}
+
+// sinkArtifactType derives the methodology type from the pinned skill
+// contract's capability set — trusted controller metadata, never a
+// worker-supplied value. A review or verification-capability gate reviews
+// work, so its sink artifact is methodology.review; every other automatic
+// completed step's output is methodology.execute.
+func sinkArtifactType(contract *skillregistry.SkillContract) string {
+	for _, capability := range contract.Capabilities {
+		if capability == skillregistry.CapReview || capability == skillregistry.CapVerification {
+			return "methodology.review"
+		}
+	}
+	return "methodology.execute"
+}
+
+// sinkWorkerOutput stores one artifactless completed result's transient
+// structured output as a methodology artifact and returns the artifact triple
+// to fill into the recorded result: the server-returned id/version plus the
+// digest computed over the EXACT bytes sent as structured_payload. The
+// content is the controller's own honest summary carrying the
+// controller-sink provenance declaration — origin and payload author stay
+// distinguishable from a worker-authored artifact.
+//
+// Number fidelity (aihub#725 review_fix SF2/SF4): the payload is hashed and
+// stored VERBATIM — the strict decode preserved the worker's number literals
+// as json.Number, json.Marshal writes them back unchanged, and the server
+// stores those same bytes and recomputes the digest over a UseNumber decode
+// of them. There is deliberately NO float64 canonicalization pass: the sink
+// previously re-marshalled the payload through the float64 universe, which
+// rewrote literals the record-time recompute treats as distinct (1.50 → 1.5,
+// integers beyond 2^53 rounding away their last digit) and made the content's
+// "verbatim" provenance claim false. The residual edge is declared, not
+// hidden: a number written in exponent spelling (1e2, 1E+2) is normalized by
+// PostgreSQL's jsonb column on store, so such a payload fails the record-time
+// digest recompute LOUDLY (a recoverable hold, never a silent divergence) —
+// every decimal and integer literal round-trips exactly.
+func sinkWorkerOutput(ctx context.Context, api API, wiID string, inv Invocation, opts StepOptions, result workflow.StepResult, contract *skillregistry.SkillContract) (workflow.ArtifactRef, error) {
+	if !claimSinkAttempt(inv.StepAttemptID) {
+		return workflow.ArtifactRef{}, fmt.Errorf(
+			"a sink save was already attempted for invocation %s of step %s in this process; it will not be retried here (the server-side durable receipt would return the same row, but a lost response cannot be told from a refused one)",
+			inv.StepAttemptID, inv.StepID)
+	}
+	// The bytes ARE the canonical form: json.Marshal of the UseNumber-decoded
+	// output re-serializes each json.Number as its literal, sorts keys
+	// deterministically, and nothing in this path has touched a float64. The
+	// digest is taken over these exact bytes, and these exact bytes are what
+	// the request sends as structured_payload — so the server's record-time
+	// recompute over the stored copy reproduces it.
+	payloadBytes, err := json.Marshal(result.Output)
+	if err != nil {
+		return workflow.ArtifactRef{}, fmt.Errorf("encode worker structured output: %w", err)
+	}
+	hash := WorkflowArtifactHashBytes(payloadBytes)
+	artifactType := sinkArtifactType(contract)
+	content := fmt.Sprintf(
+		"Controller-sink artifact (aihub#725): step %q of %s completed without an artifact triple; the workflow controller stored the worker's structured output object byte-for-byte (number literals as decoded from the worker envelope) in attrs.structured_payload.\n\n"+
+			"Provenance — origin=controller_sink, payload_author=worker. Invocation identity: work_item_id=%s, flow_version=%d, step_id=%s, step_attempt_id=%s, epoch=%d, producer_id=%s. Durable replay receipt: invocation_id=%s, attempt_id=%s. Artifact type=%s; payload digest=%s.\n\n"+
+			"The payload was authored by the worker and saved by the controller under the claim-time attempt credential; the controller filled the server-returned artifact triple into the recorded result. Server-side result validation remains authoritative, and a successful save is not by itself step completion.",
+		inv.StepID, wiID,
+		wiID, inv.StepsVersion, inv.StepID, inv.StepAttemptID, inv.ClaimEpoch, inv.ProducerID,
+		inv.InvocationID, opts.Credentials.AttemptID,
+		artifactType, hash)
+	saved, err := api.SaveArtifact(ctx, client.SaveArtifactRequest{
+		Type:              artifactType,
+		WorkItemID:        wiID,
+		Content:           content,
+		StructuredPayload: json.RawMessage(payloadBytes),
+		AttemptID:         opts.Credentials.AttemptID,
+		ClaimEpoch:        opts.Credentials.ClaimEpoch,
+		SessionSecret:     opts.Credentials.SessionSecret,
+		Visibility:        "project",
+		// The durable replay receipt (aihub#725 review_fix B2): the server
+		// resolves it in attrs, so a same-payload retry after a lost response
+		// returns the row already stored instead of minting a duplicate
+		// artifact. All three components are trusted controller state.
+		SinkReceipt: &client.ControllerSinkReceipt{
+			InvocationID:  inv.InvocationID,
+			StepAttemptID: inv.StepAttemptID,
+			AttemptID:     opts.Credentials.AttemptID,
+		},
+	})
+	if err != nil {
+		return workflow.ArtifactRef{}, fmt.Errorf("save methodology artifact for step %s: %w", inv.StepID, err)
+	}
+	return workflow.ArtifactRef{ID: saved.ID, Version: saved.Version, Hash: hash}, nil
 }
 
 // positivelyKnownChannelFailure reports whether a post-start worker error is

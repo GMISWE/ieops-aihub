@@ -6,6 +6,7 @@ package controller
 // input; dispatching it directly asks the worker to invent the missing value.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -80,9 +81,16 @@ func structuredArtifactPayload(raw map[string]any) (map[string]any, error) {
 	attrs, ok := raw["attrs"].(map[string]any)
 	if !ok {
 		// Client maps produced by json.Unmarshal normally use map[string]any;
-		// tolerate a RawMessage in fakes and in-process adapters.
+		// tolerate a RawMessage in fakes and in-process adapters. The decode
+		// is UseNumber (aihub#725 review_fix SF4): the digest below must
+		// recompute over the STORED literals — the same number universe the
+		// server's record-time recompute uses — so a trailing-zero decimal or
+		// an integer beyond 2^53 cannot be silently rewritten into a different
+		// digest by a float64 decode here.
 		if b, ok := raw["attrs"].(json.RawMessage); ok {
-			if err := json.Unmarshal(b, &attrs); err != nil {
+			dec := json.NewDecoder(bytes.NewReader(b))
+			dec.UseNumber()
+			if err := dec.Decode(&attrs); err != nil {
 				return nil, fmt.Errorf("attrs do not decode: %w", err)
 			}
 		}
@@ -97,12 +105,25 @@ func structuredArtifactPayload(raw map[string]any) (map[string]any, error) {
 	return payload, nil
 }
 
-// WorkflowArtifactHash is the digest used by session-authored workflow
-// artifacts: sha256 over encoding/json's deterministic object serialization.
-// The full output object is stored as attrs.structured_payload, so readers can
-// recompute this digest before projecting any named output.
+// WorkflowArtifactHash is the digest used by workflow artifacts: sha256 over
+// encoding/json's deterministic object serialization. The full output object
+// is stored as attrs.structured_payload, so readers can recompute this
+// digest before projecting any named output.
 func WorkflowArtifactHash(output map[string]any) string {
 	b, _ := json.Marshal(output)
-	sum := sha256.Sum256(b)
+	return WorkflowArtifactHashBytes(b)
+}
+
+// WorkflowArtifactHashBytes is the byte-level form of the same digest rule:
+// sha256 over encoding/json's deterministic serialization, given the already
+// serialized bytes. The controller sink (sinkWorkerOutput, aihub#725 review_fix
+// SF2/SF4) hashes the exact bytes it sends as structured_payload — which
+// json.Marshal of a UseNumber-decoded output produced — so the server's
+// record-time recompute over the stored copy reproduces the same digest. A
+// map-in form that re-marshals to these bytes (the session path, ResolveInputs)
+// yields the identical answer, which is what keeps the two entry points one
+// rule rather than two.
+func WorkflowArtifactHashBytes(serialized []byte) string {
+	sum := sha256.Sum256(serialized)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }

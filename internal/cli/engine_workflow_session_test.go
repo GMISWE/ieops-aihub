@@ -14,6 +14,7 @@ import (
 	"github.com/GMISWE/ieops-aihub/internal/controller"
 	"github.com/GMISWE/ieops-aihub/internal/skillregistry"
 	"github.com/GMISWE/ieops-aihub/internal/workflow"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // sessionE2EAPI is an in-memory authorized API. It exercises the callable
@@ -139,6 +140,11 @@ func (f *sessionE2EAPI) Remember(_ context.Context, body any) (map[string]any, e
 	m := body.(map[string]any)
 	f.artifacts[id] = map[string]any{"id": id, "work_item_id": "wi_session", "content": m["content"], "attrs": map[string]any{"structured_payload": m["structured_payload"]}}
 	return map[string]any{"id": id}, nil
+}
+func (*sessionE2EAPI) SaveArtifact(context.Context, client.SaveArtifactRequest) (client.SavedArtifact, error) {
+	// The session E2E drive persists artifacts through Remember; the
+	// controller-sink is the unattended path's seam and must never fire here.
+	return client.SavedArtifact{}, errors.New("unexpected controller-sink save in the session E2E drive")
 }
 func (f *sessionE2EAPI) GetMemory(_ context.Context, id string) (map[string]any, error) {
 	return f.artifacts[id], nil

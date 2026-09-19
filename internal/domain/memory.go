@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1148,10 +1150,13 @@ func ValidateIntegralStrength(field string, v float64) *AihubError {
 // TestRememberAttrsProvenanceSplit does.
 //
 // Attrs is exempted when it came from a stored row (see attrsFromStoredRow).
-// StructuredPayload never is: no caller in this repo re-feeds a stored
+// StructuredPayload never is: no caller in this repo re-feeds a STORED
 // structured_payload into a write — UpdateMemory leaves the field unset and
-// carries the whole merged attrs object instead — so every value this field
-// ever holds came from the wire.
+// carries the whole merged attrs object instead. There is exactly one Go
+// writer (aihub#725's controller sink, internal/controller execute.go
+// sinkWorkerOutput) and its bytes come fresh from the worker's result
+// envelope, never out of the memories column, so the no-exemption premise
+// below still holds for every value this field ever holds.
 func validateRememberJSONParams(req *RememberRequest) *AihubError {
 	if !req.attrsFromStoredRow {
 		if shapeErr := validateJSONObjectParam("attrs", req.Attrs); shapeErr != nil {
@@ -1159,6 +1164,154 @@ func validateRememberJSONParams(req *RememberRequest) *AihubError {
 		}
 	}
 	return validateJSONObjectParam("structured_payload", req.StructuredPayload)
+}
+
+// ─── Durable controller-sink replay receipt (aihub#725 review_fix B2) ────────
+//
+// The controller sink (internal/controller sinkWorkerOutput) saves a
+// credentialless worker's completed output as a methodology artifact and
+// then records the result against the returned id. Between the save and the
+// record the controller can die; the retry that follows cannot tell a refused
+// save from a lost response. The receipt below is the durable half of that
+// fence: one server-minted invocation of one step of one run attempt is one
+// artifact, and the memories row itself carries the proof of which
+// invocation stored it — so no table or index change is needed, the lookup
+// is an attrs containment probe bound to the same work item the aihub#210
+// methodology gate already authenticated.
+
+// ControllerSinkReceipt is the durable replay identity the controller sink
+// stamps into attrs.controller_sink_receipt. All three components are
+// trusted controller state (the start descriptor and the claim-time
+// attempt id); nothing here is worker-supplied.
+type ControllerSinkReceipt struct {
+	InvocationID  string `json:"invocation_id"`
+	StepAttemptID string `json:"step_attempt_id"`
+	AttemptID     string `json:"attempt_id"`
+}
+
+const controllerSinkReceiptAttrKey = "controller_sink_receipt"
+
+// controllerSinkReceiptFromAttrs extracts the receipt from caller-supplied
+// attrs. The third return distinguishes the three outcomes: a well-formed
+// receipt (present=true), no receipt at all (present=false, nil error — the
+// ordinary memory-write path), and a MALFORMED receipt (nil, false, a 400 —
+// only the controller sink writes this key, so a half-shape is not data from
+// another caller, it is a bug in the one writer, and the loud refusal stops
+// it from being stored as if it meant something).
+func controllerSinkReceiptFromAttrs(attrs json.RawMessage) (ControllerSinkReceipt, bool, error) {
+	if len(attrs) == 0 {
+		return ControllerSinkReceipt{}, false, nil
+	}
+	var attrsMap map[string]json.RawMessage
+	if err := decodeJSONUseNumber(attrs, &attrsMap); err != nil {
+		// attrs already passed the aihub#465 object shape guard by the time
+		// this runs, so an unparseable attrs object here is not a caller
+		// error class this function owns; treat it as "no receipt" and let
+		// the ordinary path proceed unchanged.
+		return ControllerSinkReceipt{}, false, nil
+	}
+	raw, present := attrsMap[controllerSinkReceiptAttrKey]
+	if !present {
+		return ControllerSinkReceipt{}, false, nil
+	}
+	var receipt ControllerSinkReceipt
+	if err := decodeJSONUseNumber(raw, &receipt); err != nil {
+		return ControllerSinkReceipt{}, false, NewErr(ErrBadRequest,
+			fmt.Sprintf("attrs.%s must be an object with string fields invocation_id, step_attempt_id, attempt_id", controllerSinkReceiptAttrKey))
+	}
+	if receipt.InvocationID == "" || receipt.StepAttemptID == "" || receipt.AttemptID == "" {
+		return ControllerSinkReceipt{}, false, NewErr(ErrBadRequest,
+			fmt.Sprintf("attrs.%s requires non-empty invocation_id, step_attempt_id and attempt_id", controllerSinkReceiptAttrKey))
+	}
+	return receipt, true, nil
+}
+
+// replayControllerSinkReceipt resolves one receipt against the stored rows.
+// No hit (nil, false, nil) means "this save is the receipt's first landing";
+// a hit means the SAME save already committed, in which case the returned
+// memory IS the answer and the caller must not insert. A hit whose stored
+// payload DIFFERS from the request is a receipt collision — the one
+// invocation claims two different artifacts — and is refused as a conflict
+// rather than resolved by guessing which side is real.
+func replayControllerSinkReceipt(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest, receipt ControllerSinkReceipt) (*Memory, bool, error) {
+	if req.WorkItemID == nil || *req.WorkItemID == "" {
+		return nil, false, NewErr(ErrBadRequest,
+			fmt.Sprintf("attrs.%s requires a bound work_item_id (a controller-sink artifact is work-item scoped)", controllerSinkReceiptAttrKey))
+	}
+	probe, err := json.Marshal(map[string]any{controllerSinkReceiptAttrKey: receipt})
+	if err != nil {
+		return nil, false, NewErr(ErrInternalError, "encode controller sink receipt probe")
+	}
+	var id string
+	err = pool.QueryRow(ctx, `
+		SELECT id FROM memories
+		WHERE work_item_id = $1 AND attrs @> $2::jsonb AND status != 'redacted'
+		ORDER BY created_at DESC
+		LIMIT 1`, *req.WorkItemID, probe).Scan(&id)
+	// The canonical compound guard (see the aihub#607 census): ErrNoRows is
+	// the ORDINARY answer — no row carries this receipt yet, so this save is
+	// its first landing and the caller proceeds to the insert — while every
+	// other failure is classified through dbErrCause so a retryable 409/500
+	// answers as itself, never as a silent "first landing".
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, dbErrCause(err, "controller sink receipt lookup")
+	}
+	if err != nil {
+		return nil, false, nil
+	}
+	// Reuse the ONE column list (GetMemoryByID) rather than growing another
+	// lockstep copy of it: the receipt names a single id, so the second read
+	// is one indexed lookup, and a row that vanished in between (redaction
+	// race) just falls through to the insert path.
+	mem, aErr := GetMemoryByID(ctx, pool, id)
+	if aErr != nil {
+		return nil, false, nil
+	}
+	if mem.Type != req.Type || mem.Content != req.Content || !sameControllerSinkPayload(mem.Attrs, req.StructuredPayload) {
+		return nil, false, NewErr(ErrConflictDuplicate,
+			fmt.Sprintf("attrs.%s names an already-stored artifact (%s) whose payload differs from this save; one invocation cannot store two different artifacts; the receipt is a replay guard, not an update key", controllerSinkReceiptAttrKey, mem.ID))
+	}
+	return mem, true, nil
+}
+
+// sameControllerSinkPayload compares the structured_payload a replay
+// carries against the one the stored row already holds, in the literal
+// number universe (UseNumber on both sides): byte differences that decode to
+// the same JSON value are equal, and a value difference — including 1.50
+// against 1.5 — is a different payload.
+func sameControllerSinkPayload(storedAttrs json.RawMessage, incoming json.RawMessage) bool {
+	var stored, fresh any
+	var attrsMap map[string]json.RawMessage
+	if err := decodeJSONUseNumber(storedAttrs, &attrsMap); err != nil {
+		return false
+	}
+	raw, ok := attrsMap["structured_payload"]
+	if ok {
+		if err := decodeJSONUseNumber(raw, &stored); err != nil {
+			return false
+		}
+	}
+	if len(incoming) > 0 {
+		if err := decodeJSONUseNumber(incoming, &fresh); err != nil {
+			return false
+		}
+	}
+	return reflect.DeepEqual(stored, fresh)
+}
+
+// decodeJSONUseNumber decodes one JSON value with json.Number semantics.
+// Used by the attrs-decoding paths that must not let a float64 rewrite
+// number literals (see the receipt and G35 blocks for the full why).
+func decodeJSONUseNumber(data []byte, into any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(into)
+}
+
+// decAttrUseNumber decodes caller-supplied attrs into a pre-made map,
+// ignoring errors by design (best-effort callers annotate, they never gate).
+func decAttrUseNumber(data []byte, into *map[string]any) {
+	_ = decodeJSONUseNumber(data, into)
 }
 
 // Remember creates a new memory per §7 / §4.3.
@@ -1284,6 +1437,30 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 		}
 	}
 
+	// aihub#725 review_fix B2: durable controller-sink replay receipt. A sink
+	// save whose response was lost (controller crash between save and record,
+	// then a retry) used to be fenced only by an in-process sync.Map, so a
+	// cross-restart retry could mint a duplicate artifact. The controller now
+	// stamps attrs.controller_sink_receipt = {invocation_id, step_attempt_id,
+	// attempt_id} into the save, and THIS lookup makes the idempotency
+	// durable with NO schema change: a stored row already carrying the same
+	// receipt IS the same save — return it (isNew=false) when the payload
+	// matches, refuse (409) when it does not. Placed BEFORE the dedup check
+	// and the embedding call so a replay costs one indexed query, never a
+	// provider round-trip. A well-formed receipt with no stored row simply
+	// falls through to the normal insert path: this save is its first landing.
+	if receipt, present, rErr := controllerSinkReceiptFromAttrs(req.Attrs); rErr != nil {
+		return nil, false, rErr
+	} else if present {
+		replayed, hit, aErr := replayControllerSinkReceipt(ctx, pool, req, receipt)
+		if aErr != nil {
+			return nil, false, aErr
+		}
+		if hit {
+			return replayed, false, nil
+		}
+	}
+
 	// Dedup check (skip for "off" mode).
 	// Design §7.7 / §11: strict mode rejects only at HIGH similarity (≥ 0.85);
 	// suggest mode annotates attrs.similar_to between LOW (0.65) and HIGH.
@@ -1311,7 +1488,15 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 			// suggest mode (or strict-below-high): annotate attrs.similar_to
 			attrs := make(map[string]any)
 			if len(req.Attrs) > 0 {
-				json.Unmarshal(req.Attrs, &attrs) //nolint:errcheck
+				// UseNumber (aihub#725 review_fix SF3): attrs are arbitrary JSON,
+				// and a plain float64 decode rejects whole classes of legal
+				// numbers (1e400 overflows float64) BEFORE the annotation below
+				// could store anything — the error is discarded by design (the
+				// annotation is best-effort), but with a plain Unmarshal that
+				// same discard left attrs EMPTY, silently dropping every
+				// caller-supplied attr just because one number was out of
+				// float64 range. UseNumber decodes any legal JSON number.
+				decAttrUseNumber(req.Attrs, &attrs)
 			}
 			attrs["similar_to"] = existing.ID
 			req.Attrs, _ = json.Marshal(attrs)
@@ -1334,12 +1519,23 @@ func Remember(ctx context.Context, pool *pgxpool.Pool, req *RememberRequest) (*M
 
 	// G35: merge structured_payload / context_snippet / related_memory_ids into attrs
 	// so callers can retrieve them via Memory.attrs without losing data.
+	//
+	// 🔴 Both decodes here are UseNumber (aihub#725 review_fix SF2/SF4): the
+	// workflow artifact digest is recomputed server-side over a UseNumber
+	// decode of the STORED attrs.structured_payload, and the controller's sink
+	// hashes the exact payload bytes it sends, so the storage merge must
+	// preserve the caller's number literals (1.50 stays 1.50; an integer
+	// beyond 2^53 keeps its digits) rather than rewriting them through
+	// float64. A plain Unmarshal both rewrote the literals — desynchronizing
+	// the stored copy from the digest the controller recorded — and rejected
+	// out-of-float64-range numbers outright (1e400), silently dropping the
+	// structured_payload the error-check below swallows.
 	if len(req.StructuredPayload) > 0 || req.ContextSnippet != nil || len(req.RelatedMemoryIDs) > 0 {
 		attrsMap := map[string]any{}
-		_ = json.Unmarshal(req.Attrs, &attrsMap)
+		decAttrUseNumber(req.Attrs, &attrsMap)
 		if len(req.StructuredPayload) > 0 {
 			var sp any
-			if jerr := json.Unmarshal(req.StructuredPayload, &sp); jerr == nil {
+			if jerr := decodeJSONUseNumber(req.StructuredPayload, &sp); jerr == nil {
 				attrsMap["structured_payload"] = sp
 			}
 		}

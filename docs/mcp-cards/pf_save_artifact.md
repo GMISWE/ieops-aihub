@@ -235,10 +235,13 @@ section.
   request and requiring the rejection to name the second, because no path in the repo
   feeds a stored
   `structured_payload` back into a write — `UpdateMemory` carries the whole merged
-  `attrs` object instead and leaves this field unset, which
+  `attrs` object instead and leaves this field unset, and the one Go writer
+  (`aihub#725`'s controller sink, `internal/controller` `sinkWorkerOutput`) feeds the
+  worker's freshly-decoded output object, never a value read out of a stored row — which
   `internal/domain/structured_payload_provenance_test.go`
   (`TestNoStoredStructuredPayloadIsFedBackIntoAWrite`) censuses: the update request
-  declares no such field and no Go statement in the tree writes one.
+  declares no such field, and every Go statement in the tree that writes one is
+  either on that census's closed wire-origin allowlist or fails the test.
 
 ## hop 5 — what comes back
 

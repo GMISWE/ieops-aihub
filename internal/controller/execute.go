@@ -414,6 +414,8 @@ Inputs: %s
 
 Return ONLY a JSON workflow.StepResult with the exact invocation identity work_item_id=%q, flow_version=%d, step_id=%q, step_attempt_id=%q, epoch=%d, producer_id=%q; status (completed|incomplete|blocked|provider_error|invalid_result), review_verdict (pass|warn|fail) when the step is a review, a REAL immutable artifact {id,version,hash}, and evidence [{kind,ref,hash}] for review and verification gates. Never fabricate proof or human approval; a result that carries an approval is rejected outright.
 
+Output protocol: raw JSON on stdout, first byte to last byte - no markdown fences, no backticks, no prose before or after the JSON.
+
 --- pinned skill entry (%s@%d) ---
 %s
 --- END ---`,
@@ -546,7 +548,17 @@ Return ONLY a JSON workflow.StepResult with the exact invocation identity work_i
 			opts.logf("workflow: step %s: worker exited nonzero after start (%v); validating its structured result before deciding the hold", stepID, runErr)
 		}
 		var result workflow.StepResult
-		if err := json.Unmarshal(bytes.TrimSpace(stdout.bytes()), &result); err != nil {
+		// aihub#724: strip exactly one outer markdown fence before the strict
+		// decode — the measured GLM shape — leaving every other shape to be
+		// refused fail-closed below, byte-for-byte as before. The stripped
+		// candidate gets no bypass: it passes through this same strict decode
+		// (whose #725 rules run inside StepResult.UnmarshalJSON), the minted-
+		// identity check, and the server's semantic validation.
+		payload := stdout.bytes()
+		if inner, ok := stripSingleCodeFence(payload); ok {
+			payload = inner
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(payload), &result); err != nil {
 			if runErr == nil {
 				// A clean exit that still broke the output contract: the
 				// worker's own act, never something to reroll on another
@@ -914,6 +926,76 @@ func (c *outputCollector) bytes() []byte {
 	out := make([]byte, c.buf.Len())
 	copy(out, c.buf.Bytes())
 	return out
+}
+
+// stripSingleCodeFence removes exactly one outer markdown code fence from a
+// worker's stdout payload — the measured failure shape of aihub#724: GLM at
+// medium effort (drain run 20260919T102517Z) does the work correctly, emits an
+// honest StepResult, and wraps the JSON in a ```json fence, which the strict
+// decode refuses byte-zero ('`' is not the beginning of a value).
+//
+// The acceptance surface is deliberately ONE shape: after trimming outer
+// whitespace, the payload must be a fenced block whose FIRST line is exactly
+// ``` or ```json (trailing whitespace allowed; ```JSON, ```yaml and every
+// other tag variant are refused) and whose LAST line is exactly ``` (trailing
+// whitespace allowed). Then the bytes between the two fence lines are returned
+// as the candidate JSON with ok=true, provided the body itself carries no
+// fence line — the double-fence shape is not one fenced value. Every other
+// shape — prose before or after the fence, two nested fences, a missing or
+// non-terminal closing fence, an empty body — returns (nil, false) and the caller keeps its
+// ORIGINAL bytes, so the strict decode downstream refuses them exactly as it
+// did before this function existed. This is a fixed, testable transform, not
+// prose parsing: it never searches for JSON inside a larger document, and a
+// stripped candidate still passes through the full #725 strict decode
+// (duplicate keys, unknown fields, approval smuggling, closed sub-objects),
+// identity check and server-side semantic validation before anything is
+// recorded. Refusal remains fail-closed: a worker whose output is not exactly
+// "one JSON value, optionally one fence around it" stops the step in a
+// recoverable hold, never a reroll.
+func stripSingleCodeFence(raw []byte) (inner []byte, ok bool) {
+	s := bytes.TrimSpace(raw)
+	firstNL := bytes.IndexByte(s, '\n')
+	if firstNL < 0 {
+		return nil, false
+	}
+	lastNL := bytes.LastIndexByte(s, '\n')
+	if lastNL <= firstNL {
+		// Fewer than three lines: a lone opening fence, or a fence with no
+		// body — never the one-fence-one-JSON-value shape.
+		return nil, false
+	}
+	open := trimFenceLineSpace(s[:firstNL])
+	closing := trimFenceLineSpace(s[lastNL+1:])
+	if string(closing) != "```" {
+		return nil, false
+	}
+	if openTag := string(open); openTag != "```" && openTag != "```json" {
+		return nil, false
+	}
+	body := s[firstNL+1 : lastNL]
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, false
+	}
+	// "Exactly one outer fence" also binds the BODY: a second fence line
+	// inside — the double-fence shape — is not one fenced JSON value, and a
+	// raw line beginning with ``` cannot occur inside a legal JSON value
+	// anyway (strings cannot carry raw newlines), so this costs nothing on
+	// any payload the strict decode would ever accept.
+	for _, line := range bytes.Split(body, []byte{'\n'}) {
+		if bytes.HasPrefix(bytes.TrimLeft(line, " \t\r"), []byte("```")) {
+			return nil, false
+		}
+	}
+	return body, true
+}
+
+// trimFenceLineSpace trims trailing spaces/tabs/CR from one fence line, so a
+// CRLF worker output still matches. Leading whitespace is deliberately NOT
+// trimmed: a fence line indented by prose is not the single-fence shape, and
+// accepting it would widen the transform from "the whole payload is one
+// fenced block" toward "somewhere in there is a fence".
+func trimFenceLineSpace(line []byte) []byte {
+	return bytes.TrimRight(line, " \t\r")
 }
 
 // combinedWorkerOutput retains diagnostics in the step log without polluting

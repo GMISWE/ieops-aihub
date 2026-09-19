@@ -191,7 +191,15 @@ const floorLiveKeyChecks = 218
 // The entire 17 (not 16+17: the walk unions across runs, and the fresh-database
 // measurement is 33) lowers for free at that re-extraction; no pre-existing
 // entry moved.
-const maxUndeclaredLiveKeys = 33
+//
+// 33 -> 35 on 2026-09-19: aihub#725's controller-side artifact sink needed the
+// remember response to name the stored artifact's exact version, so
+// POST /v1/memories (and therefore pf_remember and pf_save_artifact, whose
+// cards share the aihub#412 corpus gap) now carry "version":1. Same debt class
+// as the 17 above: the corpus predates the field, K7 forbids the card from
+// naming it until the corpus is next re-extracted, and both entries lower for
+// free at that re-extraction.
+const maxUndeclaredLiveKeys = 35
 
 // liveWalkOutOfReach names the published tools this walk cannot drive, with the
 // reason. It is asserted to be EXACTLY the set of undriven tools, so a tool that

@@ -4,8 +4,10 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/GMISWE/ieops-aihub/internal/skillregistry"
 )
@@ -200,11 +202,73 @@ type StepResult struct {
 	ProducerID    string        `json:"producer_id"`
 	Artifact      ArtifactRef   `json:"artifact"`
 	Evidence      []Evidence    `json:"evidence,omitempty"`
+	// Output is the worker's TRANSIENT structured output object (aihub#725):
+	// a completed result of a credentialless worker may carry its business
+	// output here instead of an artifact triple, and the controller-side sink
+	// stores exactly this object as a methodology artifact's
+	// attrs.structured_payload before recording the result. It is never part
+	// of a RECORDED result — the controller clears it before calling
+	// RecordWorkflowResult, and `omitempty` keeps it off the wire once
+	// cleared, so the recorded-result shape stays byte-identical to what a
+	// pre-sink worker produced. Numbers inside it decode as json.Number (the
+	// decoder below sets UseNumber), so the envelope boundary is lossless and
+	// the CONTROLLER — not the decode — decides the number semantics the sink
+	// hashes and stores (see sinkWorkerOutput).
+	Output map[string]any `json:"output,omitempty"`
 }
 
-// UnmarshalJSON rejects legacy worker-supplied approval rather than silently
-// dropping an attempted privilege escalation.
+// stepResultKeys is the CLOSED top-level key set of the worker result
+// envelope. Anything else is refused: the envelope is untrusted worker
+// stdout (or an agent-supplied MCP `result` object), and a silently ignored
+// unknown key is exactly how an attempted privilege escalation or a
+// doctored digest would travel (aihub#725 S1). `approval` is deliberately
+// NOT here — it keeps its own, older refusal message below.
+var stepResultKeys = map[string]bool{
+	"status": true, "review_verdict": true, "work_item_id": true,
+	"flow_version": true, "step_id": true, "step_attempt_id": true,
+	"epoch": true, "producer_id": true, "artifact": true,
+	"evidence": true, "output": true,
+}
+
+// stepResultClosedKeys names the envelope's CONTRACT sub-objects, whose key
+// sets are closed like the top level's: `artifact` and each `evidence`
+// entry are typed contract structs, so an unknown key inside one is the same
+// class of silent channel as an unknown top-level key — a smuggled field the
+// decoder would drop while the raw bytes still say something else. `output`
+// is deliberately NOT here: it is the worker's business payload and its keys
+// are arbitrary (only duplicate keys are refused there, by the token walk
+// above). (aihub#725 review_fix B1: the top-level whitelist used to be the
+// only strictness at depth, so `"artifact":{"id":...,"overflow":...}`
+// passed.)
+
+// UnmarshalJSON is a STRICT, single-object decode of one worker result
+// envelope (aihub#725 S1). json.Unmarshal on a struct that carries its own
+// UnmarshalJSON cannot be made strict from the outside — a caller-side
+// json.Decoder.DisallowUnknownFields never reaches inside a custom
+// unmarshaler — so the strictness lives here, where every decode path
+// (controller stdout, server RecordWorkflowResult, MCP result) shares it:
+//
+//   - `approval` is refused, as before — a worker result cannot grant
+//     approval;
+//   - any unknown top-level key is refused rather than silently dropped;
+//   - duplicate object keys are refused at ANY nesting depth (encoding/json
+//     otherwise keeps the last value of a duplicate, letting a crafted
+//     envelope present one digest to a reader and another to the machine);
+//   - trailing content after the object is refused by the caller's
+//     json.Unmarshal (its own contract: the whole input must be one value);
+//   - numbers decode with json.Number semantics (UseNumber), so the
+//     envelope boundary is lossless: the worker's number literals survive
+//     the decode verbatim, and the number SEMANTICS the sink hashes and
+//     stores remain a controller decision rather than something a silent
+//     float64 decode decided.
+//
+// A refusal here happens BEFORE any side effect: the controller saves no
+// artifact and records no result (the invocation stays open), and the server
+// refuses the whole result transaction.
 func (r *StepResult) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateKeys(json.NewDecoder(bytes.NewReader(data))); err != nil {
+		return err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
@@ -212,13 +276,100 @@ func (r *StepResult) UnmarshalJSON(data []byte) error {
 	if _, supplied := fields["approval"]; supplied {
 		return errors.New("worker result cannot supply approval")
 	}
+	for key := range fields {
+		if !stepResultKeys[key] {
+			return fmt.Errorf("worker result carries unknown field %q", key)
+		}
+	}
+	// Closed sub-objects (aihub#725 review_fix B1): `artifact` and every
+	// `evidence` entry refuse unknown keys the same way the envelope does,
+	// BEFORE the permissive decode below could silently discard them. A
+	// refusal here is a refusal of the whole envelope — the same
+	// before-any-side-effect guarantee as the checks above.
+	if raw, supplied := fields["artifact"]; supplied {
+		var probe ArtifactRef
+		if err := decodeClosedContractValue(raw, &probe); err != nil {
+			return fmt.Errorf("worker result artifact: %w", err)
+		}
+	}
+	if raw, supplied := fields["evidence"]; supplied {
+		var probe []Evidence
+		if err := decodeClosedContractValue(raw, &probe); err != nil {
+			return fmt.Errorf("worker result evidence: %w", err)
+		}
+	}
 	type envelope StepResult
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var decoded envelope
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	if err := dec.Decode(&decoded); err != nil {
 		return err
 	}
 	*r = StepResult(decoded)
 	return nil
+}
+
+// decodeClosedContractValue decodes one already-extracted envelope
+// sub-value into a CLOSED contract struct (or slice of them): unknown keys
+// at this depth are refused instead of silently discarded, and numbers keep
+// json.Number semantics for the same lossless-boundary reason as the whole
+// envelope. DisallowUnknownFields applies to every struct the decoder
+// reaches — the slice case covers each Evidence element. No trailing check
+// is needed: raw is a single JSON value carved out of a map[string]RawMessage
+// decode of the envelope, which already guarantees exactly one value.
+func decodeClosedContractValue(raw json.RawMessage, into any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	dec.DisallowUnknownFields()
+	return dec.Decode(into)
+}
+
+// rejectDuplicateKeys walks one whole JSON value and errors on the first
+// object that repeats a key, at any nesting depth. It is a validation pass
+// only — the actual decode happens afterwards — so a refusal here means no
+// field of the envelope was ever consumed.
+func rejectDuplicateKeys(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := t.(json.Delim)
+	if !ok {
+		return nil // a scalar: nothing to check
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := kt.(string)
+			if !ok {
+				return fmt.Errorf("object key %v is not a string", kt)
+			}
+			if _, dup := seen[key]; dup {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := rejectDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	case '[':
+		for dec.More() {
+			if err := rejectDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	default:
+		return nil
+	}
 }
 
 // ArtifactRef identifies immutable output. Hash must be a full sha256 digest.

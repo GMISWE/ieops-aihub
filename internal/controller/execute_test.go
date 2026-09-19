@@ -26,6 +26,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,7 +36,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GMISWE/ieops-aihub/internal/skillregistry"
 	"github.com/GMISWE/ieops-aihub/internal/workflow"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // fakeWorkflowAPI is the whole server surface RunStep touches, in memory.
@@ -42,6 +47,13 @@ type fakeWorkflowAPI struct {
 	skill map[string]any
 	// recorded holds every structured result RunStep submitted.
 	recorded []workflow.StepResult
+	// saved holds every controller-sink artifact save RunStep issued.
+	saved []client.SaveArtifactRequest
+	// calls records the save/record call order (aihub#725: save MUST
+	// precede record, and non-sink results must produce no save at all).
+	calls []string
+	// saveErr, when set, makes SaveArtifact fail (the save-failure arm).
+	saveErr error
 }
 
 func (f *fakeWorkflowAPI) GetWorkItemWorkflow(context.Context, string) (map[string]any, error) {
@@ -64,12 +76,25 @@ func (f *fakeWorkflowAPI) StartWorkflowStep(context.Context, string, any) (map[s
 }
 
 func (f *fakeWorkflowAPI) RecordWorkflowResult(_ context.Context, _ string, body any) (map[string]any, error) {
+	f.calls = append(f.calls, "record")
 	if m, ok := body.(map[string]any); ok {
 		if result, ok := m["result"].(workflow.StepResult); ok {
 			f.recorded = append(f.recorded, result)
 		}
 	}
 	return map[string]any{"recorded": true}, nil
+}
+
+// SaveArtifact is the fake controller-sink persistence seam: it records the
+// request and answers the server-assigned immutable identity the real
+// POST /v1/memories route returns.
+func (f *fakeWorkflowAPI) SaveArtifact(_ context.Context, req client.SaveArtifactRequest) (client.SavedArtifact, error) {
+	f.calls = append(f.calls, "save")
+	if f.saveErr != nil {
+		return client.SavedArtifact{}, f.saveErr
+	}
+	f.saved = append(f.saved, req)
+	return client.SavedArtifact{ID: "mem_sink_1", Version: 1, IsNew: true}, nil
 }
 
 func (f *fakeWorkflowAPI) GetSkillVersion(context.Context, string, int) (map[string]any, error) {
@@ -315,5 +340,287 @@ func TestRunStepDeadlineOutputSnapshotIsRaceFree(t *testing.T) {
 		strings.Contains(stderrSection, "deadline stdout line") ||
 		strings.Contains(stdoutSection, "deadline stderr line") {
 		t.Fatalf("stream separation lost in the retained step log:\n%s", log)
+	}
+}
+
+// ─── aihub#725 S4: the controller-side artifact sink ────────────────────────
+//
+// Four arms, per the code_change dispatch:
+//
+//	1. completed + no triple → the sink saves exactly once, and RecordWorkflowResult
+//	   receives the SERVER-RETURNED triple (mem_sink_1@1) plus the canonical hash
+//	   of the worker's output — never a worker-supplied id;
+//	2. completed + self-supplied triple → NO save, the triple passes through
+//	   unchanged (the server's fabricated-id refusal stays observable);
+//	3. non-completed → NO save, existing behavior byte-identical (and the
+//	   transient output never reaches the recorded result);
+//	4. the digest filled into the envelope equals sha256 over the exact
+//	   encoding/json.Marshal bytes of the stored structured payload.
+
+// sinkArmResult is one identity-valid worker result for the sink arms.
+func sinkArmResult(status string, extra string) string {
+	return `{"status":"` + status + `","work_item_id":"wi_fake","flow_version":3,` +
+		`"step_id":"review-code","step_attempt_id":"sa_fake_1","epoch":7,` +
+		`"producer_id":"producer-fake"` + extra + `}`
+}
+
+// sinkExpectedPayload is the worker output object arm 1 emits, rebuilt in Go
+// with json.Number literals so the expected hash is computed over exactly the
+// bytes the worker wrote.
+func sinkExpectedPayload(t *testing.T) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	dec := json.NewDecoder(strings.NewReader(`{"summary":"fixed the parser","tests_run":3,"pass_ratio":0.95}`))
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func TestRunStepControllerSinkStoresArtifactlessCompletedOutput(t *testing.T) {
+	env := newRunStepTestEnv(t, "printf '%s\\n' '"+sinkArmResult("completed",
+		`,"output":{"summary":"fixed the parser","tests_run":3,"pass_ratio":0.95}`)+"'\n")
+
+	out, err := env.run(t)
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if !out.Recorded {
+		t.Fatal("the sink branch must still record the result")
+	}
+	api := env.api
+	if len(api.saved) != 1 {
+		t.Fatalf("sink saves = %d, want exactly one", len(api.saved))
+	}
+	if len(api.calls) != 2 || api.calls[0] != "save" || api.calls[1] != "record" {
+		t.Fatalf("call order = %v, want save before record", api.calls)
+	}
+
+	// The save body: controller-derived type (authoring contract → execute),
+	// wi-bound, claim-time credentials, verbatim number literals, and the
+	// honest controller-sink provenance in the content.
+	req := api.saved[0]
+	if req.Type != "methodology.execute" {
+		t.Fatalf("artifact type = %q, want methodology.execute for an authoring-capability contract", req.Type)
+	}
+	if req.WorkItemID != "wi_fake" || req.AttemptID != "ra_fake" || req.ClaimEpoch != 7 || req.SessionSecret != "sec" {
+		t.Fatalf("save request binding/credentials = %+v", req)
+	}
+	if req.Visibility != "project" {
+		t.Fatalf("visibility = %q, want project", req.Visibility)
+	}
+	// The durable replay receipt (aihub#725 review_fix B2): all three
+	// components are trusted controller state — the start descriptor's
+	// invocation identity plus the claim-time attempt — never worker-supplied.
+	if req.SinkReceipt == nil {
+		t.Fatal("sink save carries no durable replay receipt")
+	}
+	wantReceipt := client.ControllerSinkReceipt{InvocationID: "inv_fake_1", StepAttemptID: "sa_fake_1", AttemptID: "ra_fake"}
+	if *req.SinkReceipt != wantReceipt {
+		t.Fatalf("sink receipt = %+v, want %+v", *req.SinkReceipt, wantReceipt)
+	}
+	if !strings.Contains(req.Content, "byte-for-byte") {
+		t.Fatalf("content still claims the withdrawn verbatim spelling instead of the honest byte-for-byte provenance:\n%s", req.Content)
+	}
+	if !strings.Contains(req.Content, "invocation_id=inv_fake_1") || !strings.Contains(req.Content, "attempt_id=ra_fake") {
+		t.Fatalf("content lacks the durable replay receipt provenance:\n%s", req.Content)
+	}
+	if !strings.Contains(req.Content, "origin=controller_sink") || !strings.Contains(req.Content, "payload_author=worker") {
+		t.Fatalf("content lacks the controller-sink provenance declaration:\n%s", req.Content)
+	}
+	wantPayload, err := json.Marshal(sinkExpectedPayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(req.StructuredPayload) != string(wantPayload) {
+		t.Fatalf("structured payload\n got %s\nwant %s (number literals must survive verbatim)", req.StructuredPayload, wantPayload)
+	}
+
+	// The recorded result carries the SERVER-RETURNED triple and the canonical
+	// digest — not the transient output.
+	if len(api.recorded) != 1 {
+		t.Fatalf("recorded results = %d, want exactly one", len(api.recorded))
+	}
+	recorded := api.recorded[0]
+	if recorded.Artifact.ID != "mem_sink_1" || recorded.Artifact.Version != 1 {
+		t.Fatalf("recorded triple = %+v, want the server-returned mem_sink_1@1", recorded.Artifact)
+	}
+	if want := WorkflowArtifactHash(sinkExpectedPayload(t)); recorded.Artifact.Hash != want {
+		t.Fatalf("recorded hash = %q, want canonical %q", recorded.Artifact.Hash, want)
+	}
+	if recorded.Output != nil {
+		t.Fatalf("transient output leaked into the recorded result: %#v", recorded.Output)
+	}
+	if out.Result.Artifact.ID != "mem_sink_1" {
+		t.Fatalf("outcome artifact = %+v, want the sink-filled triple", out.Result.Artifact)
+	}
+}
+
+func TestRunStepExistingArtifactTripleBypassesSink(t *testing.T) {
+	env := newRunStepTestEnv(t, "printf '%s\\n' '"+sinkArmResult("completed",
+		`,"artifact":{"id":"art-worker","version":1,"hash":"sha256:feed"}`)+"'\n")
+
+	out, err := env.run(t)
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if !out.Recorded {
+		t.Fatal("a completed result with its own triple must record as before")
+	}
+	if len(env.api.saved) != 0 {
+		t.Fatalf("sink saves = %d; a self-supplied triple must never be replaced", len(env.api.saved))
+	}
+	if len(env.api.calls) != 1 || env.api.calls[0] != "record" {
+		t.Fatalf("calls = %v, want exactly one record and no save", env.api.calls)
+	}
+	if len(env.api.recorded) != 1 || env.api.recorded[0].Artifact.ID != "art-worker" ||
+		env.api.recorded[0].Artifact.Version != 1 || env.api.recorded[0].Artifact.Hash != "sha256:feed" {
+		t.Fatalf("recorded triple = %+v, want the worker-supplied one unchanged", env.api.recorded)
+	}
+}
+
+func TestRunStepNonCompletedResultBypassesSink(t *testing.T) {
+	// The result even carries a transient output object — an incomplete result
+	// must still not save, and the output must not reach the recorded result.
+	env := newRunStepTestEnv(t, "printf '%s\\n' '"+sinkArmResult("incomplete",
+		`,"output":{"summary":"half done"}`)+"'\n")
+
+	out, err := env.run(t)
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if !out.Recorded {
+		t.Fatal("an incomplete result must record as before")
+	}
+	if len(env.api.saved) != 0 {
+		t.Fatalf("sink saves = %d; a non-completed result must bypass the sink", len(env.api.saved))
+	}
+	if len(env.api.calls) != 1 || env.api.calls[0] != "record" {
+		t.Fatalf("calls = %v, want exactly one record and no save", env.api.calls)
+	}
+	if len(env.api.recorded) != 1 || env.api.recorded[0].Status != workflow.StatusIncomplete {
+		t.Fatalf("recorded = %+v, want the incomplete result", env.api.recorded)
+	}
+	if env.api.recorded[0].Output != nil {
+		t.Fatalf("transient output leaked into a non-completed recorded result: %#v", env.api.recorded[0].Output)
+	}
+}
+
+// TestRunStepPartialArtifactTripleBypassesSink is the aihub#725 review_fix
+// SF1 regression: the sink used to fire on `Artifact.ID == ""` alone, so a
+// malformed id-less fragment like {version:1, hash:"sha256:x"} was silently
+// OVERWRITTEN by the sink's server-returned triple — destroying the evidence
+// the server's resolution would have refused. The trigger is now the ZERO
+// triple: any populated component means the result cited SOMETHING, the sink
+// must not touch it, and the server refuses the fragment at record time.
+func TestRunStepPartialArtifactTripleBypassesSink(t *testing.T) {
+	env := newRunStepTestEnv(t, "printf '%s\\n' '"+sinkArmResult("completed",
+		`,"artifact":{"version":1,"hash":"sha256:feed"},`+
+			`"output":{"summary":"whatever"}`)+"'\n")
+
+	_, err := env.run(t)
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if len(env.api.saved) != 0 {
+		t.Fatalf("sink saves = %d; a partially-populated triple must never be replaced (SF1)", len(env.api.saved))
+	}
+	if len(env.api.recorded) != 1 {
+		t.Fatalf("recorded results = %d, want exactly one", len(env.api.recorded))
+	}
+	recorded := env.api.recorded[0]
+	if recorded.Artifact.ID != "" || recorded.Artifact.Version != 1 || recorded.Artifact.Hash != "sha256:feed" {
+		t.Fatalf("recorded triple = %+v, want the worker's fragment recorded unchanged", recorded.Artifact)
+	}
+}
+
+// TestControllerSinkDigestMatchesCanonicalJSONMarshal is the fourth arm: the
+// digest the sink fills into the envelope must be exactly sha256 over the
+// encoding/json.Marshal bytes of the SAME object stored as
+// attrs.structured_payload — nested maps, sorted keys, and json.Number
+// literals included — because that is the rule the server's
+// workflowArtifactDigest recompute applies.
+//
+// 🔴 The second half flipped in aihub#725 review_fix SF2/SF4: it used to pin
+// that the sink canonicalizes through the float64 universe (hashing 1.50 as
+// 1.5); the sink now hashes and stores the worker's literals VERBATIM,
+// which is what the server's UseNumber record-time recompute and the
+// UseNumber read path (pkg/client GetMemory → ResolveInputs) both expect.
+// The arm below states the new parity end to end: sink hash == digest over
+// the bytes sent == digest over a UseNumber re-decode of those bytes (the
+// server's recompute over its stored copy).
+func TestControllerSinkDigestMatchesCanonicalJSONMarshal(t *testing.T) {
+	payload := map[string]any{
+		"summary": "did work",
+		"nested":  map[string]any{"b": json.Number("1.50"), "a": "x", "deeper": map[string]any{"k": json.Number("12345678901234567890")}},
+		"count":   json.Number("42"),
+		"flag":    true,
+		"list":    []any{json.Number("1"), json.Number("2.5")},
+	}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	want := "sha256:" + hex.EncodeToString(sum[:])
+	if got := WorkflowArtifactHash(payload); got != want {
+		t.Fatalf("WorkflowArtifactHash = %q, want %q (sha256 over %s)", got, want, canonical)
+	}
+	if got := WorkflowArtifactHashBytes(canonical); got != want {
+		t.Fatalf("WorkflowArtifactHashBytes = %q, want %q (the byte form must be the same one rule)", got, want)
+	}
+	// The server's record-time recompute (resolveCompletedResultArtifact)
+	// decodes the STORED attrs with UseNumber and re-marshals: for the
+	// literals a controller sink emits (and jsonb round-trips exactly — every
+	// decimal and integer spelling), that reproduces the exact bytes the sink
+	// hashed. State that parity here so a future canonicalization pass on
+	// EITHER side goes red instead of silently desynchronizing the digest.
+	var reread map[string]any
+	dec := json.NewDecoder(bytes.NewReader(canonical))
+	dec.UseNumber()
+	if err := dec.Decode(&reread); err != nil {
+		t.Fatal(err)
+	}
+	rereadBytes, err := json.Marshal(reread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rereadBytes, canonical) {
+		t.Fatalf("UseNumber re-read rewrote the bytes:\n got %s\nwant %s", rereadBytes, canonical)
+	}
+	if got := WorkflowArtifactHash(reread); got != want {
+		t.Fatalf("digest over the UseNumber re-read = %q, want %q — the sink and the server drifted", got, want)
+	}
+	// The red side of the red-green: the float64 universe is a DIFFERENT
+	// digest, so the fixture still discriminates and cannot pass vacuously.
+	var floatified map[string]any
+	if err := json.Unmarshal(canonical, &floatified); err != nil {
+		t.Fatal(err)
+	}
+	if got := WorkflowArtifactHash(floatified); got == want {
+		t.Fatal("float64 canonicalization produces the same digest as the literal bytes; the fixture no longer discriminates")
+	}
+}
+
+// TestSinkArtifactTypeDerivesFromContract pins the trusted typing rule: review
+// or verification capability gates sink as methodology.review; everything else
+// is methodology.execute. It is controller metadata from the PINNED contract —
+// the worker never gets to choose its artifact type.
+func TestSinkArtifactTypeDerivesFromContract(t *testing.T) {
+	authoring := &skillregistry.SkillContract{Capabilities: []skillregistry.Capability{skillregistry.CapAuthoring}}
+	review := &skillregistry.SkillContract{Capabilities: []skillregistry.Capability{skillregistry.CapReview}}
+	verification := &skillregistry.SkillContract{Capabilities: []skillregistry.Capability{skillregistry.CapVerification, skillregistry.CapAuthoring}}
+	for _, tc := range []struct {
+		contract *skillregistry.SkillContract
+		want     string
+	}{
+		{authoring, "methodology.execute"},
+		{review, "methodology.review"},
+		{verification, "methodology.review"},
+	} {
+		if got := sinkArtifactType(tc.contract); got != tc.want {
+			t.Fatalf("sinkArtifactType(%v) = %q, want %q", tc.contract.Capabilities, got, tc.want)
+		}
 	}
 }

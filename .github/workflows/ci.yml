@@ -5858,6 +5858,18 @@ jobs:
           done
           ! grep -q -- '--- SKIP' workflow_mode_720.log \
             || { echo "::error::an aihub#720 workflow_mode test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
+      - name: aihub#725 controller sink receipt DB tests
+        env:
+          AIHUB_TEST_DB: postgres://postgres:testpass@localhost:5432/aihub_test?sslmode=disable
+        run: |
+          set -o pipefail
+          GOWORK=off go test ./internal/server/ -run '^TestRememberControllerSinkReceipt$' -count=1 -v 2>&1 | tee sink_receipt_725.log
+          for want in TestRememberControllerSinkReceipt; do
+            grep -q -- "--- PASS: $want (" sink_receipt_725.log \
+              || { echo "::error::$want did not run; aihub#725 receipt coverage is incomplete"; exit 1; }
+          done
+          ! grep -q -- '--- SKIP' sink_receipt_725.log \
+            || { echo "::error::an aihub#725 receipt test SKIPped; AIHUB_TEST_DB is not reaching this step"; exit 1; }
 
   publish-schemas:
     name: Publish MCP Schemas

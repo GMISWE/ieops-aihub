@@ -10,6 +10,7 @@ import (
 
 	"github.com/GMISWE/ieops-aihub/internal/skillregistry"
 	"github.com/GMISWE/ieops-aihub/internal/workflow"
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 // revocableSessionAPI models the distinction between caller-visible registry
@@ -66,6 +67,11 @@ func (*revocableSessionAPI) ReconcileWorkflowInvocations(context.Context, string
 func (f *revocableSessionAPI) Remember(_ context.Context, body any) (map[string]any, error) {
 	f.stored = body.(map[string]any)["structured_payload"].(map[string]any)
 	return map[string]any{"id": "mem_session"}, nil
+}
+func (*revocableSessionAPI) SaveArtifact(context.Context, client.SaveArtifactRequest) (client.SavedArtifact, error) {
+	// The interactive session path persists its own artifact through Remember;
+	// the controller-sink is the UNATTENDED path's seam and must never fire here.
+	return client.SavedArtifact{}, errors.New("unexpected controller-sink save in the interactive session path")
 }
 func (f *revocableSessionAPI) RecordWorkflowResult(_ context.Context, _ string, body any) (map[string]any, error) {
 	result := body.(map[string]any)["result"].(workflow.StepResult)

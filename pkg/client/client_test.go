@@ -859,3 +859,196 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+// ─── aihub#725 S2: SaveArtifact, the controller-sink persistence surface ───
+
+// TestSaveArtifactWire pins the whole on-the-wire contract of the sink save:
+// the route is the SAME POST /v1/memories pf_save_artifact uses (there is no
+// artifact-write namespace), the body carries the attempt credentials and the
+// worker's structured payload verbatim, dedup_mode is pinned to off by the
+// method itself, and the additive id/version response decodes. A second call
+// must mint a fresh Idempotency-Key like every other mutation.
+func TestSaveArtifactWire(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	var paths, methods []string
+	var idemKeys []string
+	var rawBodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Errorf("body does not decode: %v", err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		rawBodies = append(rawBodies, string(b))
+		paths = append(paths, r.URL.Path)
+		methods = append(methods, r.Method)
+		idemKeys = append(idemKeys, r.Header.Get("Idempotency-Key"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"mem_sink","memory_id":"mem_sink","is_new":true,"type":"methodology.execute","version":1}`)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "pfk_test")
+	ctx := t.Context()
+
+	req := SaveArtifactRequest{
+		Type:              "methodology.execute",
+		WorkItemID:        "wi_1",
+		Content:           "controller-sink artifact: provenance origin=controller_sink",
+		StructuredPayload: json.RawMessage(`{"summary":"did work","ratio":1.50}`),
+		AttemptID:         "ra_1",
+		ClaimEpoch:        3,
+		SessionSecret:     "sec",
+		Visibility:        "project",
+		SinkReceipt: &ControllerSinkReceipt{
+			InvocationID:  "inv_1",
+			StepAttemptID: "sa_1",
+			AttemptID:     "ra_1",
+		},
+	}
+	got, err := c.SaveArtifact(ctx, req)
+	if err != nil {
+		t.Fatalf("SaveArtifact: %v", err)
+	}
+	if got.ID != "mem_sink" || got.Version != 1 || !got.IsNew {
+		t.Fatalf("decoded response = %+v, want id mem_sink version 1 is_new true", got)
+	}
+	if _, err := c.SaveArtifact(ctx, req); err != nil {
+		t.Fatalf("SaveArtifact #2: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 2 || paths[0] != "/v1/memories" || paths[1] != "/v1/memories" {
+		t.Fatalf("paths = %v, want two POST /v1/memories", paths)
+	}
+	for i, m := range methods {
+		if m != http.MethodPost {
+			t.Fatalf("request %d method = %q, want POST", i, m)
+		}
+	}
+	if idemKeys[0] == "" || idemKeys[1] == "" || idemKeys[0] == idemKeys[1] {
+		t.Fatalf("Idempotency-Keys = %v; both must be present and fresh per request", idemKeys)
+	}
+	body := bodies[0]
+	for key, want := range map[string]any{
+		"type":           "methodology.execute",
+		"work_item_id":   "wi_1",
+		"attempt_id":     "ra_1",
+		"session_secret": "sec",
+		"visibility":     "project",
+		"dedup_mode":     "off",
+		"claim_epoch":    float64(3),
+	} {
+		if body[key] != want {
+			t.Errorf("body[%q] = %#v, want %#v", key, body[key], want)
+		}
+	}
+	// structured_payload must travel verbatim: json.RawMessage is embedded
+	// without re-encoding, so the worker's number literals (1.50) keep the
+	// exact bytes the controller hashed.
+	if !strings.Contains(rawBodies[0], `"structured_payload":{"summary":"did work","ratio":1.50}`) {
+		t.Errorf("structured_payload was re-encoded or dropped; raw body:\n%s", rawBodies[0])
+	}
+	// The durable replay receipt (aihub#725 review_fix B2) rides in attrs, not
+	// as its own field: the server's replay guard resolves the SAME key the
+	// controller sink stamps, so a same-payload retry after a lost response
+	// returns the row already stored instead of minting a duplicate artifact.
+	if !strings.Contains(rawBodies[0], `"attrs":{"controller_sink_receipt":{"invocation_id":"inv_1","step_attempt_id":"sa_1","attempt_id":"ra_1"}}`) {
+		t.Errorf("sink receipt missing from attrs; raw body:\n%s", rawBodies[0])
+	}
+}
+
+// TestSaveArtifactWithoutReceiptOmitsAttrs is the other half of B2's wire
+// shape: a save with no receipt (nil SinkReceipt) must not carry an attrs
+// key at all, so the ordinary save path stays byte-identical to the
+// pre-receipt wire.
+func TestSaveArtifactWithoutReceiptOmitsAttrs(t *testing.T) {
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rawBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"mem_sink","version":1,"is_new":true}`)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "pfk_test")
+	if _, err := c.SaveArtifact(t.Context(), SaveArtifactRequest{Type: "methodology.execute", Content: "x"}); err != nil {
+		t.Fatalf("SaveArtifact: %v", err)
+	}
+	if strings.Contains(rawBody, "attrs") || strings.Contains(rawBody, "controller_sink_receipt") {
+		t.Fatalf("receiptless save still carries attrs; raw body:\n%s", rawBody)
+	}
+}
+
+// TestGetMemoryPreservesNumberLiterals is the SF4 read-path pin: GetMemory
+// is the entry the workflow artifact read path (ResolveInputs) resolves
+// through, and the server recomputes the artifact digest over a UseNumber
+// decode of the stored bytes — so a float64 decode here would rewrite
+// literals (1.50 → 1.5, an integer beyond 2^53 rounding away its digits) and
+// make correctly-recorded artifacts fail resolution. The literals must come
+// back as json.Number, and re-marshalling must reproduce the wire bytes.
+func TestGetMemoryPreservesNumberLiterals(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"mem_lit","attrs":{"structured_payload":{"ratio":1.50,"big":12345678901234567890}},"activation_count":2}`)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "pfk_test")
+	mem, err := c.GetMemory(t.Context(), "mem_lit")
+	if err != nil {
+		t.Fatalf("GetMemory: %v", err)
+	}
+	payload := mem["attrs"].(map[string]any)["structured_payload"].(map[string]any)
+	if n, ok := payload["ratio"].(json.Number); !ok || n.String() != "1.50" {
+		t.Fatalf("ratio lost its literal: %#v", payload["ratio"])
+	}
+	if n, ok := payload["big"].(json.Number); !ok || n.String() != "12345678901234567890" {
+		t.Fatalf("big integer lost its literal: %#v", payload["big"])
+	}
+	if n, ok := mem["activation_count"].(json.Number); !ok || n.String() != "2" {
+		t.Fatalf("scalar fields decode as json.Number too: %#v", mem["activation_count"])
+	}
+	remarshalled, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"big":12345678901234567890,"ratio":1.50}`; string(remarshalled) != want {
+		t.Fatalf("literals changed across re-marshal: got %s want %s", remarshalled, want)
+	}
+}
+
+// TestSaveArtifactRefusesEmptyID pins that a save that answered 2xx without an
+// id is refused by the method, not handed back as a triple the server's
+// RecordWorkflowResult would refuse later.
+func TestSaveArtifactRefusesEmptyID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"is_new":true}`)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "pfk_test")
+	if _, err := c.SaveArtifact(t.Context(), SaveArtifactRequest{Type: "methodology.execute"}); err == nil {
+		t.Fatal("a 2xx save response with no id was accepted")
+	}
+}
+
+// TestSaveArtifactExposesServerErrorUnchanged pins that a structured aihub
+// refusal surfaces as the same *APIError every other method returns — the
+// controller reports it in the recoverable hold verbatim.
+func TestSaveArtifactExposesServerErrorUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"code":"FORBIDDEN","message":"methodology.* artifacts require attempt credentials"}`)) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "pfk_test")
+	_, err := c.SaveArtifact(t.Context(), SaveArtifactRequest{Type: "methodology.execute"})
+	if !IsCode(err, "FORBIDDEN") {
+		t.Fatalf("error = %v, want a *APIError carrying code FORBIDDEN", err)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 type liveOpenAPI struct{}
@@ -46,6 +48,10 @@ func (liveOpenAPI) StartWorkflowStep(context.Context, string, any) (map[string]a
 
 func (liveOpenAPI) RecordWorkflowResult(context.Context, string, any) (map[string]any, error) {
 	return nil, errors.New("fixture must not record a live invocation")
+}
+
+func (liveOpenAPI) SaveArtifact(context.Context, client.SaveArtifactRequest) (client.SavedArtifact, error) {
+	return client.SavedArtifact{}, errors.New("fixture must not sink an artifact for a live invocation")
 }
 
 func TestDriverLiveOpenInvocationRetainsClaim(t *testing.T) {

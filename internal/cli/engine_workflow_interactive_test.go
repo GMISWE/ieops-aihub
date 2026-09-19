@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/GMISWE/ieops-aihub/pkg/client"
 )
 
 type interactiveHoldWorkflowClient struct {
@@ -42,6 +44,9 @@ func (*interactiveHoldWorkflowClient) RecordWorkflowResult(context.Context, stri
 }
 func (*interactiveHoldWorkflowClient) Remember(context.Context, any) (map[string]any, error) {
 	return nil, errors.New("must not save an artifact while approval is required")
+}
+func (*interactiveHoldWorkflowClient) SaveArtifact(context.Context, client.SaveArtifactRequest) (client.SavedArtifact, error) {
+	return client.SavedArtifact{}, errors.New("must not sink an artifact while approval is required")
 }
 func (*interactiveHoldWorkflowClient) GetMemory(context.Context, string) (map[string]any, error) {
 	return nil, errors.New("must not fetch an artifact while approval is required")

@@ -601,6 +601,119 @@ func (c *Client) Remember(ctx context.Context, body any) (map[string]any, error)
 	return out, c.do(ctx, "POST", "/v1/memories", body, &out)
 }
 
+// SaveArtifactRequest is the controller-sink methodology-artifact save body
+// (aihub#725 S2). It is the SAME POST /v1/memories contract pf_save_artifact
+// uses — there is no separate artifact-write route — carrying the current
+// attempt's credentials so the server's aihub#210 gate (methodology.* requires
+// the target wi's CURRENT attempt) accepts the save. The workflow controller
+// is the only caller: it holds Credentials{AttemptID, ClaimEpoch,
+// SessionSecret} captured at claim time and never hands them to the worker,
+// so a credentialless worker's completed output can still be persisted by
+// the attempt the server already trusts.
+type SaveArtifactRequest struct {
+	// Type is the methodology.* type the controller derives from the pinned
+	// skill contract — never a worker-supplied value.
+	Type string `json:"type"`
+	// WorkItemID is the canonical work item id the artifact binds to.
+	WorkItemID string `json:"work_item_id"`
+	// Content is the controller-authored honest summary; it MUST carry the
+	// controller-sink provenance declaration.
+	Content string `json:"content"`
+	// StructuredPayload is the worker's structured output object, verbatim
+	// bytes (json.Number literals preserved). json.RawMessage marshals
+	// without re-encoding, so the bytes the controller hashed are the bytes
+	// that reach attrs.structured_payload.
+	StructuredPayload json.RawMessage `json:"structured_payload,omitempty"`
+	// Attempt credentials authorize the methodology.* write server-side.
+	AttemptID     string `json:"attempt_id"`
+	ClaimEpoch    int64  `json:"claim_epoch"`
+	SessionSecret string `json:"session_secret"`
+	// Visibility is fixed to "project": workflow artifacts are work-item
+	// scoped and must be readable by the flow's reviewers and inputs resolver.
+	Visibility string `json:"visibility"`
+	// SinkReceipt is the durable idempotency receipt (aihub#725 review_fix
+	// B2). It never rides as its own wire field: SaveArtifact serializes it
+	// into the request's attrs as controller_sink_receipt =
+	// {invocation_id, step_attempt_id, attempt_id}, and the server turns that
+	// key into a durable replay guard — the same receipt with the same
+	// payload returns the ALREADY-STORED row instead of creating a second
+	// one, so a save whose response was lost (controller crash between save
+	// and record, then a retry) cannot mint a duplicate artifact. Nil omits
+	// attrs entirely; only the controller sink sets it.
+	SinkReceipt *ControllerSinkReceipt `json:"-"`
+}
+
+// ControllerSinkReceipt is the durable controller-sink replay identity:
+// one server-minted invocation of one step of one run attempt. All three
+// components come from trusted controller state — the start descriptor and
+// the claim-time credentials — never from the worker.
+type ControllerSinkReceipt struct {
+	InvocationID  string `json:"invocation_id"`
+	StepAttemptID string `json:"step_attempt_id"`
+	AttemptID     string `json:"attempt_id"`
+}
+
+// SavedArtifact is the additive id/version the save route returns for a
+// controller-sink save. Version is the memory's immutable per-id version —
+// the server's artifact model is "one memory id IS one version; a revision is
+// a NEW id", so a freshly created row is always version 1.
+type SavedArtifact struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
+	IsNew   bool   `json:"is_new"`
+}
+
+// saveArtifactWire is the on-the-wire shape: the request struct plus the
+// protocol-level fields this METHOD fixes rather than letting a caller choose
+// them. dedup_mode is pinned to "off" because a sink save must always create
+// a fresh row: the suggested-dedup branch would either annotate attrs with
+// similar_to or (strict) return somebody else's memory, and either way the
+// id the controller fills into the recorded result could name a row whose
+// stored structured payload is NOT the worker's output — which the server's
+// digest recompute at RecordWorkflowResult would then refuse. The durable
+// receipt (aihub#725 review_fix B2) is exempt from that concern by
+// construction: it is compared server-side BEFORE any dedup runs, so a
+// receipt replay can only ever return the row the SAME save already stored.
+type saveArtifactWire struct {
+	SaveArtifactRequest
+	DedupMode string          `json:"dedup_mode"`
+	Attrs     json.RawMessage `json:"attrs,omitempty"`
+}
+
+// sinkReceiptAttrs renders the durable receipt into the attrs JSON the
+// server's replay guard reads (controller_sink_receipt), or nil when the
+// save carries no receipt.
+func sinkReceiptAttrs(req SaveArtifactRequest) (json.RawMessage, error) {
+	if req.SinkReceipt == nil {
+		return nil, nil
+	}
+	return json.Marshal(map[string]any{
+		"controller_sink_receipt": req.SinkReceipt,
+	})
+}
+
+// SaveArtifact stores one methodology artifact through the attempt-authorized
+// POST /v1/memories path and returns the server-assigned immutable identity.
+// Server errors pass through unchanged (structured *APIError included). A nil
+// error with an empty ID is refused here rather than handed back as a triple
+// the server would later reject. A same-receipt replay returns the row the
+// first save already stored — the response shape is identical, so the caller
+// cannot and does not need to tell the two apart.
+func (c *Client) SaveArtifact(ctx context.Context, req SaveArtifactRequest) (SavedArtifact, error) {
+	attrs, err := sinkReceiptAttrs(req)
+	if err != nil {
+		return SavedArtifact{}, fmt.Errorf("encode sink receipt: %w", err)
+	}
+	var out SavedArtifact
+	if err := c.do(ctx, "POST", "/v1/memories", saveArtifactWire{SaveArtifactRequest: req, DedupMode: "off", Attrs: attrs}, &out); err != nil {
+		return SavedArtifact{}, err
+	}
+	if out.ID == "" {
+		return out, fmt.Errorf("aihub: artifact save returned no id")
+	}
+	return out, nil
+}
+
 // Recall calls GET /v1/memories.
 func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any, error) {
 	path := "/v1/memories"
@@ -616,9 +729,30 @@ func (c *Client) Recall(ctx context.Context, params url.Values) (map[string]any,
 // and flags the cut with content_truncated / content_full_len (aihub#244), and
 // this is the escape hatch that PR #245 declared for reading the rest
 // (aihub#269).
+//
+// The body decodes with json.Number semantics (aihub#725 review_fix SF4):
+// this is the workflow artifact READ path — ResolveInputs recomputes the
+// digest over attrs.structured_payload, and the server's record-time twin
+// (resolveCompletedResultArtifact) recomputes it over a UseNumber decode of
+// the stored bytes. A float64 decode here would silently rewrite number
+// literals the server treats as distinct (1.50 → 1.5, or an integer beyond
+// 2^53 rounding away its last digit), so a digest that recorded correctly
+// would fail resolution here and only here. UseNumber keeps the read path in
+// the same number universe as the write path and the server. Callers that
+// just re-serialize the map (pf_get_memory) marshal json.Number values back
+// to the same literals, which is strictly more faithful than float64 was.
 func (c *Client) GetMemory(ctx context.Context, memoryID string) (map[string]any, error) {
+	var raw json.RawMessage
+	if err := c.do(ctx, "GET", "/v1/memories/"+seg(memoryID), nil, &raw); err != nil {
+		return nil, err
+	}
 	var out map[string]any
-	return out, c.do(ctx, "GET", "/v1/memories/"+seg(memoryID), nil, &out)
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode memory: %w", err)
+	}
+	return out, nil
 }
 
 // ActivateMemory calls POST /v1/memories/:id/activate.
